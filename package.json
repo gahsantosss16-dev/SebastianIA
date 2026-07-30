@@ -1,0 +1,28 @@
+{
+  "name": "sebastiania",
+  "version": "1.0.0",
+  "description": "Sebastian IA core project scaffold",
+  "main": "./dist/core/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch ./core/index.ts",
+    "start": "node ./dist/core/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test tests/**/*.test.ts"
+  },
+  "keywords": [
+    "ai",
+    "assistant",
+    "typescript",
+    "tsx"
+  ],
+  "author": "Gabriel dos Santos",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
