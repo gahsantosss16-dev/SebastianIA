@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Estrutura inicial de documentação do projeto.
 - SPEC-006 — Plugin Manager interno com registro, estados, ativação, desativação, rollback e remoção segura.
 - SPEC-007 — Error Handling centralizado com AppError, categorias, severidades, códigos e factory.
+- SPEC-008 — Health Monitor centralizado com HealthStatus, HealthCheck, HealthReport e HealthMonitor.
 
 ## [1.0.0] - 2026-07-30
 
