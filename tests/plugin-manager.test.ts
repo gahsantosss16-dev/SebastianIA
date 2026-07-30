@@ -275,6 +275,32 @@ test('activateAll stops at the first failing plugin', async () => {
   assert.equal(manager.getState('third'), 'registered');
 });
 
+test('activateAll rollback runs in reverse activation order', async () => {
+  const manager = new PluginManager();
+  const calls: string[] = [];
+  const first = new TestPlugin('first', 'First', '1.0.0');
+  const second = new TestPlugin('second', 'Second', '1.0.0');
+  const third = new TestPlugin('third', 'Third', '1.0.0');
+
+  first.activate = async () => { calls.push('activate:first'); };
+  first.deactivate = async () => { calls.push('deactivate:first'); };
+  second.activate = async () => { calls.push('activate:second'); };
+  second.deactivate = async () => { calls.push('deactivate:second'); };
+  third.activate = async () => { calls.push('activate:third'); throw new Error('boom'); };
+  third.deactivate = async () => { calls.push('deactivate:third'); };
+
+  manager.register(first);
+  manager.register(second);
+  manager.register(third);
+
+  await assert.rejects(() => manager.activateAll(), PluginActivationError);
+
+  assert.deepEqual(calls, ['activate:first', 'activate:second', 'activate:third', 'deactivate:second', 'deactivate:first']);
+  assert.equal(manager.getState('first'), 'inactive');
+  assert.equal(manager.getState('second'), 'inactive');
+  assert.equal(manager.getState('third'), 'failed');
+});
+
 test('activateAll rolls back only the plugins activated during the current operation', async () => {
   const manager = new PluginManager();
   const calls: string[] = [];

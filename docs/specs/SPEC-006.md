@@ -84,7 +84,7 @@ A ativação em lote segue a ordem de registro e executa sequencialmente. Se um 
 
 ## rollback
 
-O rollback de activateAll() afeta apenas os plugins ativados durante a operação atual. Plugins já ativos antes da chamada não são desativados.
+O rollback de activateAll() afeta apenas os plugins ativados durante a operação atual. Plugins já ativos antes da chamada não são desativados. A ordem de desativação segue a ordem inversa da ativação realizada pela própria operação.
 
 ## deactivateAll()
 
