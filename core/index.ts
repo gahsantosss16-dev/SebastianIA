@@ -14,3 +14,4 @@ export * from './events/EventTypes.js';
 export * from './container/index.js';
 export * from './lifecycle/index.js';
 export * from './plugins/index.js';
+export * from './errors/index.js';

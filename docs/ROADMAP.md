@@ -23,6 +23,7 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - SPEC-004 — Service Container interno.
 - SPEC-005 — Lifecycle Manager interno.
 - SPEC-006 — Plugin Manager interno.
+- SPEC-007 — Error Handling centralizado.
 
 ## SPECs planejadas
 
