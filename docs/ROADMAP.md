@@ -25,6 +25,7 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - SPEC-006 — Plugin Manager interno.
 - SPEC-007 — Error Handling centralizado.
 - SPEC-008 — Health Monitor centralizado.
+- SPEC-009 — Configuration Manager centralizado.
 
 ## SPECs planejadas
 

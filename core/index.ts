@@ -16,3 +16,4 @@ export * from './lifecycle/index.js';
 export * from './plugins/index.js';
 export * from './errors/index.js';
 export * from './health/index.js';
+export * from './config/index.js';
