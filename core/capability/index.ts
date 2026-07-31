@@ -13,3 +13,5 @@ export * from './CapabilityExecutionPreflightValidator.js';
 export * from './CapabilityExecutionPreflightErrors.js';
 export * from './CapabilityExecutionBundleBuilder.js';
 export * from './CapabilityExecutionBundleErrors.js';
+export * from './CapabilityExecutionGateway.js';
+export * from './CapabilityExecutionGatewayErrors.js';
