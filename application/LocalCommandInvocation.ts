@@ -2,12 +2,17 @@ import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { SebastianCore } from '../core/core.js';
 import type { Logger } from '../core/logger.js';
-import { InvalidLocalCommandArgumentsError } from './LocalCommandInvocationErrors.js';
+import {
+  InvalidLocalCommandArgumentsError,
+  LocalCommandExecutionAndShutdownError,
+  LocalCommandRuntimeShutdownError,
+} from './LocalCommandInvocationErrors.js';
 import { LOCAL_GREETING_COMMAND_TYPE } from './LocalGreetingCapabilityProvider.js';
 import { createSebastianApplication } from './SebastianApplication.js';
 
 interface CommandExecutor {
   executeCommand(input: CommandProcessingInput): CapabilityResult;
+  shutdown(): void;
 }
 
 export interface LocalCommandInvocationDependencies {
@@ -47,7 +52,28 @@ export class LocalCommandInvocationAdapter {
     };
 
     const application = this.createApplication();
-    return application.executeCommand(input);
+    let result: CapabilityResult;
+
+    try {
+      result = application.executeCommand(input);
+    } catch (executionError) {
+      try {
+        application.shutdown();
+      } catch (shutdownError) {
+        throw new LocalCommandExecutionAndShutdownError(executionError, shutdownError);
+      }
+      throw executionError;
+    }
+
+    try {
+      application.shutdown();
+    } catch (shutdownError) {
+      throw new LocalCommandRuntimeShutdownError('Local command runtime shutdown failed.', {
+        cause: shutdownError,
+      });
+    }
+
+    return result;
   }
 
   private validateArgs(args: readonly string[]): void {

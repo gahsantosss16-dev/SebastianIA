@@ -39,6 +39,7 @@ test('adapter maps greeting without name to CommandProcessingInput', () => {
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
+      shutdown: () => undefined,
       executeCommand: (input) => {
         received = input;
         return { ...expectedResult, output: { message: 'Hello!' } };
@@ -60,6 +61,7 @@ test('adapter maps greeting name and executes exactly once', () => {
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
+      shutdown: () => undefined,
       executeCommand: (input) => {
         executionCount += 1;
         assert.deepEqual(input.input, { name: 'Gabriel' });
@@ -109,7 +111,7 @@ test('valid invocation consults the clock exactly once', () => {
       clockCount += 1;
       return fixedDate;
     },
-    createApplication: () => ({ executeCommand: () => expectedResult }),
+    createApplication: () => ({ executeCommand: () => expectedResult, shutdown: () => undefined }),
   });
 
   adapter.execute(['greeting']);
@@ -121,7 +123,7 @@ test('runner writes result JSON only to stdout and returns zero', () => {
   const capture = createOutputCapture();
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
-    createApplication: () => ({ executeCommand: () => expectedResult }),
+    createApplication: () => ({ executeCommand: () => expectedResult, shutdown: () => undefined }),
   });
 
   const exitCode = runLocalCommand(['greeting', 'Gabriel'], capture.output, adapter);
@@ -165,7 +167,7 @@ test('runner normalizes non-Error throwables', () => {
 test('adapter is deterministic with identical arguments and fixed clock', () => {
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
-    createApplication: () => ({ executeCommand: () => expectedResult }),
+    createApplication: () => ({ executeCommand: () => expectedResult, shutdown: () => undefined }),
   });
 
   assert.deepEqual(adapter.execute(['greeting', 'Gabriel']), adapter.execute(['greeting', 'Gabriel']));

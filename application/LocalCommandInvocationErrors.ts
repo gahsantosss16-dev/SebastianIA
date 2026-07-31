@@ -13,3 +13,28 @@ export class InvalidLocalCommandArgumentsError extends AppError {
     });
   }
 }
+
+export class LocalCommandRuntimeShutdownError extends AppError {
+  public constructor(message: string, options: AppErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.OPERATION_FAILED,
+      category: ErrorCategory.SYSTEM,
+      severity: ErrorSeverity.ERROR,
+      ...options,
+    });
+  }
+}
+
+export class LocalCommandExecutionAndShutdownError extends AppError {
+  public readonly shutdownCause: unknown;
+
+  public constructor(executionCause: unknown, shutdownCause: unknown) {
+    super('Local command execution and runtime shutdown both failed.', {
+      code: ErrorCodes.OPERATION_FAILED,
+      category: ErrorCategory.SYSTEM,
+      severity: ErrorSeverity.ERROR,
+      cause: executionCause,
+    });
+    this.shutdownCause = shutdownCause;
+  }
+}
