@@ -9,6 +9,8 @@ export { createCore } from './core.js';
 export * from './CorePipelineIntegrationErrors.js';
 export * from './CorePipelineBootstrap.js';
 export * from './CorePipelineBootstrapErrors.js';
+export * from './CoreOperationalRuntimeBootstrap.js';
+export * from './CoreOperationalRuntimeBootstrapErrors.js';
 export * from './config.js';
 export * from './logger.js';
 export * from './types.js';
