@@ -9,3 +9,5 @@ export * from './CommandCapabilityBinding.js';
 export * from './CommandCapabilityBindingErrors.js';
 export * from './CapabilityInvocationComposer.js';
 export * from './CapabilityInvocationComposerErrors.js';
+export * from './CapabilityExecutionPreflightValidator.js';
+export * from './CapabilityExecutionPreflightErrors.js';
