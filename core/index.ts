@@ -18,3 +18,4 @@ export * from './errors/index.js';
 export * from './health/index.js';
 export * from './config/index.js';
 export * from './memory/index.js';
+export * from './conversation/index.js';
