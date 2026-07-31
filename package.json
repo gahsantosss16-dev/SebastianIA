@@ -8,6 +8,8 @@
   },
   "private": true,
   "scripts": {
+    "prepare": "npm run build",
+    "prestart": "npm run build",
     "dev": "tsx watch ./application/cli.ts",
     "start": "node ./dist/application/cli.js",
     "build": "tsc -p tsconfig.json",

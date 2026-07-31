@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,6 +12,7 @@ const cliPath = resolve(projectRoot, 'application/cli.ts');
 
 interface PackageManifest {
   readonly bin?: Readonly<Record<string, string>>;
+  readonly scripts?: Readonly<Record<string, string>>;
 }
 
 interface PackageLock {
@@ -38,10 +39,45 @@ test('package lock preserves the executable contract', () => {
   });
 });
 
+test('package preparation and start lifecycle delegate to the existing build', () => {
+  const manifest = readJson<PackageManifest>(packageJsonPath);
+
+  assert.equal(manifest.scripts?.prepare, 'npm run build');
+  assert.equal(manifest.scripts?.prestart, 'npm run build');
+  assert.equal(manifest.scripts?.start, 'node ./dist/application/cli.js');
+});
+
 test('CLI source declares the Node shebang', () => {
   const firstLine = readFileSync(cliPath, 'utf8').split(/\r?\n/, 1)[0];
 
   assert.equal(firstLine, '#!/usr/bin/env node');
+});
+
+test('compiled executable exists at the bin target and preserves the shebang', () => {
+  const manifest = readJson<PackageManifest>(packageJsonPath);
+  const binTarget = manifest.bin?.sebastiania;
+  assert.equal(typeof binTarget, 'string');
+
+  const compiledCliPath = resolve(projectRoot, binTarget ?? '');
+  assert.equal(existsSync(compiledCliPath), true);
+  const firstLine = readFileSync(compiledCliPath, 'utf8').split(/\r?\n/, 1)[0];
+  assert.equal(firstLine, '#!/usr/bin/env node');
+});
+
+test('compiled executable runs the nominal greeting contract', () => {
+  const manifest = readJson<PackageManifest>(packageJsonPath);
+  const compiledCliPath = resolve(projectRoot, manifest.bin?.sebastiania ?? '');
+  const execution = spawnSync(process.execPath, [compiledCliPath, 'greeting', 'Gabriel'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+  });
+
+  assert.equal(execution.error, undefined);
+  assert.equal(execution.status, 0);
+  assert.equal(execution.stderr, '');
+  assert.deepEqual(JSON.parse(execution.stdout.trim()).output, {
+    message: 'Hello, Gabriel!',
+  });
 });
 
 test('real CLI process executes a named greeting successfully', () => {
