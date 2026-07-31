@@ -10,6 +10,8 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - Estabelecer a base arquitetural do projeto.
 - Definir o core, configuração, logging e infraestrutura inicial.
 - Preparar o projeto para crescer de forma organizada.
+- Encerramento formal concluido com a SPEC-024 (arquitetura fundamental finalizada).
+- Analise arquitetural para uma possivel SPEC-025 realizada e encerrada sem abertura de nova SPEC por ausencia de lacuna legitima (evitando overengineering).
 
 ### Fase 2 — Expansão
 - Introduzir módulos adicionais de forma incremental.
@@ -31,14 +33,23 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - SPEC-012 — Context Manager funcional e homologado.
 - SPEC-013 — Command Processor funcional e homologado.
 - SPEC-014 — Capability Resolver funcional e homologado.
+- SPEC-015 — Capability Registry implementada e homologada.
+- SPEC-016 — Capability Provisioning Contract implementada e homologada.
+- SPEC-017 — Command Capability Binding implementada e homologada.
+- SPEC-018 — Capability Invocation Composer implementada e homologada.
+- SPEC-019 — Capability Execution Preflight Validator implementada e homologada.
+- SPEC-020 — Capability Execution Bundle Builder implementada e homologada.
+- SPEC-021 — Capability Execution Gateway implementada e homologada.
+- SPEC-022 — Command Capability Execution Coordinator implementada e homologada.
+- SPEC-023 — Command Processing Result Adapter implementada e homologada.
+- SPEC-024 — Command Capability Pipeline Executor implementada e homologada.
 
 ## Status das fases
 
 - Fase 1: concluída e homologada.
-- Fase 2: ainda não iniciada.
+- Fase 2: proxima etapa focada na integracao da arquitetura consolidada ao restante do Sebastian IA.
 
 ## Próximos passos
 
-- Realizar a revisão arquitetural de transição.
-- Definir a SPEC-015 sem ampliar o escopo da Fase 1.
-- Preservar a base estabilizada do Core Foundation.
+- Integrar a arquitetura consolidada da Fase 1 ao restante do Sebastian IA.
+- Preservar as fronteiras arquiteturais homologadas.

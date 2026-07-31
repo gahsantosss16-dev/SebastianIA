@@ -304,4 +304,4 @@ As SPECs 013, 022 e 023 definem os modulos do pipeline em partes, mas ainda nao 
 
 ## Status
 
-Implementada - aguardando homologacao
+Homologada
