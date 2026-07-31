@@ -15,3 +15,5 @@ export * from './CapabilityExecutionBundleBuilder.js';
 export * from './CapabilityExecutionBundleErrors.js';
 export * from './CapabilityExecutionGateway.js';
 export * from './CapabilityExecutionGatewayErrors.js';
+export * from './CommandCapabilityExecutionCoordinator.js';
+export * from './CommandCapabilityExecutionCoordinatorErrors.js';
