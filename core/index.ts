@@ -20,3 +20,4 @@ export * from './config/index.js';
 export * from './memory/index.js';
 export * from './conversation/index.js';
 export * from './context/index.js';
+export * from './command/index.js';
