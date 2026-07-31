@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Sebastian IA core project scaffold",
   "main": "./dist/core/index.js",
+  "bin": {
+    "sebastiania": "./dist/application/cli.js"
+  },
   "private": true,
   "scripts": {
     "dev": "tsx watch ./application/cli.ts",

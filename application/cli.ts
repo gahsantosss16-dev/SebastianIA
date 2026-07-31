@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { runLocalCommand } from './LocalCommandInvocation.js';
 
 process.exitCode = runLocalCommand(process.argv.slice(2), {
