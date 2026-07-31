@@ -1,6 +1,6 @@
 # ARCHITECTURE
 
-Versão: 1.0
+Versão: 1.1
 
 ---
 
@@ -11,6 +11,16 @@ Sebastian IA é composto por módulos independentes.
 Cada módulo possui uma responsabilidade única.
 
 O Core coordena todos eles.
+
+---
+
+# Fase 1 — Core Foundation
+
+A Fase 1 — Core Foundation está concluída e homologada.
+
+Os módulos implementados e validados incluem infraestrutura de core, eventos, container, lifecycle, plugins, erros, health, configuração, memória, conversação, contexto, comando e capability.
+
+A SPEC-014 foi concluída e homologada, encerrando oficialmente a camada de Capability Resolver.
 
 ---
 
@@ -145,3 +155,11 @@ Validação
 ↓
 
 Memória
+
+---
+
+# Próximos passos
+
+A Fase 2 ainda não foi iniciada.
+
+A próxima etapa é a revisão arquitetural de transição e a definição da SPEC-015, sem ampliar o escopo da Fase 1.

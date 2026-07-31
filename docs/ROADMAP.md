@@ -6,7 +6,7 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 
 ## Fases
 
-### Fase 1 — Fundação
+### Fase 1 — Core Foundation
 - Estabelecer a base arquitetural do projeto.
 - Definir o core, configuração, logging e infraestrutura inicial.
 - Preparar o projeto para crescer de forma organizada.
@@ -27,21 +27,18 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - SPEC-008 — Health Monitor centralizado.
 - SPEC-009 — Configuration Manager centralizado.
 - SPEC-010 — Memory Manager funcional e homologado.
-
-## SPECs planejadas
-
-- Evolução do core com novos módulos.
-- Integração de memória e agentes.
-- Expansão da camada de interfaces e automações.
-- Próxima SPEC: ainda não iniciada.
+- SPEC-011 — Conversation Manager funcional e homologado.
+- SPEC-012 — Context Manager funcional e homologado.
+- SPEC-013 — Command Processor funcional e homologado.
+- SPEC-014 — Capability Resolver funcional e homologado.
 
 ## Status das fases
 
-- Fase 1: Em andamento.
-- Fase 2: Planejada.
+- Fase 1: concluída e homologada.
+- Fase 2: ainda não iniciada.
 
 ## Próximos passos
 
-- Consolidar a infraestrutura do core.
-- Expandir a documentação de decisões e evolução do sistema.
-- Preparar a base para módulos futuros.
+- Realizar a revisão arquitetural de transição.
+- Definir a SPEC-015 sem ampliar o escopo da Fase 1.
+- Preservar a base estabilizada do Core Foundation.
