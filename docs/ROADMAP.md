@@ -26,12 +26,14 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - SPEC-007 — Error Handling centralizado.
 - SPEC-008 — Health Monitor centralizado.
 - SPEC-009 — Configuration Manager centralizado.
+- SPEC-010 — Memory Manager funcional e homologado.
 
 ## SPECs planejadas
 
 - Evolução do core com novos módulos.
 - Integração de memória e agentes.
 - Expansão da camada de interfaces e automações.
+- Próxima SPEC: ainda não iniciada.
 
 ## Status das fases
 
