@@ -20,3 +20,8 @@ export interface CapabilityResult {
 }
 
 export type CapabilityHandler = (invocation: CapabilityInvocation) => Record<string, unknown>;
+
+export interface CapabilityRegistration {
+  readonly descriptor: CapabilityDescriptor;
+  readonly handler: CapabilityHandler;
+}
