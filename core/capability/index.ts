@@ -11,3 +11,5 @@ export * from './CapabilityInvocationComposer.js';
 export * from './CapabilityInvocationComposerErrors.js';
 export * from './CapabilityExecutionPreflightValidator.js';
 export * from './CapabilityExecutionPreflightErrors.js';
+export * from './CapabilityExecutionBundleBuilder.js';
+export * from './CapabilityExecutionBundleErrors.js';
