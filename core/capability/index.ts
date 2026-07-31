@@ -7,3 +7,5 @@ export * from './CapabilityProvisioning.js';
 export * from './CapabilityProvisioningErrors.js';
 export * from './CommandCapabilityBinding.js';
 export * from './CommandCapabilityBindingErrors.js';
+export * from './CapabilityInvocationComposer.js';
+export * from './CapabilityInvocationComposerErrors.js';
