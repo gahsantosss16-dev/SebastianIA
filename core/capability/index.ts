@@ -19,3 +19,5 @@ export * from './CommandCapabilityExecutionCoordinator.js';
 export * from './CommandCapabilityExecutionCoordinatorErrors.js';
 export * from './CommandProcessingResultAdapter.js';
 export * from './CommandProcessingResultAdapterErrors.js';
+export * from './CommandCapabilityPipelineExecutor.js';
+export * from './CommandCapabilityPipelineExecutorErrors.js';
