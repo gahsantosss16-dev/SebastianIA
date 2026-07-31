@@ -17,3 +17,5 @@ export * from './CapabilityExecutionGateway.js';
 export * from './CapabilityExecutionGatewayErrors.js';
 export * from './CommandCapabilityExecutionCoordinator.js';
 export * from './CommandCapabilityExecutionCoordinatorErrors.js';
+export * from './CommandProcessingResultAdapter.js';
+export * from './CommandProcessingResultAdapterErrors.js';
