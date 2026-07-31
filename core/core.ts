@@ -5,6 +5,7 @@ import type { CapabilityExecutionBundle } from './capability/CapabilityExecution
 import type { CapabilityResult } from './capability/CapabilityTypes.js';
 import type { CoreContext, CoreLifecycleState, CoreStatus } from './types.js';
 import {
+  CoreCommandOperationalReadinessError,
   CorePipelineDependencyUnavailableError,
   CorePipelineExecutionError,
   InvalidCoreCommandInputError,
@@ -89,6 +90,7 @@ export class SebastianCore {
 
   public executeCommand(input: CommandProcessingInput): CapabilityResult {
     this.validateCommandInput(input);
+    this.validateCommandOperationalReadiness();
 
     const dependencies = this.pipelineDependencies;
     if (!dependencies) {
@@ -133,6 +135,20 @@ export class SebastianCore {
       throw new CorePipelineExecutionError('Core command pipeline execution failed.', {
         cause: error,
       });
+    }
+  }
+
+  private validateCommandOperationalReadiness(): void {
+    const isReady =
+      this.lifecycleState.initialized &&
+      this.lifecycleState.started &&
+      !this.lifecycleState.shutDown &&
+      this.status === 'ready';
+
+    if (!isReady) {
+      throw new CoreCommandOperationalReadinessError(
+        'Core must be initialized, started, not shut down, and ready before command execution.',
+      );
     }
   }
 

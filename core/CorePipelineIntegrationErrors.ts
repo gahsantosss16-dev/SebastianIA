@@ -36,6 +36,15 @@ export class CorePipelineDependencyUnavailableError extends BaseCorePipelineInte
   }
 }
 
+export class CoreCommandOperationalReadinessError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.INVALID_STATE,
+      ...options,
+    });
+  }
+}
+
 export class CorePipelineExecutionError extends BaseCorePipelineIntegrationError {
   public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
     super(message, {
