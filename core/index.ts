@@ -1,9 +1,6 @@
-import { createCore } from './core.js';
+import { createSebastianApplication } from '../application/SebastianApplication.js';
 
-export const core = createCore();
-
-core.initialize();
-core.start();
+export const core = createSebastianApplication();
 
 export { createCore } from './core.js';
 export * from './CorePipelineIntegrationErrors.js';
@@ -27,3 +24,4 @@ export * from './conversation/index.js';
 export * from './context/index.js';
 export * from './command/index.js';
 export * from './capability/index.js';
+export * from '../application/index.js';
