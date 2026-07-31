@@ -5,3 +5,5 @@ export * from './CapabilityRegistry.js';
 export * from './CapabilityRegistryErrors.js';
 export * from './CapabilityProvisioning.js';
 export * from './CapabilityProvisioningErrors.js';
+export * from './CommandCapabilityBinding.js';
+export * from './CommandCapabilityBindingErrors.js';
