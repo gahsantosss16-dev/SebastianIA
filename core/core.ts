@@ -1,6 +1,23 @@
 import { CoreConfigService, type CoreConfig } from './config.js';
 import { createLogger, type Logger } from './logger.js';
+import type { CommandProcessingInput } from './command/CommandTypes.js';
+import type { CapabilityExecutionBundle } from './capability/CapabilityExecutionBundleBuilder.js';
+import type { CapabilityResult } from './capability/CapabilityTypes.js';
 import type { CoreContext, CoreLifecycleState, CoreStatus } from './types.js';
+import {
+  CorePipelineDependencyUnavailableError,
+  CorePipelineExecutionError,
+  InvalidCoreCommandInputError,
+} from './CorePipelineIntegrationErrors.js';
+
+interface CommandCapabilityPipelineExecutorLike {
+  execute(input: CommandProcessingInput, bundle: CapabilityExecutionBundle): CapabilityResult;
+}
+
+export interface CorePipelineDependencies {
+  readonly executor: CommandCapabilityPipelineExecutorLike;
+  readonly bundle: CapabilityExecutionBundle;
+}
 
 export class SebastianCore {
   public readonly name: string;
@@ -10,13 +27,20 @@ export class SebastianCore {
   private readonly configService: CoreConfigService;
   private readonly logger: Logger;
   private readonly lifecycleState: CoreLifecycleState;
+  private readonly pipelineDependencies: CorePipelineDependencies | undefined;
 
-  public constructor(name = 'Sebastian IA', config: Partial<CoreConfig> = {}, logger: Logger = createLogger()) {
+  public constructor(
+    name = 'Sebastian IA',
+    config: Partial<CoreConfig> = {},
+    logger: Logger = createLogger(),
+    pipelineDependencies?: CorePipelineDependencies,
+  ) {
     this.name = name;
     this.createdAt = new Date().toISOString();
     this.status = 'idle';
     this.configService = new CoreConfigService(config);
     this.logger = logger;
+    this.pipelineDependencies = pipelineDependencies;
     this.lifecycleState = {
       initialized: false,
       started: false,
@@ -62,8 +86,81 @@ export class SebastianCore {
   public getConfig(): CoreConfig {
     return this.configService.get();
   }
+
+  public executeCommand(input: CommandProcessingInput): CapabilityResult {
+    this.validateCommandInput(input);
+
+    const dependencies = this.pipelineDependencies;
+    if (!dependencies) {
+      throw new CorePipelineDependencyUnavailableError(
+        'Core pipeline dependencies are not available for command execution.',
+      );
+    }
+
+    const executor = dependencies.executor as unknown as { execute?: unknown };
+    if (!executor || typeof executor.execute !== 'function') {
+      throw new CorePipelineDependencyUnavailableError(
+        'Core command pipeline executor dependency must provide execute.',
+      );
+    }
+
+    const bundle = dependencies.bundle;
+    const isBundleObject = bundle && typeof bundle === 'object' && !Array.isArray(bundle);
+    if (!isBundleObject) {
+      throw new CorePipelineDependencyUnavailableError('Core capability execution bundle dependency must be an object.');
+    }
+
+    if (!Array.isArray(bundle.catalog)) {
+      throw new CorePipelineDependencyUnavailableError(
+        'Core capability execution bundle catalog dependency must be an array.',
+      );
+    }
+
+    const handlersById = bundle.handlersById as unknown as { get?: unknown; has?: unknown };
+    if (!handlersById || typeof handlersById.get !== 'function' || typeof handlersById.has !== 'function') {
+      throw new CorePipelineDependencyUnavailableError(
+        'Core capability execution bundle handlersById dependency must be a read-only map.',
+      );
+    }
+
+    try {
+      return dependencies.executor.execute(input, bundle);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
+
+      throw new CorePipelineExecutionError('Core command pipeline execution failed.', {
+        cause: error,
+      });
+    }
+  }
+
+  private validateCommandInput(input: CommandProcessingInput): void {
+    const isObject = input && typeof input === 'object' && !Array.isArray(input);
+    if (!isObject) {
+      throw new InvalidCoreCommandInputError('Core command input must be an object.');
+    }
+
+    if (typeof input.type !== 'string' || input.type.trim() === '') {
+      throw new InvalidCoreCommandInputError('Core command type must be a non-empty string.');
+    }
+
+    if (!input.input || typeof input.input !== 'object' || Array.isArray(input.input)) {
+      throw new InvalidCoreCommandInputError('Core command input payload must be an object.');
+    }
+
+    if (typeof input.generatedAt !== 'string' || input.generatedAt.trim() === '') {
+      throw new InvalidCoreCommandInputError('Core command generatedAt must be a non-empty string.');
+    }
+  }
 }
 
-export function createCore(name = 'Sebastian IA', config: Partial<CoreConfig> = {}, logger: Logger = createLogger()): SebastianCore {
-  return new SebastianCore(name, config, logger);
+export function createCore(
+  name = 'Sebastian IA',
+  config: Partial<CoreConfig> = {},
+  logger: Logger = createLogger(),
+  pipelineDependencies?: CorePipelineDependencies,
+): SebastianCore {
+  return new SebastianCore(name, config, logger, pipelineDependencies);
 }

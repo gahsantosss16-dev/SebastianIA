@@ -6,6 +6,7 @@ core.initialize();
 core.start();
 
 export { createCore } from './core.js';
+export * from './CorePipelineIntegrationErrors.js';
 export * from './config.js';
 export * from './logger.js';
 export * from './types.js';
