@@ -17,6 +17,7 @@ import {
   InvalidCorePipelineExecutorError,
   InvalidCorePipelineProvidersError,
 } from './CorePipelineBootstrapErrors.js';
+import { InMemoryCommandResultMemoryWriter, type CommandResultMemoryWriter } from './memory/index.js';
 
 export interface CorePipelineBootstrapInput {
   readonly providers: readonly CapabilityProvider[];
@@ -33,6 +34,7 @@ export interface CorePipelineBootstrapFactories {
   readonly buildBindings?: (bindings: readonly CommandCapabilityBinding[]) => CommandCapabilityBindings;
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
+  readonly buildCommandResultMemoryWriter?: () => CommandResultMemoryWriter;
 }
 
 export class CorePipelineBootstrap {
@@ -48,6 +50,8 @@ export class CorePipelineBootstrap {
         factories.buildCoordinator ?? ((bindings) => new CommandCapabilityExecutionCoordinator(bindings)),
       buildExecutor:
         factories.buildExecutor ?? ((coordinator) => new CommandCapabilityPipelineExecutor(coordinator)),
+      buildCommandResultMemoryWriter:
+        factories.buildCommandResultMemoryWriter ?? (() => new InMemoryCommandResultMemoryWriter()),
     };
   }
 
@@ -59,8 +63,9 @@ export class CorePipelineBootstrap {
     const bindings = this.composeBindings(input.bindings, bundle);
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
+    const commandResultMemoryWriter = this.composeCommandResultMemoryWriter();
 
-    return Object.freeze({ executor, bundle });
+    return Object.freeze({ executor, bundle, commandResultMemoryWriter });
   }
 
   private validateInput(input: CorePipelineBootstrapInput): void {
@@ -123,6 +128,18 @@ export class CorePipelineBootstrap {
       return executor;
     } catch (error) {
       throw new InvalidCorePipelineExecutorError('Core pipeline executor is invalid.', { cause: error });
+    }
+  }
+
+  private composeCommandResultMemoryWriter(): CommandResultMemoryWriter {
+    try {
+      const writer = this.factories.buildCommandResultMemoryWriter();
+      if (!writer || typeof writer.write !== 'function') {
+        throw new TypeError('Core command result memory writer must provide write.');
+      }
+      return writer;
+    } catch (error) {
+      throw new CorePipelineBootstrapError('Core command result memory writer composition failed.', { cause: error });
     }
   }
 

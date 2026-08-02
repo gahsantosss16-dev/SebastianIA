@@ -48,6 +48,13 @@ function createCore(execute?: () => never): SebastianCore {
     ? {
         executor: { execute },
         bundle: composeCorePipelineDependencies(composition).bundle,
+        commandResultMemoryWriter: {
+          write: () => ({
+            status: 'recorded' as const,
+            key: 'command-results:greeting:2026-07-31T00:00:00.000Z',
+            recordedAt: '2026-07-31T00:00:00.000Z',
+          }),
+        },
       }
     : composeCorePipelineDependencies(composition);
   return new SebastianCore('Sebastian Test', {}, logger, dependencies);

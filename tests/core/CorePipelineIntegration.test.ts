@@ -13,9 +13,12 @@ import type { CommandProcessingInput } from '../../core/command/CommandTypes.js'
 import { SebastianCore } from '../../core/core.js';
 import {
   CorePipelineDependencyUnavailableError,
+  CoreCommandResultMemoryDependencyUnavailableError,
+  CoreCommandResultMemoryWriteBackError,
   CorePipelineExecutionError,
   InvalidCoreCommandInputError,
 } from '../../core/CorePipelineIntegrationErrors.js';
+import type { CommandResultMemoryWriter } from '../../core/memory/CommandResultMemoryContract.js';
 import { InvalidCommandCapabilityPipelineInputError } from '../../core/capability/CommandCapabilityPipelineExecutorErrors.js';
 
 const greetingDescriptor = {
@@ -57,9 +60,17 @@ function createCoreWithRealPipeline(): SebastianCore {
   const bindings = new CommandCapabilityBindings([{ commandType: 'greeting', capabilityId: 'cap.greeting' }]);
   const coordinator = new CommandCapabilityExecutionCoordinator(bindings);
   const executor = new CommandCapabilityPipelineExecutor(coordinator);
+  const commandResultMemoryWriter: CommandResultMemoryWriter = {
+    write: () => ({
+      status: 'recorded',
+      key: 'command-results:greeting:2026-07-31T00:00:00.000Z',
+      recordedAt: '2026-07-31T00:00:00.000Z',
+    }),
+  };
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandResultMemoryWriter,
   });
   core.initialize();
   core.start();
@@ -120,6 +131,9 @@ test('Core rejects invalid executor dependency contract with typed error', () =>
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor: invalidExecutor,
     bundle,
+    commandResultMemoryWriter: {
+      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
+    },
   } as never);
   core.initialize();
   core.start();
@@ -144,6 +158,9 @@ test('Core propagates typed errors from pipeline executor', () => {
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandResultMemoryWriter: {
+      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
+    },
   });
   core.initialize();
   core.start();
@@ -168,6 +185,9 @@ test('Core wraps non-Error throwables from pipeline executor in typed core error
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandResultMemoryWriter: {
+      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
+    },
   });
   core.initialize();
   core.start();
@@ -205,6 +225,9 @@ test('Core delegates command execution directly to pipeline executor', () => {
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandResultMemoryWriter: {
+      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
+    },
   });
   core.initialize();
   core.start();
@@ -216,6 +239,117 @@ test('Core delegates command execution directly to pipeline executor', () => {
   assert.equal(receivedInput, input);
   assert.equal(receivedBundle, bundle);
   assert.equal(result, expectedResult);
+});
+
+test('Core writes validated command result to memory after successful execution', () => {
+  const bundle = createBundle();
+  let called = false;
+  let captured: unknown;
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const writer: CommandResultMemoryWriter = {
+    write: (input) => {
+      called = true;
+      captured = input;
+      return {
+        status: 'recorded',
+        key: 'command-results:greeting:2026-07-31T00:00:00.000Z',
+        recordedAt: '2026-07-31T01:00:01.000Z',
+      };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandResultMemoryWriter: writer,
+  });
+  core.initialize();
+  core.start();
+
+  const input = createInput();
+  core.executeCommand(input);
+
+  assert.equal(called, true);
+  assert.deepEqual(captured, {
+    executionId: 'greeting:2026-07-31T00:00:00.000Z',
+    commandType: 'greeting',
+    commandGeneratedAt: '2026-07-31T00:00:00.000Z',
+    resultGeneratedAt: '2026-07-31T01:00:00.000Z',
+    resultStatus: 'succeeded',
+    output: { delegated: true },
+    metadata: {
+      conversationId: 'conversation-1',
+      sessionId: 'session-1',
+    },
+  });
+});
+
+test('Core rejects missing memory writer dependency contract with typed error', () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandResultMemoryWriter: {} as never,
+  });
+  core.initialize();
+  core.start();
+
+  assert.throws(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreCommandResultMemoryDependencyUnavailableError);
+      return true;
+    },
+  );
+});
+
+test('Core propagates typed memory write-back failure as typed core write-back error', () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const writer: CommandResultMemoryWriter = {
+    write: () => ({
+      status: 'failed',
+      error: new Error('write-back failed'),
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandResultMemoryWriter: writer,
+  });
+  core.initialize();
+  core.start();
+
+  assert.throws(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreCommandResultMemoryWriteBackError);
+      return true;
+    },
+  );
 });
 
 test('Core command execution is deterministic for identical inputs and bundle', () => {

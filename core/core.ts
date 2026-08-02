@@ -3,9 +3,12 @@ import { createLogger, type Logger } from './logger.js';
 import type { CommandProcessingInput } from './command/CommandTypes.js';
 import type { CapabilityExecutionBundle } from './capability/CapabilityExecutionBundleBuilder.js';
 import type { CapabilityResult } from './capability/CapabilityTypes.js';
+import type { CommandResultMemoryWriter } from './memory/CommandResultMemoryContract.js';
 import type { CoreContext, CoreLifecycleState, CoreStatus } from './types.js';
 import {
   CoreCommandOperationalReadinessError,
+  CoreCommandResultMemoryDependencyUnavailableError,
+  CoreCommandResultMemoryWriteBackError,
   CorePipelineDependencyUnavailableError,
   CorePipelineExecutionError,
   InvalidCoreCommandInputError,
@@ -18,6 +21,7 @@ interface CommandCapabilityPipelineExecutorLike {
 export interface CorePipelineDependencies {
   readonly executor: CommandCapabilityPipelineExecutorLike;
   readonly bundle: CapabilityExecutionBundle;
+  readonly commandResultMemoryWriter: CommandResultMemoryWriter;
 }
 
 export class SebastianCore {
@@ -126,7 +130,9 @@ export class SebastianCore {
     }
 
     try {
-      return dependencies.executor.execute(input, bundle);
+      const result = dependencies.executor.execute(input, bundle);
+      this.writeBackCommandResult(input, result, dependencies.commandResultMemoryWriter);
+      return result;
     } catch (error) {
       if (error instanceof Error) {
         throw error;
@@ -136,6 +142,50 @@ export class SebastianCore {
         cause: error,
       });
     }
+  }
+
+  private writeBackCommandResult(
+    input: CommandProcessingInput,
+    result: CapabilityResult,
+    writer: CommandResultMemoryWriter,
+  ): void {
+    const writerContract = writer as unknown as { write?: unknown };
+    if (!writerContract || typeof writerContract.write !== 'function') {
+      throw new CoreCommandResultMemoryDependencyUnavailableError(
+        'Core command result memory writer dependency must provide write.',
+      );
+    }
+
+    const outcome = writer.write({
+      executionId: `${input.type}:${input.generatedAt}`,
+      commandType: input.type,
+      commandGeneratedAt: input.generatedAt,
+      resultGeneratedAt: result.generatedAt,
+      resultStatus: result.status,
+      output: result.output,
+      metadata: {
+        ...(input.conversation?.conversationId === undefined
+          ? {}
+          : { conversationId: input.conversation.conversationId }),
+        ...(input.session?.sessionId === undefined ? {} : { sessionId: input.session.sessionId }),
+      },
+    });
+
+    if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) {
+      throw new CoreCommandResultMemoryWriteBackError('Core command result memory write-back returned an invalid output.');
+    }
+
+    if (outcome.status === 'recorded') {
+      return;
+    }
+
+    if (outcome.status === 'failed') {
+      throw new CoreCommandResultMemoryWriteBackError('Core command result memory write-back failed.', {
+        cause: outcome.error,
+      });
+    }
+
+    throw new CoreCommandResultMemoryWriteBackError('Core command result memory write-back returned an unsupported status.');
   }
 
   private validateCommandOperationalReadiness(): void {

@@ -53,3 +53,21 @@ export class CorePipelineExecutionError extends BaseCorePipelineIntegrationError
     });
   }
 }
+
+export class CoreCommandResultMemoryDependencyUnavailableError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.INVALID_STATE,
+      ...options,
+    });
+  }
+}
+
+export class CoreCommandResultMemoryWriteBackError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.OPERATION_FAILED,
+      ...options,
+    });
+  }
+}
