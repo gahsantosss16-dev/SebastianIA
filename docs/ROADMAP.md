@@ -11,11 +11,11 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - Definir o core, configuração, logging e infraestrutura inicial.
 - Preparar o projeto para crescer de forma organizada.
 - Encerramento formal concluido com a SPEC-024 (arquitetura fundamental finalizada).
-- Analise arquitetural para uma possivel SPEC-025 realizada e encerrada sem abertura de nova SPEC por ausencia de lacuna legitima (evitando overengineering).
 
 ### Fase 2 — Expansão
 - Introduzir módulos adicionais de forma incremental.
 - Integrar novos componentes conforme a arquitetura definida.
+- Consolidar a integracao operacional do Core com composicao, gate de readiness e observabilidade da execucao.
 
 ## SPECs concluídas
 
@@ -43,13 +43,21 @@ O Sebastian IA é um assistente pessoal inteligente, modular e orientado por pri
 - SPEC-022 — Command Capability Execution Coordinator implementada e homologada.
 - SPEC-023 — Command Processing Result Adapter implementada e homologada.
 - SPEC-024 — Command Capability Pipeline Executor implementada e homologada.
+- SPEC-025 — Core Pipeline Integration Contract implementada (homologacao pendente).
+- SPEC-026 — Core Command Pipeline Bootstrap Composition implementada (homologacao pendente).
+- SPEC-027 — Core Bootstrap to Runtime Assembly Boundary implementada (homologacao pendente).
+- SPEC-028 — Core Runtime Readiness Gate implementada (homologacao pendente).
+- SPEC-029 — Core Command Execution Telemetry Snapshot implementada e homologada.
+- SPEC-030 — Core Command Failure Normalization Boundary implementada e homologada.
+- SPEC-031 — Core Command Policy Guardrail Contract implementada e homologada.
+- SPEC-032 — Core Command Outcome Classification Contract implementada e homologada.
+- SPEC-033 — Core Command Audit Trail Contract implementada e homologada.
 
 ## Status das fases
 
 - Fase 1: concluída e homologada.
-- Fase 2: proxima etapa focada na integracao da arquitetura consolidada ao restante do Sebastian IA.
+- Fase 2: em andamento, com avanço documental até a SPEC-033.
 
 ## Próximos passos
 
-- Integrar a arquitetura consolidada da Fase 1 ao restante do Sebastian IA.
-- Preservar as fronteiras arquiteturais homologadas.
+- Continuar a expansao incremental preservando as fronteiras arquiteturais homologadas.
