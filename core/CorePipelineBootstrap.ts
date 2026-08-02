@@ -22,6 +22,10 @@ import {
   type SpecializedAgent,
 } from './agent/index.js';
 import {
+  InMemorySpecializedTool,
+  type SpecializedTool,
+} from './tool/index.js';
+import {
   InMemoryCommandContextHydrator,
   InMemoryCommandResultMemoryWriter,
   type CommandContextHydrator,
@@ -44,7 +48,8 @@ export interface CorePipelineBootstrapFactories {
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
   readonly buildCommandContextHydrator?: () => CommandContextHydrator;
-  readonly buildSpecializedAgent?: () => SpecializedAgent;
+  readonly buildSpecializedTool?: () => SpecializedTool;
+  readonly buildSpecializedAgent?: (tool: SpecializedTool) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: () => CommandResultMemoryWriter;
 }
 
@@ -63,8 +68,10 @@ export class CorePipelineBootstrap {
         factories.buildExecutor ?? ((coordinator) => new CommandCapabilityPipelineExecutor(coordinator)),
       buildCommandContextHydrator:
         factories.buildCommandContextHydrator ?? (() => new InMemoryCommandContextHydrator()),
+      buildSpecializedTool:
+        factories.buildSpecializedTool ?? (() => new InMemorySpecializedTool()),
       buildSpecializedAgent:
-        factories.buildSpecializedAgent ?? (() => new InMemorySpecializedAgent()),
+        factories.buildSpecializedAgent ?? ((tool) => new InMemorySpecializedAgent(tool)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ?? (() => new InMemoryCommandResultMemoryWriter()),
     };
@@ -79,7 +86,8 @@ export class CorePipelineBootstrap {
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
     const commandContextHydrator = this.composeCommandContextHydrator();
-    const specializedAgent = this.composeSpecializedAgent();
+    const specializedTool = this.composeSpecializedTool();
+    const specializedAgent = this.composeSpecializedAgent(specializedTool);
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter();
 
     return Object.freeze({
@@ -166,9 +174,21 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeSpecializedAgent(): SpecializedAgent {
+  private composeSpecializedTool(): SpecializedTool {
     try {
-      const specializedAgent = this.factories.buildSpecializedAgent();
+      const specializedTool = this.factories.buildSpecializedTool();
+      if (!specializedTool || typeof specializedTool.invoke !== 'function') {
+        throw new TypeError('Core specialized tool must provide invoke.');
+      }
+      return specializedTool;
+    } catch (error) {
+      throw new CorePipelineBootstrapError('Core specialized tool composition failed.', { cause: error });
+    }
+  }
+
+  private composeSpecializedAgent(tool: SpecializedTool): SpecializedAgent {
+    try {
+      const specializedAgent = this.factories.buildSpecializedAgent(tool);
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');
       }

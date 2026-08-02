@@ -133,6 +133,22 @@ test('bootstrap rejects an invalid specialized agent and preserves its validatio
   );
 });
 
+test('bootstrap rejects an invalid specialized tool and preserves its validation cause', () => {
+  const bootstrap = new CorePipelineBootstrap({
+    buildSpecializedTool: () => ({}) as never,
+  });
+
+  assert.throws(
+    () => bootstrap.compose(validInput),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'Core specialized tool composition failed.');
+      assert.ok((error as { cause?: unknown }).cause instanceof TypeError);
+      return true;
+    },
+  );
+});
+
 test('bootstrap composition is deterministic for identical configuration', () => {
   const left = composeCorePipelineDependencies(validInput);
   const right = composeCorePipelineDependencies(validInput);
