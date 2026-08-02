@@ -3,9 +3,12 @@ import { createLogger, type Logger } from './logger.js';
 import type { CommandProcessingInput } from './command/CommandTypes.js';
 import type { CapabilityExecutionBundle } from './capability/CapabilityExecutionBundleBuilder.js';
 import type { CapabilityResult } from './capability/CapabilityTypes.js';
+import type { CommandContextHydrator } from './memory/CommandContextHydrationContract.js';
 import type { CommandResultMemoryWriter } from './memory/CommandResultMemoryContract.js';
 import type { CoreContext, CoreLifecycleState, CoreStatus } from './types.js';
 import {
+  CoreCommandContextHydrationDependencyUnavailableError,
+  CoreCommandContextHydrationError,
   CoreCommandOperationalReadinessError,
   CoreCommandResultMemoryDependencyUnavailableError,
   CoreCommandResultMemoryWriteBackError,
@@ -21,6 +24,7 @@ interface CommandCapabilityPipelineExecutorLike {
 export interface CorePipelineDependencies {
   readonly executor: CommandCapabilityPipelineExecutorLike;
   readonly bundle: CapabilityExecutionBundle;
+  readonly commandContextHydrator: CommandContextHydrator;
   readonly commandResultMemoryWriter: CommandResultMemoryWriter;
 }
 
@@ -130,8 +134,9 @@ export class SebastianCore {
     }
 
     try {
-      const result = dependencies.executor.execute(input, bundle);
-      this.writeBackCommandResult(input, result, dependencies.commandResultMemoryWriter);
+      const hydratedInput = this.hydrateCommandInput(input, dependencies.commandContextHydrator);
+      const result = dependencies.executor.execute(hydratedInput, bundle);
+      this.writeBackCommandResult(hydratedInput, result, dependencies.commandResultMemoryWriter);
       return result;
     } catch (error) {
       if (error instanceof Error) {
@@ -142,6 +147,74 @@ export class SebastianCore {
         cause: error,
       });
     }
+  }
+
+  private hydrateCommandInput(
+    input: CommandProcessingInput,
+    hydrator: CommandContextHydrator,
+  ): CommandProcessingInput {
+    const hydratorContract = hydrator as unknown as { hydrate?: unknown };
+    if (!hydratorContract || typeof hydratorContract.hydrate !== 'function') {
+      throw new CoreCommandContextHydrationDependencyUnavailableError(
+        'Core command context hydrator dependency must provide hydrate.',
+      );
+    }
+
+    const hydration = hydrator.hydrate({
+      commandType: input.type,
+      generatedAt: input.generatedAt,
+      ...(input.conversation?.conversationId === undefined
+        ? {}
+        : { conversationId: input.conversation.conversationId }),
+      ...(input.session?.sessionId === undefined ? {} : { sessionId: input.session.sessionId }),
+    });
+
+    if (!hydration || typeof hydration !== 'object' || Array.isArray(hydration)) {
+      throw new CoreCommandContextHydrationError('Core command context hydration returned an invalid output.');
+    }
+
+    if (hydration.status === 'absent') {
+      return input;
+    }
+
+    if (hydration.status === 'failed') {
+      throw new CoreCommandContextHydrationError('Core command context hydration failed.', {
+        cause: hydration.error,
+      });
+    }
+
+    if (hydration.status !== 'hydrated') {
+      throw new CoreCommandContextHydrationError('Core command context hydration returned an unsupported status.');
+    }
+
+    const hydratedContext = hydration.context;
+    if (!hydratedContext || typeof hydratedContext !== 'object' || Array.isArray(hydratedContext)) {
+      throw new CoreCommandContextHydrationError('Core command context hydration returned an invalid context snapshot.');
+    }
+
+    return {
+      ...input,
+      ...(input.conversation !== undefined
+        ? { conversation: input.conversation }
+        : hydratedContext.conversation === undefined
+          ? {}
+          : { conversation: hydratedContext.conversation }),
+      ...(input.session !== undefined
+        ? { session: input.session }
+        : hydratedContext.session === undefined
+          ? {}
+          : { session: hydratedContext.session }),
+      ...(input.configuration !== undefined
+        ? { configuration: input.configuration }
+        : hydratedContext.configuration === undefined
+          ? {}
+          : { configuration: hydratedContext.configuration }),
+      ...(input.temporary !== undefined
+        ? { temporary: input.temporary }
+        : hydratedContext.temporary === undefined
+          ? {}
+          : { temporary: hydratedContext.temporary }),
+    };
   }
 
   private writeBackCommandResult(

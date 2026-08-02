@@ -48,6 +48,9 @@ function createCore(execute?: () => never): SebastianCore {
     ? {
         executor: { execute },
         bundle: composeCorePipelineDependencies(composition).bundle,
+        commandContextHydrator: {
+          hydrate: () => ({ status: 'absent' as const }),
+        },
         commandResultMemoryWriter: {
           write: () => ({
             status: 'recorded' as const,

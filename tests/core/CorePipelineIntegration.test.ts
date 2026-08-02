@@ -12,14 +12,29 @@ import {
 import type { CommandProcessingInput } from '../../core/command/CommandTypes.js';
 import { SebastianCore } from '../../core/core.js';
 import {
+  CoreCommandContextHydrationDependencyUnavailableError,
+  CoreCommandContextHydrationError,
   CorePipelineDependencyUnavailableError,
   CoreCommandResultMemoryDependencyUnavailableError,
   CoreCommandResultMemoryWriteBackError,
   CorePipelineExecutionError,
   InvalidCoreCommandInputError,
 } from '../../core/CorePipelineIntegrationErrors.js';
+import type { CommandContextHydrator } from '../../core/memory/CommandContextHydrationContract.js';
 import type { CommandResultMemoryWriter } from '../../core/memory/CommandResultMemoryContract.js';
 import { InvalidCommandCapabilityPipelineInputError } from '../../core/capability/CommandCapabilityPipelineExecutorErrors.js';
+
+const successfulHydrator: CommandContextHydrator = {
+  hydrate: () => ({ status: 'absent' }),
+};
+
+const successfulWriteBackWriter: CommandResultMemoryWriter = {
+  write: () => ({
+    status: 'recorded',
+    key: 'command-results:greeting:2026-07-31T00:00:00.000Z',
+    recordedAt: '2026-07-31T00:00:00.000Z',
+  }),
+};
 
 const greetingDescriptor = {
   id: 'cap.greeting',
@@ -60,17 +75,11 @@ function createCoreWithRealPipeline(): SebastianCore {
   const bindings = new CommandCapabilityBindings([{ commandType: 'greeting', capabilityId: 'cap.greeting' }]);
   const coordinator = new CommandCapabilityExecutionCoordinator(bindings);
   const executor = new CommandCapabilityPipelineExecutor(coordinator);
-  const commandResultMemoryWriter: CommandResultMemoryWriter = {
-    write: () => ({
-      status: 'recorded',
-      key: 'command-results:greeting:2026-07-31T00:00:00.000Z',
-      recordedAt: '2026-07-31T00:00:00.000Z',
-    }),
-  };
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
-    commandResultMemoryWriter,
+    commandContextHydrator: successfulHydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
   core.start();
@@ -131,9 +140,8 @@ test('Core rejects invalid executor dependency contract with typed error', () =>
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor: invalidExecutor,
     bundle,
-    commandResultMemoryWriter: {
-      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
-    },
+    commandContextHydrator: successfulHydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
   } as never);
   core.initialize();
   core.start();
@@ -158,9 +166,8 @@ test('Core propagates typed errors from pipeline executor', () => {
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
-    commandResultMemoryWriter: {
-      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
-    },
+    commandContextHydrator: successfulHydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
   core.start();
@@ -185,9 +192,8 @@ test('Core wraps non-Error throwables from pipeline executor in typed core error
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
-    commandResultMemoryWriter: {
-      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
-    },
+    commandContextHydrator: successfulHydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
   core.start();
@@ -225,9 +231,8 @@ test('Core delegates command execution directly to pipeline executor', () => {
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
-    commandResultMemoryWriter: {
-      write: () => ({ status: 'recorded', key: 'ok', recordedAt: '2026-07-31T00:00:00.000Z' }),
-    },
+    commandContextHydrator: successfulHydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
   core.start();
@@ -268,6 +273,7 @@ test('Core writes validated command result to memory after successful execution'
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandContextHydrator: successfulHydrator,
     commandResultMemoryWriter: writer,
   });
   core.initialize();
@@ -304,6 +310,7 @@ test('Core rejects missing memory writer dependency contract with typed error', 
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandContextHydrator: successfulHydrator,
     commandResultMemoryWriter: {} as never,
   });
   core.initialize();
@@ -338,6 +345,7 @@ test('Core propagates typed memory write-back failure as typed core write-back e
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
     executor,
     bundle,
+    commandContextHydrator: successfulHydrator,
     commandResultMemoryWriter: writer,
   });
   core.initialize();
@@ -347,6 +355,163 @@ test('Core propagates typed memory write-back failure as typed core write-back e
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CoreCommandResultMemoryWriteBackError);
+      return true;
+    },
+  );
+});
+
+test('Core hydrates context before pipeline execution when hydration is available', () => {
+  const bundle = createBundle();
+  let receivedInput: CommandProcessingInput | undefined;
+  const executor = {
+    execute: (input: CommandProcessingInput) => {
+      receivedInput = input;
+      return {
+        status: 'succeeded' as const,
+        output: { delegated: true },
+        generatedAt: '2026-07-31T01:00:00.000Z',
+      };
+    },
+  };
+
+  const hydrator: CommandContextHydrator = {
+    hydrate: () => ({
+      status: 'hydrated',
+      context: {
+        conversation: {
+          conversationId: 'conversation-hydrated',
+          messages: [],
+          decisions: [],
+          pendingTasks: [],
+        },
+        session: {
+          conversationId: 'conversation-hydrated',
+          sessionId: 'session-hydrated',
+          messages: [],
+          decisions: [],
+          pendingTasks: [],
+        },
+      },
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: hydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  const input: CommandProcessingInput = {
+    type: 'greeting',
+    input: { message: 'hello' },
+    generatedAt: '2026-07-31T00:00:00.000Z',
+  };
+
+  core.executeCommand(input);
+
+  assert.deepEqual(receivedInput, {
+    ...input,
+    conversation: {
+      conversationId: 'conversation-hydrated',
+      messages: [],
+      decisions: [],
+      pendingTasks: [],
+    },
+    session: {
+      conversationId: 'conversation-hydrated',
+      sessionId: 'session-hydrated',
+      messages: [],
+      decisions: [],
+      pendingTasks: [],
+    },
+  });
+});
+
+test('Core keeps original input when hydration returns absent', () => {
+  const bundle = createBundle();
+  let receivedInput: CommandProcessingInput | undefined;
+  const executor = {
+    execute: (input: CommandProcessingInput) => {
+      receivedInput = input;
+      return {
+        status: 'succeeded' as const,
+        output: { delegated: true },
+        generatedAt: '2026-07-31T01:00:00.000Z',
+      };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  const input = createInput();
+  core.executeCommand(input);
+
+  assert.equal(receivedInput, input);
+});
+
+test('Core rejects missing context hydrator dependency contract with typed error', () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: {} as never,
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  assert.throws(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreCommandContextHydrationDependencyUnavailableError);
+      return true;
+    },
+  );
+});
+
+test('Core propagates typed context hydration failure as typed core hydration error', () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: {
+      hydrate: () => ({ status: 'failed', error: new Error('hydration failed') }),
+    },
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  assert.throws(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreCommandContextHydrationError);
       return true;
     },
   );

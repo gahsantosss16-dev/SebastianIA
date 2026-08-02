@@ -71,3 +71,21 @@ export class CoreCommandResultMemoryWriteBackError extends BaseCorePipelineInteg
     });
   }
 }
+
+export class CoreCommandContextHydrationDependencyUnavailableError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.INVALID_STATE,
+      ...options,
+    });
+  }
+}
+
+export class CoreCommandContextHydrationError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.OPERATION_FAILED,
+      ...options,
+    });
+  }
+}

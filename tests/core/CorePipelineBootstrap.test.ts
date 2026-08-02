@@ -52,6 +52,7 @@ test('bootstrap composes complete Core pipeline dependencies', () => {
   assert.equal(typeof dependencies.executor.execute, 'function');
   assert.equal(dependencies.bundle.catalog.length, 1);
   assert.equal(dependencies.bundle.handlersById.has('handler.greeting'), true);
+  assert.equal(typeof dependencies.commandContextHydrator.hydrate, 'function');
   assert.equal(typeof dependencies.commandResultMemoryWriter.write, 'function');
   assert.equal(Object.isFrozen(dependencies), true);
 });

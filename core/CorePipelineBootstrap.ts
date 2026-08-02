@@ -17,7 +17,12 @@ import {
   InvalidCorePipelineExecutorError,
   InvalidCorePipelineProvidersError,
 } from './CorePipelineBootstrapErrors.js';
-import { InMemoryCommandResultMemoryWriter, type CommandResultMemoryWriter } from './memory/index.js';
+import {
+  InMemoryCommandContextHydrator,
+  InMemoryCommandResultMemoryWriter,
+  type CommandContextHydrator,
+  type CommandResultMemoryWriter,
+} from './memory/index.js';
 
 export interface CorePipelineBootstrapInput {
   readonly providers: readonly CapabilityProvider[];
@@ -34,6 +39,7 @@ export interface CorePipelineBootstrapFactories {
   readonly buildBindings?: (bindings: readonly CommandCapabilityBinding[]) => CommandCapabilityBindings;
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
+  readonly buildCommandContextHydrator?: () => CommandContextHydrator;
   readonly buildCommandResultMemoryWriter?: () => CommandResultMemoryWriter;
 }
 
@@ -50,6 +56,8 @@ export class CorePipelineBootstrap {
         factories.buildCoordinator ?? ((bindings) => new CommandCapabilityExecutionCoordinator(bindings)),
       buildExecutor:
         factories.buildExecutor ?? ((coordinator) => new CommandCapabilityPipelineExecutor(coordinator)),
+      buildCommandContextHydrator:
+        factories.buildCommandContextHydrator ?? (() => new InMemoryCommandContextHydrator()),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ?? (() => new InMemoryCommandResultMemoryWriter()),
     };
@@ -63,9 +71,10 @@ export class CorePipelineBootstrap {
     const bindings = this.composeBindings(input.bindings, bundle);
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
+    const commandContextHydrator = this.composeCommandContextHydrator();
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter();
 
-    return Object.freeze({ executor, bundle, commandResultMemoryWriter });
+    return Object.freeze({ executor, bundle, commandContextHydrator, commandResultMemoryWriter });
   }
 
   private validateInput(input: CorePipelineBootstrapInput): void {
@@ -128,6 +137,18 @@ export class CorePipelineBootstrap {
       return executor;
     } catch (error) {
       throw new InvalidCorePipelineExecutorError('Core pipeline executor is invalid.', { cause: error });
+    }
+  }
+
+  private composeCommandContextHydrator(): CommandContextHydrator {
+    try {
+      const hydrator = this.factories.buildCommandContextHydrator();
+      if (!hydrator || typeof hydrator.hydrate !== 'function') {
+        throw new TypeError('Core command context hydrator must provide hydrate.');
+      }
+      return hydrator;
+    } catch (error) {
+      throw new CorePipelineBootstrapError('Core command context hydrator composition failed.', { cause: error });
     }
   }
 
