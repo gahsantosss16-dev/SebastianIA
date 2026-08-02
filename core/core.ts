@@ -3,6 +3,7 @@ import { createLogger, type Logger } from './logger.js';
 import type { CommandProcessingInput } from './command/CommandTypes.js';
 import type { CapabilityExecutionBundle } from './capability/CapabilityExecutionBundleBuilder.js';
 import type { CapabilityResult } from './capability/CapabilityTypes.js';
+import type { SpecializedAgent } from './agent/SpecializedAgentHandoffContract.js';
 import type { CommandContextHydrator } from './memory/CommandContextHydrationContract.js';
 import type { CommandResultMemoryWriter } from './memory/CommandResultMemoryContract.js';
 import type { CoreContext, CoreLifecycleState, CoreStatus } from './types.js';
@@ -14,6 +15,8 @@ import {
   CoreCommandResultMemoryWriteBackError,
   CorePipelineDependencyUnavailableError,
   CorePipelineExecutionError,
+  CoreSpecializedAgentDependencyUnavailableError,
+  CoreSpecializedAgentHandoffError,
   InvalidCoreCommandInputError,
 } from './CorePipelineIntegrationErrors.js';
 
@@ -25,6 +28,7 @@ export interface CorePipelineDependencies {
   readonly executor: CommandCapabilityPipelineExecutorLike;
   readonly bundle: CapabilityExecutionBundle;
   readonly commandContextHydrator: CommandContextHydrator;
+  readonly specializedAgent: SpecializedAgent;
   readonly commandResultMemoryWriter: CommandResultMemoryWriter;
 }
 
@@ -136,6 +140,7 @@ export class SebastianCore {
     try {
       const hydratedInput = this.hydrateCommandInput(input, dependencies.commandContextHydrator);
       const result = dependencies.executor.execute(hydratedInput, bundle);
+      this.handoffToSpecializedAgent(hydratedInput, result, dependencies.specializedAgent);
       this.writeBackCommandResult(hydratedInput, result, dependencies.commandResultMemoryWriter);
       return result;
     } catch (error) {
@@ -147,6 +152,48 @@ export class SebastianCore {
         cause: error,
       });
     }
+  }
+
+  private handoffToSpecializedAgent(
+    input: CommandProcessingInput,
+    result: CapabilityResult,
+    specializedAgent: SpecializedAgent,
+  ): void {
+    const specializedAgentContract = specializedAgent as unknown as { handoff?: unknown };
+    if (!specializedAgentContract || typeof specializedAgentContract.handoff !== 'function') {
+      throw new CoreSpecializedAgentDependencyUnavailableError(
+        'Core specialized agent dependency must provide handoff.',
+      );
+    }
+
+    const handoffPayload = structuredClone({
+      commandInput: input,
+      commandResult: result,
+    }) as Readonly<Record<string, unknown>>;
+
+    const handoffResult = specializedAgent.handoff({
+      responsibilityId: `capability.execute.${input.type}`,
+      executionId: `${input.type}:${input.generatedAt}`,
+      commandType: input.type,
+      requestedAt: result.generatedAt,
+      payload: handoffPayload,
+    });
+
+    if (!handoffResult || typeof handoffResult !== 'object' || Array.isArray(handoffResult)) {
+      throw new CoreSpecializedAgentHandoffError('Core specialized agent handoff returned an invalid output.');
+    }
+
+    if (handoffResult.status === 'completed') {
+      return;
+    }
+
+    if (handoffResult.status === 'failed') {
+      throw new CoreSpecializedAgentHandoffError('Core specialized agent handoff failed.', {
+        cause: handoffResult.error,
+      });
+    }
+
+    throw new CoreSpecializedAgentHandoffError('Core specialized agent handoff returned an unsupported status.');
   }
 
   private hydrateCommandInput(

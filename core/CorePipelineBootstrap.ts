@@ -18,6 +18,10 @@ import {
   InvalidCorePipelineProvidersError,
 } from './CorePipelineBootstrapErrors.js';
 import {
+  InMemorySpecializedAgent,
+  type SpecializedAgent,
+} from './agent/index.js';
+import {
   InMemoryCommandContextHydrator,
   InMemoryCommandResultMemoryWriter,
   type CommandContextHydrator,
@@ -40,6 +44,7 @@ export interface CorePipelineBootstrapFactories {
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
   readonly buildCommandContextHydrator?: () => CommandContextHydrator;
+  readonly buildSpecializedAgent?: () => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: () => CommandResultMemoryWriter;
 }
 
@@ -58,6 +63,8 @@ export class CorePipelineBootstrap {
         factories.buildExecutor ?? ((coordinator) => new CommandCapabilityPipelineExecutor(coordinator)),
       buildCommandContextHydrator:
         factories.buildCommandContextHydrator ?? (() => new InMemoryCommandContextHydrator()),
+      buildSpecializedAgent:
+        factories.buildSpecializedAgent ?? (() => new InMemorySpecializedAgent()),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ?? (() => new InMemoryCommandResultMemoryWriter()),
     };
@@ -72,9 +79,16 @@ export class CorePipelineBootstrap {
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
     const commandContextHydrator = this.composeCommandContextHydrator();
+    const specializedAgent = this.composeSpecializedAgent();
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter();
 
-    return Object.freeze({ executor, bundle, commandContextHydrator, commandResultMemoryWriter });
+    return Object.freeze({
+      executor,
+      bundle,
+      commandContextHydrator,
+      specializedAgent,
+      commandResultMemoryWriter,
+    });
   }
 
   private validateInput(input: CorePipelineBootstrapInput): void {
@@ -149,6 +163,18 @@ export class CorePipelineBootstrap {
       return hydrator;
     } catch (error) {
       throw new CorePipelineBootstrapError('Core command context hydrator composition failed.', { cause: error });
+    }
+  }
+
+  private composeSpecializedAgent(): SpecializedAgent {
+    try {
+      const specializedAgent = this.factories.buildSpecializedAgent();
+      if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
+        throw new TypeError('Core specialized agent must provide handoff.');
+      }
+      return specializedAgent;
+    } catch (error) {
+      throw new CorePipelineBootstrapError('Core specialized agent composition failed.', { cause: error });
     }
   }
 

@@ -18,14 +18,24 @@ import {
   CoreCommandResultMemoryDependencyUnavailableError,
   CoreCommandResultMemoryWriteBackError,
   CorePipelineExecutionError,
+  CoreSpecializedAgentDependencyUnavailableError,
+  CoreSpecializedAgentHandoffError,
   InvalidCoreCommandInputError,
 } from '../../core/CorePipelineIntegrationErrors.js';
+import type { SpecializedAgent } from '../../core/agent/SpecializedAgentHandoffContract.js';
 import type { CommandContextHydrator } from '../../core/memory/CommandContextHydrationContract.js';
 import type { CommandResultMemoryWriter } from '../../core/memory/CommandResultMemoryContract.js';
 import { InvalidCommandCapabilityPipelineInputError } from '../../core/capability/CommandCapabilityPipelineExecutorErrors.js';
 
 const successfulHydrator: CommandContextHydrator = {
   hydrate: () => ({ status: 'absent' }),
+};
+
+const successfulSpecializedAgent: SpecializedAgent = {
+  handoff: () => ({
+    status: 'completed',
+    output: { acknowledged: true },
+  }),
 };
 
 const successfulWriteBackWriter: CommandResultMemoryWriter = {
@@ -79,6 +89,7 @@ function createCoreWithRealPipeline(): SebastianCore {
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -141,6 +152,7 @@ test('Core rejects invalid executor dependency contract with typed error', () =>
     executor: invalidExecutor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   } as never);
   core.initialize();
@@ -167,6 +179,7 @@ test('Core propagates typed errors from pipeline executor', () => {
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -193,6 +206,7 @@ test('Core wraps non-Error throwables from pipeline executor in typed core error
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -232,6 +246,7 @@ test('Core delegates command execution directly to pipeline executor', () => {
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -244,6 +259,120 @@ test('Core delegates command execution directly to pipeline executor', () => {
   assert.equal(receivedInput, input);
   assert.equal(receivedBundle, bundle);
   assert.equal(result, expectedResult);
+});
+
+test('Core executes a single specialized agent handoff after command execution', () => {
+  const bundle = createBundle();
+  let handoffCount = 0;
+  let handoffPayload: unknown;
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+  const specializedAgent: SpecializedAgent = {
+    handoff: (input) => {
+      handoffCount += 1;
+      handoffPayload = input;
+      return {
+        status: 'completed',
+        output: { delegated: true },
+      };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent,
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  core.executeCommand(createInput());
+
+  assert.equal(handoffCount, 1);
+  assert.deepEqual(handoffPayload, {
+    responsibilityId: 'capability.execute.greeting',
+    executionId: 'greeting:2026-07-31T00:00:00.000Z',
+    commandType: 'greeting',
+    requestedAt: '2026-07-31T01:00:00.000Z',
+    payload: {
+      commandInput: createInput(),
+      commandResult: {
+        status: 'succeeded',
+        output: { delegated: true },
+        generatedAt: '2026-07-31T01:00:00.000Z',
+      },
+    },
+  });
+});
+
+test('Core rejects missing specialized agent dependency contract with typed error', () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {} as never,
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  assert.throws(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreSpecializedAgentDependencyUnavailableError);
+      return true;
+    },
+  );
+});
+
+test('Core propagates specialized agent handoff failure as typed core error', () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: () => ({
+        status: 'failed',
+        error: new Error('handoff failed'),
+      }),
+    },
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  assert.throws(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreSpecializedAgentHandoffError);
+      return true;
+    },
+  );
 });
 
 test('Core writes validated command result to memory after successful execution', () => {
@@ -274,6 +403,7 @@ test('Core writes validated command result to memory after successful execution'
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: writer,
   });
   core.initialize();
@@ -311,6 +441,7 @@ test('Core rejects missing memory writer dependency contract with typed error', 
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: {} as never,
   });
   core.initialize();
@@ -346,6 +477,7 @@ test('Core propagates typed memory write-back failure as typed core write-back e
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: writer,
   });
   core.initialize();
@@ -399,6 +531,7 @@ test('Core hydrates context before pipeline execution when hydration is availabl
     executor,
     bundle,
     commandContextHydrator: hydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -448,6 +581,7 @@ test('Core keeps original input when hydration returns absent', () => {
     executor,
     bundle,
     commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -473,6 +607,7 @@ test('Core rejects missing context hydrator dependency contract with typed error
     executor,
     bundle,
     commandContextHydrator: {} as never,
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();
@@ -503,6 +638,7 @@ test('Core propagates typed context hydration failure as typed core hydration er
     commandContextHydrator: {
       hydrate: () => ({ status: 'failed', error: new Error('hydration failed') }),
     },
+    specializedAgent: successfulSpecializedAgent,
     commandResultMemoryWriter: successfulWriteBackWriter,
   });
   core.initialize();

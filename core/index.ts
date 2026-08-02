@@ -19,6 +19,7 @@ export * from './plugins/index.js';
 export * from './errors/index.js';
 export * from './health/index.js';
 export * from './config/index.js';
+export * from './agent/index.js';
 export * from './memory/index.js';
 export * from './conversation/index.js';
 export * from './context/index.js';

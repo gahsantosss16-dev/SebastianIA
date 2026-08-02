@@ -51,6 +51,12 @@ function createCore(execute?: () => never): SebastianCore {
         commandContextHydrator: {
           hydrate: () => ({ status: 'absent' as const }),
         },
+        specializedAgent: {
+          handoff: () => ({
+            status: 'completed' as const,
+            output: { acknowledged: true },
+          }),
+        },
         commandResultMemoryWriter: {
           write: () => ({
             status: 'recorded' as const,

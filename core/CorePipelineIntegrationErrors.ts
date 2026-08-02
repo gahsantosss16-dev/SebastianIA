@@ -89,3 +89,21 @@ export class CoreCommandContextHydrationError extends BaseCorePipelineIntegratio
     });
   }
 }
+
+export class CoreSpecializedAgentDependencyUnavailableError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.INVALID_STATE,
+      ...options,
+    });
+  }
+}
+
+export class CoreSpecializedAgentHandoffError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.OPERATION_FAILED,
+      ...options,
+    });
+  }
+}

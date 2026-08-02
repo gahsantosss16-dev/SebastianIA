@@ -53,6 +53,7 @@ test('bootstrap composes complete Core pipeline dependencies', () => {
   assert.equal(dependencies.bundle.catalog.length, 1);
   assert.equal(dependencies.bundle.handlersById.has('handler.greeting'), true);
   assert.equal(typeof dependencies.commandContextHydrator.hydrate, 'function');
+  assert.equal(typeof dependencies.specializedAgent.handoff, 'function');
   assert.equal(typeof dependencies.commandResultMemoryWriter.write, 'function');
   assert.equal(Object.isFrozen(dependencies), true);
 });
@@ -111,6 +112,22 @@ test('bootstrap rejects an invalid executor and preserves its validation cause',
     (error: unknown) => {
       assert.ok(error instanceof InvalidCorePipelineExecutorError);
       assert.ok(error.cause instanceof TypeError);
+      return true;
+    },
+  );
+});
+
+test('bootstrap rejects an invalid specialized agent and preserves its validation cause', () => {
+  const bootstrap = new CorePipelineBootstrap({
+    buildSpecializedAgent: () => ({}) as never,
+  });
+
+  assert.throws(
+    () => bootstrap.compose(validInput),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'Core specialized agent composition failed.');
+      assert.ok((error as { cause?: unknown }).cause instanceof TypeError);
       return true;
     },
   );
