@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   LOCAL_GREETING_CAPABILITY_ID,
   LOCAL_GREETING_COMMAND_TYPE,
@@ -9,6 +12,31 @@ import { createSebastianApplication } from '../../application/SebastianApplicati
 import type { CommandProcessingInput } from '../../core/command/index.js';
 import { core as defaultApplicationCore } from '../../core/index.js';
 import type { Logger } from '../../core/logger.js';
+
+function withTempDataDir(run: (dataDir: string) => void): void {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-application-'));
+  try {
+    run(dataDir);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
+function rememberInput(text: string): CommandProcessingInput {
+  return {
+    type: 'remember',
+    input: { text },
+    generatedAt: '2026-08-11T00:00:00.000Z',
+  };
+}
+
+function recallInput(): CommandProcessingInput {
+  return {
+    type: 'recall',
+    input: {},
+    generatedAt: '2026-08-11T00:00:01.000Z',
+  };
+}
 
 const logger: Logger = {
   debug: () => undefined,
@@ -102,5 +130,45 @@ test('default entrypoint exports an operational Core with the local capability',
   assert.equal(defaultApplicationCore.status, 'ready');
   assert.deepEqual(defaultApplicationCore.executeCommand(greetingInput('Sebastian')).output, {
     message: 'Hello, Sebastian!',
+  });
+});
+
+test('without a dataDir, memory does not persist across separate Core instances', () => {
+  const first = createSebastianApplication({ logger });
+  first.executeCommand(rememberInput('prefiro reuniões de manhã'));
+
+  const second = createSebastianApplication({ logger });
+  assert.deepEqual(second.executeCommand(recallInput()).output, {
+    message: 'Nenhuma memória registrada ainda.',
+    facts: [],
+  });
+});
+
+test('with a dataDir, a fact remembered by one Core instance is recalled by a later instance', () => {
+  withTempDataDir((dataDir) => {
+    const writerCore = createSebastianApplication({ logger, dataDir });
+    const rememberResult = writerCore.executeCommand(rememberInput('prefiro reuniões de manhã'));
+    assert.deepEqual(rememberResult.output, { fact: 'prefiro reuniões de manhã' });
+
+    const readerCore = createSebastianApplication({ logger, dataDir });
+    const recallResult = readerCore.executeCommand(recallInput());
+
+    assert.equal(recallResult.output.message, '1 memória(s) registrada(s).');
+    const facts = recallResult.output.facts as ReadonlyArray<{ readonly content: string }>;
+    assert.deepEqual(
+      facts.map((fact) => fact.content),
+      ['prefiro reuniões de manhã'],
+    );
+  });
+});
+
+test('recall on a fresh dataDir with no prior facts reports a clear empty-memory message', () => {
+  withTempDataDir((dataDir) => {
+    const core = createSebastianApplication({ logger, dataDir });
+
+    assert.deepEqual(core.executeCommand(recallInput()).output, {
+      message: 'Nenhuma memória registrada ainda.',
+      facts: [],
+    });
   });
 });

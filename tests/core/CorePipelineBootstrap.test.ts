@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   CorePipelineBootstrap,
   composeCorePipelineDependencies,
 } from '../../core/CorePipelineBootstrap.js';
 import {
+  CorePipelineBootstrapError,
   InvalidCorePipelineBindingsError,
   InvalidCorePipelineBundleError,
   InvalidCorePipelineExecutorError,
@@ -18,6 +22,11 @@ import {
 } from '../../core/capability/index.js';
 import type { CommandProcessingInput } from '../../core/command/index.js';
 import { SebastianCore, type CorePipelineDependencies } from '../../core/core.js';
+import { FileCommandContextHydrator } from '../../core/memory/FileCommandContextHydrator.js';
+import { FileCommandResultMemoryWriter } from '../../core/memory/FileCommandResultMemoryWriter.js';
+import { FileMemoryStore } from '../../core/memory/FileMemoryStore.js';
+import { InMemoryCommandContextHydrator } from '../../core/memory/InMemoryCommandContextHydrator.js';
+import { InMemoryCommandResultMemoryWriter } from '../../core/memory/InMemoryCommandResultMemoryWriter.js';
 
 const descriptor = {
   id: 'cap.greeting',
@@ -174,4 +183,54 @@ test('SebastianCore executes a real command with composed dependencies', () => {
     output: { echoed: { message: 'hello' } },
     generatedAt: '2026-07-31T00:00:00.000Z',
   });
+});
+
+test('bootstrap defaults to in-memory persistence when no memoryFilePath is given', () => {
+  const dependencies = composeCorePipelineDependencies(validInput);
+
+  assert.ok(dependencies.commandContextHydrator instanceof InMemoryCommandContextHydrator);
+  assert.ok(dependencies.commandResultMemoryWriter instanceof InMemoryCommandResultMemoryWriter);
+});
+
+test('bootstrap composes file-backed persistence when memoryFilePath is provided', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-'));
+  try {
+    const memoryFilePath = join(dir, 'memory.json');
+    const dependencies = composeCorePipelineDependencies({ ...validInput, memoryFilePath });
+
+    assert.ok(dependencies.commandContextHydrator instanceof FileCommandContextHydrator);
+    assert.ok(dependencies.commandResultMemoryWriter instanceof FileCommandResultMemoryWriter);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bootstrap rejects a blank memoryFilePath', () => {
+  assert.throws(
+    () => composeCorePipelineDependencies({ ...validInput, memoryFilePath: '   ' }),
+    (error: unknown) => {
+      assert.ok(error instanceof CorePipelineBootstrapError);
+      return true;
+    },
+  );
+});
+
+test('core writes command results through to disk when composed with a memoryFilePath', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-persistence-'));
+  try {
+    const memoryFilePath = join(dir, 'memory.json');
+
+    const dependencies = composeCorePipelineDependencies({ ...validInput, memoryFilePath });
+    const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
+    core.initialize();
+    core.start();
+    core.executeCommand(commandInput());
+
+    const independentStore = new FileMemoryStore(memoryFilePath);
+    const records = independentStore.listRecords('command-results');
+    assert.equal(records.length, 1);
+    assert.equal(records[0]?.commandType, 'greeting');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

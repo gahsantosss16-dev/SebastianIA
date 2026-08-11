@@ -6,3 +6,8 @@ export * from './InMemoryCommandContextHydrator.js';
 export * from './CommandResultMemoryContract.js';
 export * from './CommandResultMemoryContractErrors.js';
 export * from './InMemoryCommandResultMemoryWriter.js';
+export * from './FileMemoryStoreErrors.js';
+export * from './FileMemoryStore.js';
+export * from './FileMemoryStoreLocation.js';
+export * from './FileCommandResultMemoryWriter.js';
+export * from './FileCommandContextHydrator.js';

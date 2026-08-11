@@ -26,6 +26,9 @@ import {
   type SpecializedTool,
 } from './tool/index.js';
 import {
+  FileCommandContextHydrator,
+  FileCommandResultMemoryWriter,
+  FileMemoryStore,
   InMemoryCommandContextHydrator,
   InMemoryCommandResultMemoryWriter,
   type CommandContextHydrator,
@@ -35,6 +38,12 @@ import {
 export interface CorePipelineBootstrapInput {
   readonly providers: readonly CapabilityProvider[];
   readonly bindings: readonly CommandCapabilityBinding[];
+  /**
+   * Absolute path to the local memory file. When provided, the pipeline is
+   * composed with disk-persisted memory adapters instead of the in-memory
+   * ones, so context and command results survive across separate processes.
+   */
+  readonly memoryFilePath?: string;
 }
 
 interface CorePipelineExecutorLike {
@@ -47,10 +56,10 @@ export interface CorePipelineBootstrapFactories {
   readonly buildBindings?: (bindings: readonly CommandCapabilityBinding[]) => CommandCapabilityBindings;
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
-  readonly buildCommandContextHydrator?: () => CommandContextHydrator;
+  readonly buildCommandContextHydrator?: (memoryFilePath: string | undefined) => CommandContextHydrator;
   readonly buildSpecializedTool?: () => SpecializedTool;
   readonly buildSpecializedAgent?: (tool: SpecializedTool) => SpecializedAgent;
-  readonly buildCommandResultMemoryWriter?: () => CommandResultMemoryWriter;
+  readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
 
 export class CorePipelineBootstrap {
@@ -67,13 +76,21 @@ export class CorePipelineBootstrap {
       buildExecutor:
         factories.buildExecutor ?? ((coordinator) => new CommandCapabilityPipelineExecutor(coordinator)),
       buildCommandContextHydrator:
-        factories.buildCommandContextHydrator ?? (() => new InMemoryCommandContextHydrator()),
+        factories.buildCommandContextHydrator ??
+        ((memoryFilePath) =>
+          memoryFilePath === undefined
+            ? new InMemoryCommandContextHydrator()
+            : new FileCommandContextHydrator(new FileMemoryStore(memoryFilePath))),
       buildSpecializedTool:
         factories.buildSpecializedTool ?? (() => new InMemorySpecializedTool()),
       buildSpecializedAgent:
         factories.buildSpecializedAgent ?? ((tool) => new InMemorySpecializedAgent(tool)),
       buildCommandResultMemoryWriter:
-        factories.buildCommandResultMemoryWriter ?? (() => new InMemoryCommandResultMemoryWriter()),
+        factories.buildCommandResultMemoryWriter ??
+        ((memoryFilePath) =>
+          memoryFilePath === undefined
+            ? new InMemoryCommandResultMemoryWriter()
+            : new FileCommandResultMemoryWriter(new FileMemoryStore(memoryFilePath))),
     };
   }
 
@@ -85,10 +102,10 @@ export class CorePipelineBootstrap {
     const bindings = this.composeBindings(input.bindings, bundle);
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
-    const commandContextHydrator = this.composeCommandContextHydrator();
+    const commandContextHydrator = this.composeCommandContextHydrator(input.memoryFilePath);
     const specializedTool = this.composeSpecializedTool();
     const specializedAgent = this.composeSpecializedAgent(specializedTool);
-    const commandResultMemoryWriter = this.composeCommandResultMemoryWriter();
+    const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
     return Object.freeze({
       executor,
@@ -103,6 +120,13 @@ export class CorePipelineBootstrap {
     const isObject = input && typeof input === 'object' && !Array.isArray(input);
     if (!isObject) {
       throw new CorePipelineBootstrapError('Core pipeline bootstrap input must be an object.');
+    }
+
+    if (
+      input.memoryFilePath !== undefined &&
+      (typeof input.memoryFilePath !== 'string' || input.memoryFilePath.trim() === '')
+    ) {
+      throw new CorePipelineBootstrapError('Core pipeline memoryFilePath must be a non-empty string when provided.');
     }
   }
 
@@ -162,9 +186,9 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeCommandContextHydrator(): CommandContextHydrator {
+  private composeCommandContextHydrator(memoryFilePath: string | undefined): CommandContextHydrator {
     try {
-      const hydrator = this.factories.buildCommandContextHydrator();
+      const hydrator = this.factories.buildCommandContextHydrator(memoryFilePath);
       if (!hydrator || typeof hydrator.hydrate !== 'function') {
         throw new TypeError('Core command context hydrator must provide hydrate.');
       }
@@ -198,9 +222,9 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeCommandResultMemoryWriter(): CommandResultMemoryWriter {
+  private composeCommandResultMemoryWriter(memoryFilePath: string | undefined): CommandResultMemoryWriter {
     try {
-      const writer = this.factories.buildCommandResultMemoryWriter();
+      const writer = this.factories.buildCommandResultMemoryWriter(memoryFilePath);
       if (!writer || typeof writer.write !== 'function') {
         throw new TypeError('Core command result memory writer must provide write.');
       }

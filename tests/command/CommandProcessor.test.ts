@@ -136,3 +136,23 @@ test('CommandProcessor produces deterministic results for the same input', () =>
 test('core public entrypoint exposes CommandProcessor', () => {
   assert.equal(typeof CoreCommandProcessor, 'function');
 });
+
+test('CommandProcessor accepts the remember and recall command types', () => {
+  const processor = new CommandProcessor();
+
+  const rememberResult = processor.process({
+    type: 'remember',
+    input: { text: 'prefiro reuniões de manhã' },
+    generatedAt: '2026-08-11T00:00:00.000Z',
+  });
+  const recallResult = processor.process({
+    type: 'recall',
+    input: {},
+    generatedAt: '2026-08-11T00:00:01.000Z',
+  });
+
+  assert.equal(rememberResult.status, 'succeeded');
+  assert.equal(rememberResult.output.type, 'remember');
+  assert.equal(recallResult.status, 'succeeded');
+  assert.equal(recallResult.output.type, 'recall');
+});

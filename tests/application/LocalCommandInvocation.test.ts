@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   LocalCommandInvocationAdapter,
   runLocalCommand,
@@ -7,8 +10,27 @@ import {
 } from '../../application/LocalCommandInvocation.js';
 import { InvalidLocalCommandArgumentsError } from '../../application/LocalCommandInvocationErrors.js';
 import { createSebastianApplication } from '../../application/SebastianApplication.js';
+import { SEBASTIAN_DATA_DIRECTORY_ENV_VAR } from '../../core/memory/index.js';
 import type { CapabilityResult } from '../../core/capability/index.js';
 import type { CommandProcessingInput } from '../../core/command/index.js';
+
+const USAGE_SUMMARY = 'greeting [name] | remember <text> | recall';
+
+function withIsolatedDataDir(run: (dataDir: string) => void): void {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-local-command-invocation-'));
+  const previous = process.env[SEBASTIAN_DATA_DIRECTORY_ENV_VAR];
+  process.env[SEBASTIAN_DATA_DIRECTORY_ENV_VAR] = dataDir;
+  try {
+    run(dataDir);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[SEBASTIAN_DATA_DIRECTORY_ENV_VAR];
+    } else {
+      process.env[SEBASTIAN_DATA_DIRECTORY_ENV_VAR] = previous;
+    }
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+}
 
 const fixedDate = new Date('2026-07-31T12:00:00.000Z');
 const expectedResult: CapabilityResult = {
@@ -142,7 +164,7 @@ test('runner writes typed failure JSON only to stderr and returns one', () => {
   assert.deepEqual(capture.stdout, []);
   assert.deepEqual(JSON.parse(capture.stderr[0] ?? '{}'), {
     name: 'InvalidLocalCommandArgumentsError',
-    message: 'Command type is required. Usage: greeting [name].',
+    message: `Command type is required. Usage: ${USAGE_SUMMARY}.`,
     code: 'INVALID_ARGUMENT',
   });
 });
@@ -174,7 +196,53 @@ test('adapter is deterministic with identical arguments and fixed clock', () => 
 });
 
 test('adapter executes through the real SPEC-029 composition root', () => {
-  const adapter = new LocalCommandInvocationAdapter({ now: () => fixedDate });
+  withIsolatedDataDir(() => {
+    const adapter = new LocalCommandInvocationAdapter({ now: () => fixedDate });
 
-  assert.deepEqual(adapter.execute(['greeting', 'Gabriel']), expectedResult);
+    assert.deepEqual(adapter.execute(['greeting', 'Gabriel']), expectedResult);
+  });
+});
+
+test('adapter rejects a remember command without text', () => {
+  const adapter = new LocalCommandInvocationAdapter();
+
+  assert.throws(() => adapter.execute(['remember']), InvalidLocalCommandArgumentsError);
+  assert.throws(() => adapter.execute(['remember', '   ']), InvalidLocalCommandArgumentsError);
+});
+
+test('adapter rejects a recall command with extra arguments', () => {
+  const adapter = new LocalCommandInvocationAdapter();
+
+  assert.throws(() => adapter.execute(['recall', 'extra']), InvalidLocalCommandArgumentsError);
+});
+
+test('remember persists a fact that a later recall in the same isolated data directory retrieves', () => {
+  withIsolatedDataDir(() => {
+    const adapter = new LocalCommandInvocationAdapter();
+
+    const rememberResult = adapter.execute(['remember', 'prefiro', 'reuniões', 'de', 'manhã']);
+    assert.deepEqual(rememberResult.output, { fact: 'prefiro reuniões de manhã' });
+
+    const recallResult = adapter.execute(['recall']);
+    assert.equal(recallResult.output.message, '1 memória(s) registrada(s).');
+    const facts = recallResult.output.facts as ReadonlyArray<{
+      readonly id: string;
+      readonly content: string;
+      readonly recordedAt: string;
+    }>;
+    assert.equal(facts.length, 1);
+    assert.equal(facts[0]?.content, 'prefiro reuniões de manhã');
+    assert.equal(typeof facts[0]?.id, 'string');
+    assert.equal(Number.isNaN(Date.parse(facts[0]?.recordedAt ?? '')), false);
+  });
+});
+
+test('recall reports a clear message when the isolated memory is still empty', () => {
+  withIsolatedDataDir(() => {
+    const adapter = new LocalCommandInvocationAdapter();
+
+    const recallResult = adapter.execute(['recall']);
+
+    assert.deepEqual(recallResult.output, { message: 'Nenhuma memória registrada ainda.', facts: [] });
+  });
 });
