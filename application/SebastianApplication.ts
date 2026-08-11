@@ -34,14 +34,23 @@ export interface SebastianApplicationOptions {
    * tests and embedders that have not opted into disk persistence).
    */
   readonly dataDir?: string;
+  /**
+   * Root directory the filesystem inspection Tool is allowed to read from.
+   * Defaults to `process.cwd()` - the seam exists so tests and future
+   * hosting environments can isolate or override it explicitly, but it is
+   * never derived from user input.
+   */
+  readonly allowedFilesystemRoot?: string;
 }
 
 export function createSebastianApplication(options: SebastianApplicationOptions = {}): SebastianCore {
   const memoryFilePath = options.dataDir === undefined ? undefined : resolveMemoryFilePath(options.dataDir);
+  const allowedFilesystemRoot = options.allowedFilesystemRoot ?? process.cwd();
 
   const input: CoreOperationalRuntimeBootstrapInput = {
     composition: {
       providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider],
+      allowedFilesystemRoot,
       bindings: [
         {
           commandType: LOCAL_GREETING_COMMAND_TYPE,

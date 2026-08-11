@@ -23,6 +23,8 @@ import {
 } from './agent/index.js';
 import {
   InMemorySpecializedTool,
+  LocalFilesystemInspectionTool,
+  LocalToolDispatcher,
   type SpecializedTool,
 } from './tool/index.js';
 import {
@@ -45,6 +47,13 @@ export interface CorePipelineBootstrapInput {
    * ones, so context and command results survive across separate processes.
    */
   readonly memoryFilePath?: string;
+  /**
+   * Explicit root directory the filesystem inspection Tool is allowed to
+   * read from. Captured by the composing caller (application composition
+   * root, or a test), never derived from user text. Defaults to
+   * `process.cwd()` when omitted.
+   */
+  readonly allowedFilesystemRoot?: string;
 }
 
 interface CorePipelineExecutorLike {
@@ -58,7 +67,7 @@ export interface CorePipelineBootstrapFactories {
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
   readonly buildCommandContextHydrator?: (memoryFilePath: string | undefined) => CommandContextHydrator;
-  readonly buildSpecializedTool?: () => SpecializedTool;
+  readonly buildSpecializedTool?: (allowedFilesystemRoot: string) => SpecializedTool;
   readonly buildModelProvider?: () => ModelProvider;
   readonly buildSpecializedAgent?: (tool: SpecializedTool, modelProvider: ModelProvider) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
@@ -84,7 +93,9 @@ export class CorePipelineBootstrap {
             ? new InMemoryCommandContextHydrator()
             : new FileCommandContextHydrator(new FileMemoryStore(memoryFilePath))),
       buildSpecializedTool:
-        factories.buildSpecializedTool ?? (() => new InMemorySpecializedTool()),
+        factories.buildSpecializedTool ??
+        ((allowedFilesystemRoot) =>
+          new LocalToolDispatcher(new InMemorySpecializedTool(), new LocalFilesystemInspectionTool(allowedFilesystemRoot))),
       buildModelProvider:
         factories.buildModelProvider ?? (() => new DevelopmentModelProvider()),
       buildSpecializedAgent:
@@ -107,7 +118,7 @@ export class CorePipelineBootstrap {
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
     const commandContextHydrator = this.composeCommandContextHydrator(input.memoryFilePath);
-    const specializedTool = this.composeSpecializedTool();
+    const specializedTool = this.composeSpecializedTool(input.allowedFilesystemRoot ?? process.cwd());
     const modelProvider = this.composeModelProvider();
     const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider);
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
@@ -132,6 +143,15 @@ export class CorePipelineBootstrap {
       (typeof input.memoryFilePath !== 'string' || input.memoryFilePath.trim() === '')
     ) {
       throw new CorePipelineBootstrapError('Core pipeline memoryFilePath must be a non-empty string when provided.');
+    }
+
+    if (
+      input.allowedFilesystemRoot !== undefined &&
+      (typeof input.allowedFilesystemRoot !== 'string' || input.allowedFilesystemRoot.trim() === '')
+    ) {
+      throw new CorePipelineBootstrapError(
+        'Core pipeline allowedFilesystemRoot must be a non-empty string when provided.',
+      );
     }
   }
 
@@ -203,9 +223,9 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeSpecializedTool(): SpecializedTool {
+  private composeSpecializedTool(allowedFilesystemRoot: string): SpecializedTool {
     try {
-      const specializedTool = this.factories.buildSpecializedTool();
+      const specializedTool = this.factories.buildSpecializedTool(allowedFilesystemRoot);
       if (!specializedTool || typeof specializedTool.invoke !== 'function') {
         throw new TypeError('Core specialized tool must provide invoke.');
       }

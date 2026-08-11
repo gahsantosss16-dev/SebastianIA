@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -218,6 +218,54 @@ test('a natural language fact is also visible to the rigid recall command, and v
       ['prefiro reuniões de manhã'],
     );
   });
+});
+
+test('converse resolves natural-language filesystem requests against an explicit allowedFilesystemRoot', async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'sebastian-application-fs-'));
+  try {
+    writeFileSync(join(fixtureRoot, 'nota.txt'), 'prefiro reuniões de manhã');
+
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: fixtureRoot });
+
+    const listResult = await core.executeCommand(converseInput('Quais arquivos existem?'));
+    assert.deepEqual(listResult.output, { message: 'Arquivos em ".": nota.txt.' });
+
+    const readResult = await core.executeCommand(converseInput('Leia o arquivo nota.txt'));
+    assert.deepEqual(readResult.output, {
+      message: 'Conteúdo de "nota.txt":\nprefiro reuniões de manhã',
+    });
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('without an explicit allowedFilesystemRoot, converse filesystem access defaults to process.cwd()', async () => {
+  const core = createSebastianApplication({ logger });
+
+  const result = await core.executeCommand(converseInput('Leia o arquivo package.json'));
+
+  const realContent = readFileSync('package.json', 'utf8');
+  assert.deepEqual(result.output, { message: `Conteúdo de "package.json":\n${realContent}` });
+});
+
+test('converse cannot escape the configured allowedFilesystemRoot through traversal', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'sebastian-application-fs-guard-'));
+  try {
+    const root = join(parent, 'projeto');
+    const outside = join(parent, 'fora');
+    mkdirSync(root);
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'segredo.txt'), 'nunca deveria ser lido');
+
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: root });
+    const result = await core.executeCommand(converseInput('Leia o arquivo ../fora/segredo.txt'));
+
+    assert.deepEqual(result.output, {
+      message: 'O caminho "../fora/segredo.txt" está fora da área permitida.',
+    });
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
 });
 
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {

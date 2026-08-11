@@ -239,6 +239,72 @@ test('specialized agent composes a respond finalResult using hydrated remembered
   });
 });
 
+test('specialized agent invokes the Tool with the decided toolId/toolInput for a useTool decision', async () => {
+  let invocationPayload: unknown;
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({
+      intent: 'useTool',
+      toolId: 'fs.listDirectory',
+      toolInput: { path: 'docs/specs' },
+    }),
+  };
+  const agent = new InMemorySpecializedAgent(
+    {
+      invoke: (input) => {
+        invocationPayload = input;
+        return {
+          status: 'completed',
+          output: { operation: 'listDirectory', outcome: 'ok', path: 'docs/specs', message: 'Arquivos em "docs/specs": a.md.' },
+        };
+      },
+    },
+    modelProvider,
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-11T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Quais arquivos existem em docs/specs?' } } },
+  });
+
+  assert.deepEqual(invocationPayload, {
+    toolId: 'fs.listDirectory',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    responsibilityId: 'capability.execute.converse',
+    requestedAt: '2026-08-11T00:00:01.000Z',
+    payload: { path: 'docs/specs' },
+  });
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'Arquivos em "docs/specs": a.md.' });
+});
+
+test('specialized agent propagates an unexpected Tool failure as a failed handoff for a useTool decision', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'useTool', toolId: 'fs.readFile', toolInput: { path: 'x.txt' } }),
+  };
+  const failure = new SpecializedToolInvocationFailureError('unexpected I/O failure');
+  const agent = new InMemorySpecializedAgent({ invoke: () => ({ status: 'failed', error: failure }) }, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-11T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Leia o arquivo x.txt' } } },
+  });
+
+  assert.equal(result.status, 'failed');
+  if (result.status !== 'failed') {
+    assert.fail('Expected failed status.');
+  }
+  assert.equal(result.error, failure);
+});
+
 test('specialized agent rejects a converse handoff with a missing or blank text', async () => {
   const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'respond', answer: 'unused' }) };
   const agent = new InMemorySpecializedAgent(undefined, modelProvider);

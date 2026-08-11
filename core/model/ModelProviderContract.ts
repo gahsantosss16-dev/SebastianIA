@@ -16,9 +16,22 @@ export interface ModelInterpretationRespondDecision {
   readonly answer: string;
 }
 
+/**
+ * A decision to delegate to a specific Tool, identified by a toolId the
+ * Agent recognizes (e.g. the filesystem inspection toolIds). The Core and
+ * the converse capability never see this shape - only the Agent, which owns
+ * the decision of whether and which Tool to invoke.
+ */
+export interface ModelInterpretationUseToolDecision {
+  readonly intent: 'useTool';
+  readonly toolId: string;
+  readonly toolInput: Readonly<Record<string, unknown>>;
+}
+
 export type ModelInterpretationDecision =
   | ModelInterpretationRememberDecision
-  | ModelInterpretationRespondDecision;
+  | ModelInterpretationRespondDecision
+  | ModelInterpretationUseToolDecision;
 
 /**
  * Substitutable boundary for natural-language interpretation. Core never

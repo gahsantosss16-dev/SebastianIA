@@ -133,6 +133,81 @@ test('interpret rejects an invalid request with a typed error', async () => {
   );
 });
 
+test('interpret recognizes the "arquivos existem" marker as a useTool listDirectory decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Quais arquivos existem na pasta docs/specs?',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.listDirectory',
+    toolInput: { path: 'docs/specs' },
+  });
+});
+
+test('interpret defaults the listDirectory path to "." when no path is given', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Quais arquivos existem?',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.listDirectory',
+    toolInput: { path: '.' },
+  });
+});
+
+test('interpret recognizes the "leia o arquivo" marker as a useTool readFile decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Leia o arquivo docs/VISION.md',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.readFile',
+    toolInput: { path: 'docs/VISION.md' },
+  });
+});
+
+test('interpret falls back to a generic response when "leia o arquivo" has no path', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'leia o arquivo   ',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'respond');
+});
+
+test('interpret is deterministic and case-insensitive for the filesystem markers', async () => {
+  const provider = new DevelopmentModelProvider();
+  const request = {
+    text: 'LEIA O ARQUIVO docs/VISION.md',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  };
+
+  const left = await provider.interpret(request);
+  const right = await provider.interpret(request);
+
+  assert.deepEqual(left, right);
+  assert.deepEqual(left, { intent: 'useTool', toolId: 'fs.readFile', toolInput: { path: 'docs/VISION.md' } });
+});
+
 test('interpret never performs network I/O and resolves purely locally', async () => {
   const provider = new DevelopmentModelProvider();
   const start = Date.now();

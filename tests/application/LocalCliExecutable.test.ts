@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,15 @@ function readJson<T>(path: string): T {
   return JSON.parse(readFileSync(path, 'utf8')) as T;
 }
 
+/**
+ * Filesystem inspection tests run with `cwd` set to an isolated fixture
+ * directory (the allowed root seam), which sits outside this project's
+ * `node_modules` - so the tsx-loader entrypoint used elsewhere in this file
+ * cannot resolve. The compiled entrypoint has no such dependency and is
+ * used instead for those tests.
+ */
+const compiledCliPath = resolve(projectRoot, readJson<PackageManifest>(packageJsonPath).bin?.sebastiania ?? '');
+
 function withIsolatedDataDir(run: (dataDir: string) => void): void {
   const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-cli-executable-'));
   try {
@@ -37,6 +46,15 @@ function withIsolatedDataDir(run: (dataDir: string) => void): void {
 
 function isolatedEnv(dataDir: string): NodeJS.ProcessEnv {
   return { ...process.env, [SEBASTIAN_DATA_DIRECTORY_ENV_VAR]: dataDir };
+}
+
+function withIsolatedFixtureRoot(run: (fixtureRoot: string) => void): void {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'sebastian-cli-fs-fixture-'));
+  try {
+    run(fixtureRoot);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 }
 
 test('package exposes the sebastiania executable at the compiled CLI entrypoint', () => {
@@ -282,6 +300,118 @@ test('natural language conversation neither breaks nor is affected by the rigid 
     assert.equal(naturalRespond.status, 0);
     const naturalRespondResult = JSON.parse(naturalRespond.stdout.trim()) as { output: { message: string } };
     assert.equal(typeof naturalRespondResult.output.message, 'string');
+  });
+});
+
+test('a real CLI process lists the real contents of its own working directory via natural language', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      writeFileSync(join(fixtureRoot, 'nota.txt'), 'conteúdo real de teste');
+      mkdirSync(join(fixtureRoot, 'sub'));
+
+      const execution = spawnSync(process.execPath, [compiledCliPath, 'Quais arquivos existem?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as { output: { message: string } };
+      assert.equal(result.output.message, 'Arquivos em ".": nota.txt, sub.');
+    });
+  });
+});
+
+test('a real CLI process reads the real content of a file via natural language', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      writeFileSync(join(fixtureRoot, 'nota.txt'), 'prefiro reuniões de manhã');
+
+      const execution = spawnSync(process.execPath, [compiledCliPath, 'Leia o arquivo nota.txt'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as { output: { message: string } };
+      assert.equal(result.output.message, 'Conteúdo de "nota.txt":\nprefiro reuniões de manhã');
+    });
+  });
+});
+
+test('a real CLI process refuses to read outside its working directory and reports it safely, without crashing', () => {
+  withIsolatedDataDir((dataDir) => {
+    const parent = mkdtempSync(join(tmpdir(), 'sebastian-cli-fs-guard-'));
+    try {
+      const root = join(parent, 'projeto');
+      const outside = join(parent, 'fora');
+      mkdirSync(root);
+      mkdirSync(outside);
+      writeFileSync(join(outside, 'segredo.txt'), 'nunca deveria ser lido');
+
+      const execution = spawnSync(process.execPath, [compiledCliPath, 'Leia o arquivo ../fora/segredo.txt'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as { output: { message: string } };
+      assert.equal(result.output.message, 'O caminho "../fora/segredo.txt" está fora da área permitida.');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+test('filesystem inspection through the real CLI neither breaks nor is affected by greeting, remember and recall', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      const env = isolatedEnv(dataDir);
+      writeFileSync(join(fixtureRoot, 'nota.txt'), 'x');
+
+      const greeting = spawnSync(process.execPath, [compiledCliPath, 'greeting', 'Gabriel'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(greeting.status, 0);
+      assert.deepEqual(JSON.parse(greeting.stdout.trim()).output, { message: 'Hello, Gabriel!' });
+
+      const remember = spawnSync(process.execPath, [compiledCliPath, 'remember', 'prefiro', 'café'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(remember.status, 0);
+
+      const listing = spawnSync(process.execPath, [compiledCliPath, 'Quais arquivos existem?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(listing.status, 0);
+      assert.deepEqual(JSON.parse(listing.stdout.trim()).output, { message: 'Arquivos em ".": nota.txt.' });
+
+      const recall = spawnSync(process.execPath, [compiledCliPath, 'recall'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(recall.status, 0);
+      const recallResult = JSON.parse(recall.stdout.trim()) as { output: { facts: ReadonlyArray<{ content: string }> } };
+      assert.deepEqual(
+        recallResult.output.facts.map((fact) => fact.content),
+        ['prefiro café'],
+      );
+    });
   });
 });
 

@@ -7,7 +7,7 @@ import { InvalidSpecializedAgentHandoffInputError } from './SpecializedAgentHand
 import { InMemorySpecializedTool } from '../tool/InMemorySpecializedTool.js';
 import type { SpecializedTool } from '../tool/SpecializedToolInvocationContract.js';
 import { MEMORY_FACT_RECORD_KIND, type RememberedFactRecord } from '../memory/index.js';
-import type { ModelProvider } from '../model/ModelProviderContract.js';
+import type { ModelInterpretationUseToolDecision, ModelProvider } from '../model/ModelProviderContract.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
@@ -53,6 +53,10 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       requestedAt: input.requestedAt,
     });
 
+    if (decision.intent === 'useTool') {
+      return this.handleToolUse(input, decision);
+    }
+
     const finalResult: Readonly<Record<string, unknown>> =
       decision.intent === 'remember'
         ? { memoryRecordKind: MEMORY_FACT_RECORD_KIND, content: decision.content }
@@ -62,6 +66,48 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       status: 'completed',
       output: { finalResult },
     };
+  }
+
+  /**
+   * The only responsibility branch where the Agent both consults the
+   * ModelProvider and invokes the Tool: the decision identifies which Tool
+   * to use and with what input, the Agent invokes it and turns its
+   * (already user-safe) message into the conversational finalResult. An
+   * unexpected Tool failure propagates as a failed handoff, unchanged from
+   * the existing pass-through failure semantics.
+   */
+  private handleToolUse(
+    input: SpecializedAgentHandoffInput,
+    decision: ModelInterpretationUseToolDecision,
+  ): SpecializedAgentHandoffResult {
+    const toolResult = this.specializedTool.invoke({
+      toolId: decision.toolId,
+      executionId: input.executionId,
+      responsibilityId: input.responsibilityId,
+      requestedAt: input.requestedAt,
+      payload: decision.toolInput,
+    });
+
+    if (!toolResult || typeof toolResult !== 'object' || Array.isArray(toolResult)) {
+      throw new InvalidSpecializedAgentHandoffInputError('Specialized tool invocation returned an invalid output.');
+    }
+
+    if (toolResult.status === 'failed') {
+      return { status: 'failed', error: toolResult.error };
+    }
+
+    if (toolResult.status !== 'completed') {
+      throw new InvalidSpecializedAgentHandoffInputError('Specialized tool invocation returned an unsupported status.');
+    }
+
+    const message = toolResult.output.message;
+    if (typeof message !== 'string' || message.trim() === '') {
+      throw new InvalidSpecializedAgentHandoffInputError(
+        'Specialized tool invocation output must include a non-empty message.',
+      );
+    }
+
+    return { status: 'completed', output: { finalResult: { message } } };
   }
 
   private handleToolDelegation(input: SpecializedAgentHandoffInput): SpecializedAgentHandoffResult {
