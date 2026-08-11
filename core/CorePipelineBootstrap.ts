@@ -34,6 +34,7 @@ import {
   type CommandContextHydrator,
   type CommandResultMemoryWriter,
 } from './memory/index.js';
+import { DevelopmentModelProvider, type ModelProvider } from './model/index.js';
 
 export interface CorePipelineBootstrapInput {
   readonly providers: readonly CapabilityProvider[];
@@ -58,7 +59,8 @@ export interface CorePipelineBootstrapFactories {
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
   readonly buildCommandContextHydrator?: (memoryFilePath: string | undefined) => CommandContextHydrator;
   readonly buildSpecializedTool?: () => SpecializedTool;
-  readonly buildSpecializedAgent?: (tool: SpecializedTool) => SpecializedAgent;
+  readonly buildModelProvider?: () => ModelProvider;
+  readonly buildSpecializedAgent?: (tool: SpecializedTool, modelProvider: ModelProvider) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
 
@@ -83,8 +85,10 @@ export class CorePipelineBootstrap {
             : new FileCommandContextHydrator(new FileMemoryStore(memoryFilePath))),
       buildSpecializedTool:
         factories.buildSpecializedTool ?? (() => new InMemorySpecializedTool()),
+      buildModelProvider:
+        factories.buildModelProvider ?? (() => new DevelopmentModelProvider()),
       buildSpecializedAgent:
-        factories.buildSpecializedAgent ?? ((tool) => new InMemorySpecializedAgent(tool)),
+        factories.buildSpecializedAgent ?? ((tool, modelProvider) => new InMemorySpecializedAgent(tool, modelProvider)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ??
         ((memoryFilePath) =>
@@ -104,7 +108,8 @@ export class CorePipelineBootstrap {
     const executor = this.composeExecutor(coordinator);
     const commandContextHydrator = this.composeCommandContextHydrator(input.memoryFilePath);
     const specializedTool = this.composeSpecializedTool();
-    const specializedAgent = this.composeSpecializedAgent(specializedTool);
+    const modelProvider = this.composeModelProvider();
+    const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider);
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
     return Object.freeze({
@@ -210,9 +215,21 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeSpecializedAgent(tool: SpecializedTool): SpecializedAgent {
+  private composeModelProvider(): ModelProvider {
     try {
-      const specializedAgent = this.factories.buildSpecializedAgent(tool);
+      const modelProvider = this.factories.buildModelProvider();
+      if (!modelProvider || typeof modelProvider.interpret !== 'function') {
+        throw new TypeError('Core model provider must provide interpret.');
+      }
+      return modelProvider;
+    } catch (error) {
+      throw new CorePipelineBootstrapError('Core model provider composition failed.', { cause: error });
+    }
+  }
+
+  private composeSpecializedAgent(tool: SpecializedTool, modelProvider: ModelProvider): SpecializedAgent {
+    try {
+      const specializedAgent = this.factories.buildSpecializedAgent(tool, modelProvider);
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');
       }

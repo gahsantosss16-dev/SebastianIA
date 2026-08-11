@@ -52,7 +52,7 @@ function createCore(execute?: () => never): SebastianCore {
           hydrate: () => ({ status: 'absent' as const }),
         },
         specializedAgent: {
-          handoff: () => ({
+          handoff: async () => ({
             status: 'completed' as const,
             output: { acknowledged: true },
           }),
@@ -69,8 +69,8 @@ function createCore(execute?: () => never): SebastianCore {
   return new SebastianCore('Sebastian Test', {}, logger, dependencies);
 }
 
-function assertReadinessFailure(core: SebastianCore): void {
-  assert.throws(
+async function assertReadinessFailure(core: SebastianCore): Promise<void> {
+  await assert.rejects(
     () => core.executeCommand(input()),
     (error: unknown) => {
       assert.ok(error instanceof CoreCommandOperationalReadinessError);
@@ -79,43 +79,43 @@ function assertReadinessFailure(core: SebastianCore): void {
   );
 }
 
-test('Core rejects commands before initialize', () => {
-  assertReadinessFailure(createCore());
+test('Core rejects commands before initialize', async () => {
+  await assertReadinessFailure(createCore());
 });
 
-test('Core rejects commands after initialize and before start', () => {
+test('Core rejects commands after initialize and before start', async () => {
   const core = createCore();
   core.initialize();
 
-  assertReadinessFailure(core);
+  await assertReadinessFailure(core);
 });
 
-test('Core rejects commands when start occurs without initialize', () => {
+test('Core rejects commands when start occurs without initialize', async () => {
   const core = createCore();
   core.start();
 
-  assertReadinessFailure(core);
+  await assertReadinessFailure(core);
 });
 
-test('Core rejects commands after shutdown', () => {
+test('Core rejects commands after shutdown', async () => {
   const core = createCore();
   core.initialize();
   core.start();
   core.shutdown();
 
-  assertReadinessFailure(core);
+  await assertReadinessFailure(core);
 });
 
-test('Core rejects commands when status is not ready', () => {
+test('Core rejects commands when status is not ready', async () => {
   const core = createCore();
   core.initialize();
   core.start();
   core.status = 'error';
 
-  assertReadinessFailure(core);
+  await assertReadinessFailure(core);
 });
 
-test('readiness rejection does not call executor or mutate input and state', () => {
+test('readiness rejection does not call executor or mutate input and state', async () => {
   let executionCount = 0;
   const core = createCore(() => {
     executionCount += 1;
@@ -125,19 +125,19 @@ test('readiness rejection does not call executor or mutate input and state', () 
   const inputBefore = structuredClone(command);
   const stateBefore = core.getLifecycleState();
 
-  assert.throws(() => core.executeCommand(command), CoreCommandOperationalReadinessError);
+  await assert.rejects(() => core.executeCommand(command), CoreCommandOperationalReadinessError);
 
   assert.equal(executionCount, 0);
   assert.deepEqual(command, inputBefore);
   assert.deepEqual(core.getLifecycleState(), stateBefore);
 });
 
-test('readiness decision is deterministic for the same state', () => {
+test('readiness decision is deterministic for the same state', async () => {
   const core = createCore();
 
-  const capture = (): Error => {
+  const capture = async (): Promise<Error> => {
     try {
-      core.executeCommand(input());
+      await core.executeCommand(input());
       assert.fail('Expected readiness failure.');
     } catch (error) {
       assert.ok(error instanceof Error);
@@ -145,28 +145,28 @@ test('readiness decision is deterministic for the same state', () => {
     }
   };
 
-  const left = capture();
-  const right = capture();
+  const left = await capture();
+  const right = await capture();
   assert.equal(left.constructor, right.constructor);
   assert.equal(left.message, right.message);
 });
 
-test('ready Core executes a command normally', () => {
+test('ready Core executes a command normally', async () => {
   const core = createCore();
   core.initialize();
   core.start();
 
-  assert.deepEqual(core.executeCommand(input()), {
+  assert.deepEqual(await core.executeCommand(input()), {
     status: 'succeeded',
     output: { echoed: { message: 'hello' } },
     generatedAt: '2026-07-31T00:00:00.000Z',
   });
 });
 
-test('SPEC-027 bootstrap returns a Core accepted by the readiness gate', () => {
+test('SPEC-027 bootstrap returns a Core accepted by the readiness gate', async () => {
   const core = bootstrapCoreOperationalRuntime({ composition, logger });
 
-  assert.deepEqual(core.executeCommand(input()), {
+  assert.deepEqual(await core.executeCommand(input()), {
     status: 'succeeded',
     output: { echoed: { message: 'hello' } },
     generatedAt: '2026-07-31T00:00:00.000Z',

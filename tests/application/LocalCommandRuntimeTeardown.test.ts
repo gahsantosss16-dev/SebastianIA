@@ -40,12 +40,12 @@ function outputCapture(): { output: LocalCommandProcessOutput; stdout: string[];
   };
 }
 
-test('adapter executes then shuts down exactly once before returning result', () => {
+test('adapter executes then shuts down exactly once before returning result', async () => {
   const events: string[] = [];
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
-      executeCommand: () => {
+      executeCommand: async () => {
         events.push('execute');
         return result;
       },
@@ -53,17 +53,17 @@ test('adapter executes then shuts down exactly once before returning result', ()
     }),
   });
 
-  assert.equal(adapter.execute(['greeting']), result);
+  assert.equal(await adapter.execute(['greeting']), result);
   assert.deepEqual(events, ['execute', 'shutdown']);
 });
 
-test('execution failure still shuts down exactly once and preserves original failure', () => {
+test('execution failure still shuts down exactly once and preserves original failure', async () => {
   const executionFailure = new Error('execution failure');
   let shutdownCount = 0;
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
-      executeCommand: () => {
+      executeCommand: async () => {
         throw executionFailure;
       },
       shutdown: () => {
@@ -72,23 +72,23 @@ test('execution failure still shuts down exactly once and preserves original fai
     }),
   });
 
-  assert.throws(() => adapter.execute(['greeting']), (error) => error === executionFailure);
+  await assert.rejects(() => adapter.execute(['greeting']), (error) => error === executionFailure);
   assert.equal(shutdownCount, 1);
 });
 
-test('shutdown failure after success is typed and preserves cause', () => {
+test('shutdown failure after success is typed and preserves cause', async () => {
   const shutdownFailure = new Error('shutdown failure');
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
-      executeCommand: () => result,
+      executeCommand: async () => result,
       shutdown: () => {
         throw shutdownFailure;
       },
     }),
   });
 
-  assert.throws(
+  await assert.rejects(
     () => adapter.execute(['greeting']),
     (error: unknown) => {
       assert.ok(error instanceof LocalCommandRuntimeShutdownError);
@@ -98,13 +98,13 @@ test('shutdown failure after success is typed and preserves cause', () => {
   );
 });
 
-test('combined execution and shutdown failure preserves both causes', () => {
+test('combined execution and shutdown failure preserves both causes', async () => {
   const executionFailure = new Error('execution failure');
   const shutdownFailure = new Error('shutdown failure');
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
-      executeCommand: () => {
+      executeCommand: async () => {
         throw executionFailure;
       },
       shutdown: () => {
@@ -113,7 +113,7 @@ test('combined execution and shutdown failure preserves both causes', () => {
     }),
   });
 
-  assert.throws(
+  await assert.rejects(
     () => adapter.execute(['greeting']),
     (error: unknown) => {
       assert.ok(error instanceof LocalCommandExecutionAndShutdownError);
@@ -124,11 +124,11 @@ test('combined execution and shutdown failure preserves both causes', () => {
   );
 });
 
-test('combined failure preserves non-Error causes', () => {
+test('combined failure preserves non-Error causes', async () => {
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
-      executeCommand: () => {
+      executeCommand: async () => {
         throw 'execution throwable';
       },
       shutdown: () => {
@@ -137,7 +137,7 @@ test('combined failure preserves non-Error causes', () => {
     }),
   });
 
-  assert.throws(
+  await assert.rejects(
     () => adapter.execute(['greeting']),
     (error: unknown) => {
       assert.ok(error instanceof LocalCommandExecutionAndShutdownError);
@@ -148,14 +148,14 @@ test('combined failure preserves non-Error causes', () => {
   );
 });
 
-test('invalid arguments do not create or shut down a runtime', () => {
+test('invalid arguments do not create or shut down a runtime', async () => {
   let creationCount = 0;
   let shutdownCount = 0;
   const adapter = new LocalCommandInvocationAdapter({
     createApplication: () => {
       creationCount += 1;
       return {
-        executeCommand: () => result,
+        executeCommand: async () => result,
         shutdown: () => {
           shutdownCount += 1;
         },
@@ -163,38 +163,38 @@ test('invalid arguments do not create or shut down a runtime', () => {
     },
   });
 
-  assert.throws(() => adapter.execute([]), InvalidLocalCommandArgumentsError);
+  await assert.rejects(() => adapter.execute([]), InvalidLocalCommandArgumentsError);
   assert.equal(creationCount, 0);
   assert.equal(shutdownCount, 0);
 });
 
-test('runner emits no stdout and returns one when shutdown fails', () => {
+test('runner emits no stdout and returns one when shutdown fails', async () => {
   const capture = outputCapture();
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => ({
-      executeCommand: () => result,
+      executeCommand: async () => result,
       shutdown: () => {
         throw new Error('shutdown failure');
       },
     }),
   });
 
-  const exitCode = runLocalCommand(['greeting'], capture.output, adapter);
+  const exitCode = await runLocalCommand(['greeting'], capture.output, adapter);
 
   assert.equal(exitCode, 1);
   assert.deepEqual(capture.stdout, []);
   assert.equal(JSON.parse(capture.stderr[0] ?? '{}').name, 'LocalCommandRuntimeShutdownError');
 });
 
-test('real SPEC-029 runtime is shut down after invocation', () => {
+test('real SPEC-029 runtime is shut down after invocation', async () => {
   const core = createSebastianApplication({ logger });
   const adapter = new LocalCommandInvocationAdapter({
     now: () => fixedDate,
     createApplication: () => core,
   });
 
-  assert.deepEqual(adapter.execute(['greeting']).output, { message: 'Hello!' });
+  assert.deepEqual((await adapter.execute(['greeting'])).output, { message: 'Hello!' });
   assert.deepEqual(core.getLifecycleState(), {
     initialized: true,
     started: true,
@@ -203,20 +203,20 @@ test('real SPEC-029 runtime is shut down after invocation', () => {
   assert.equal(core.status, 'idle');
 });
 
-test('teardown behavior is deterministic for equivalent runtimes', () => {
-  const execute = (): { returned: CapabilityResult; shutdownCount: number } => {
+test('teardown behavior is deterministic for equivalent runtimes', async () => {
+  const execute = async (): Promise<{ returned: CapabilityResult; shutdownCount: number }> => {
     let shutdownCount = 0;
     const adapter = new LocalCommandInvocationAdapter({
       now: () => fixedDate,
       createApplication: () => ({
-        executeCommand: () => result,
+        executeCommand: async () => result,
         shutdown: () => {
           shutdownCount += 1;
         },
       }),
     });
-    return { returned: adapter.execute(['greeting']), shutdownCount };
+    return { returned: await adapter.execute(['greeting']), shutdownCount };
   };
 
-  assert.deepEqual(execute(), execute());
+  assert.deepEqual(await execute(), await execute());
 });

@@ -11,7 +11,7 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const packageJsonPath = resolve(projectRoot, 'package.json');
 const packageLockPath = resolve(projectRoot, 'package-lock.json');
 const cliPath = resolve(projectRoot, 'application/cli.ts');
-const USAGE_SUMMARY = 'greeting [name] | remember <text> | recall';
+const USAGE_SUMMARY = 'greeting [name] | remember <text> | recall | "<free text>"';
 
 interface PackageManifest {
   readonly bin?: Readonly<Record<string, string>>;
@@ -195,5 +195,126 @@ test('recall from a real CLI process against a data directory that never receive
       output: { message: string; facts: readonly unknown[] };
     };
     assert.deepEqual(recallResult.output, { message: 'Nenhuma memória registrada ainda.', facts: [] });
+  });
+});
+
+test('a fact remembered via natural language in one real process is used to answer a natural language question in a later, separate real process', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    const rememberProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Sebastian, lembra que prefiro reuniões de manhã'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+
+    assert.equal(rememberProcess.error, undefined);
+    assert.equal(rememberProcess.status, 0);
+    assert.equal(rememberProcess.stderr, '');
+    const rememberResult = JSON.parse(rememberProcess.stdout.trim()) as {
+      output: { memoryRecordKind: string; content: string };
+    };
+    assert.deepEqual(rememberResult.output, {
+      memoryRecordKind: 'sebastian.memory.fact',
+      content: 'prefiro reuniões de manhã',
+    });
+
+    const respondProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Qual', 'horário', 'eu', 'prefiro', 'para', 'reuniões?'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+
+    assert.equal(respondProcess.error, undefined);
+    assert.equal(respondProcess.status, 0);
+    assert.equal(respondProcess.stderr, '');
+    const respondResult = JSON.parse(respondProcess.stdout.trim()) as { output: { message: string } };
+    assert.deepEqual(respondResult.output, {
+      message: 'Sobre isso, você registrou: "prefiro reuniões de manhã".',
+    });
+
+    // Two independent spawnSync invocations are always distinct OS processes with
+    // their own PIDs - asserting both are defined and different is the concrete,
+    // checkable proof that this is not the same process reusing in-memory state.
+    assert.equal(typeof rememberProcess.pid, 'number');
+    assert.equal(typeof respondProcess.pid, 'number');
+    assert.notEqual(rememberProcess.pid, respondProcess.pid);
+  });
+});
+
+test('natural language conversation neither breaks nor is affected by the rigid remember/recall commands sharing the same memory file', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    const naturalRemember = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Sebastian, lembra que prefiro reuniões de manhã'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(naturalRemember.status, 0);
+
+    const rigidRecall = spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'recall'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(rigidRecall.status, 0);
+    const rigidRecallResult = JSON.parse(rigidRecall.stdout.trim()) as {
+      output: { facts: ReadonlyArray<{ content: string }> };
+    };
+    assert.deepEqual(
+      rigidRecallResult.output.facts.map((fact) => fact.content),
+      ['prefiro reuniões de manhã'],
+    );
+
+    const rigidRemember = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'remember', 'gosto', 'de', 'café'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(rigidRemember.status, 0);
+
+    const naturalRespond = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'O', 'que', 'você', 'sabe', 'sobre', 'mim?'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(naturalRespond.status, 0);
+    const naturalRespondResult = JSON.parse(naturalRespond.stdout.trim()) as { output: { message: string } };
+    assert.equal(typeof naturalRespondResult.output.message, 'string');
+  });
+});
+
+test('greeting, remember and recall remain fully functional through the real CLI after the converse evolution', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    const greeting = spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'greeting', 'Gabriel'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(greeting.status, 0);
+    assert.deepEqual(JSON.parse(greeting.stdout.trim()).output, { message: 'Hello, Gabriel!' });
+
+    const remember = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'remember', 'prefiro', 'café'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(remember.status, 0);
+    assert.deepEqual(JSON.parse(remember.stdout.trim()).output, { fact: 'prefiro café' });
+
+    const recall = spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'recall'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(recall.status, 0);
+    const recallResult = JSON.parse(recall.stdout.trim()) as { output: { facts: ReadonlyArray<{ content: string }> } };
+    assert.deepEqual(
+      recallResult.output.facts.map((fact) => fact.content),
+      ['prefiro café'],
+    );
   });
 });

@@ -21,5 +21,5 @@ export type SpecializedAgentHandoffResult =
   | SpecializedAgentHandoffFailure;
 
 export interface SpecializedAgent {
-  handoff(input: SpecializedAgentHandoffInput): SpecializedAgentHandoffResult;
+  handoff(input: SpecializedAgentHandoffInput): Promise<SpecializedAgentHandoffResult>;
 }

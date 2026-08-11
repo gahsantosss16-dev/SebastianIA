@@ -18,6 +18,11 @@ import {
   MEMORY_REMEMBER_CAPABILITY_ID,
   localMemoryCapabilityProvider,
 } from './LocalMemoryCapabilityProvider.js';
+import {
+  CONVERSE_CAPABILITY_ID,
+  LOCAL_CONVERSE_COMMAND_TYPE,
+  localConverseCapabilityProvider,
+} from './LocalConverseCapabilityProvider.js';
 
 export interface SebastianApplicationOptions {
   readonly name?: string;
@@ -36,7 +41,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
 
   const input: CoreOperationalRuntimeBootstrapInput = {
     composition: {
-      providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider],
+      providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider],
       bindings: [
         {
           commandType: LOCAL_GREETING_COMMAND_TYPE,
@@ -49,6 +54,10 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
         {
           commandType: LOCAL_MEMORY_RECALL_COMMAND_TYPE,
           capabilityId: MEMORY_RECALL_CAPABILITY_ID,
+        },
+        {
+          commandType: LOCAL_CONVERSE_COMMAND_TYPE,
+          capabilityId: CONVERSE_CAPABILITY_ID,
         },
       ],
       ...(memoryFilePath === undefined ? {} : { memoryFilePath }),

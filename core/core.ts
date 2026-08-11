@@ -16,6 +16,7 @@ import {
   CorePipelineDependencyUnavailableError,
   CorePipelineExecutionError,
   CoreSpecializedAgentDependencyUnavailableError,
+  CoreSpecializedAgentFinalResultInvalidError,
   CoreSpecializedAgentHandoffError,
   InvalidCoreCommandInputError,
 } from './CorePipelineIntegrationErrors.js';
@@ -100,7 +101,7 @@ export class SebastianCore {
     return this.configService.get();
   }
 
-  public executeCommand(input: CommandProcessingInput): CapabilityResult {
+  public async executeCommand(input: CommandProcessingInput): Promise<CapabilityResult> {
     this.validateCommandInput(input);
     this.validateCommandOperationalReadiness();
 
@@ -140,9 +141,9 @@ export class SebastianCore {
     try {
       const hydratedInput = this.hydrateCommandInput(input, dependencies.commandContextHydrator);
       const result = dependencies.executor.execute(hydratedInput, bundle);
-      this.handoffToSpecializedAgent(hydratedInput, result, dependencies.specializedAgent);
-      this.writeBackCommandResult(hydratedInput, result, dependencies.commandResultMemoryWriter);
-      return result;
+      const effectiveResult = await this.handoffToSpecializedAgent(hydratedInput, result, dependencies.specializedAgent);
+      this.writeBackCommandResult(hydratedInput, effectiveResult, dependencies.commandResultMemoryWriter);
+      return effectiveResult;
     } catch (error) {
       if (error instanceof Error) {
         throw error;
@@ -154,11 +155,11 @@ export class SebastianCore {
     }
   }
 
-  private handoffToSpecializedAgent(
+  private async handoffToSpecializedAgent(
     input: CommandProcessingInput,
     result: CapabilityResult,
     specializedAgent: SpecializedAgent,
-  ): void {
+  ): Promise<CapabilityResult> {
     const specializedAgentContract = specializedAgent as unknown as { handoff?: unknown };
     if (!specializedAgentContract || typeof specializedAgentContract.handoff !== 'function') {
       throw new CoreSpecializedAgentDependencyUnavailableError(
@@ -171,7 +172,7 @@ export class SebastianCore {
       commandResult: result,
     }) as Readonly<Record<string, unknown>>;
 
-    const handoffResult = specializedAgent.handoff({
+    const handoffResult = await specializedAgent.handoff({
       responsibilityId: `capability.execute.${input.type}`,
       executionId: `${input.type}:${input.generatedAt}`,
       commandType: input.type,
@@ -184,7 +185,7 @@ export class SebastianCore {
     }
 
     if (handoffResult.status === 'completed') {
-      return;
+      return this.resolveEffectiveResult(result, handoffResult.output);
     }
 
     if (handoffResult.status === 'failed') {
@@ -194,6 +195,34 @@ export class SebastianCore {
     }
 
     throw new CoreSpecializedAgentHandoffError('Core specialized agent handoff returned an unsupported status.');
+  }
+
+  /**
+   * Opt-in seam: when the Agent's handoff output carries a `finalResult`
+   * property, it becomes the effective result used for both the response to
+   * the caller and the memory write-back. This is generic and structural -
+   * Core never inspects the command type to decide whether to apply it, so
+   * it works for any future capability, not only `converse`. When
+   * `finalResult` is absent, behavior is unchanged: the capability's own
+   * result stands, exactly as before this seam existed.
+   */
+  private resolveEffectiveResult(
+    result: CapabilityResult,
+    agentOutput: Readonly<Record<string, unknown>>,
+  ): CapabilityResult {
+    const finalResult = agentOutput.finalResult;
+    if (finalResult === undefined) {
+      return result;
+    }
+
+    const isValidFinalResult = finalResult !== null && typeof finalResult === 'object' && !Array.isArray(finalResult);
+    if (!isValidFinalResult) {
+      throw new CoreSpecializedAgentFinalResultInvalidError(
+        'Core specialized agent finalResult must be a plain object when provided.',
+      );
+    }
+
+    return { ...result, output: finalResult as Readonly<Record<string, unknown>> };
   }
 
   private hydrateCommandInput(

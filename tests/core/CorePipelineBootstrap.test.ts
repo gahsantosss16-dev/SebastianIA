@@ -170,13 +170,13 @@ test('bootstrap composition is deterministic for identical configuration', () =>
   assert.equal(left.executor.constructor, right.executor.constructor);
 });
 
-test('SebastianCore executes a real command with composed dependencies', () => {
+test('SebastianCore executes a real command with composed dependencies', async () => {
   const dependencies: CorePipelineDependencies = composeCorePipelineDependencies(validInput);
   const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
   core.initialize();
   core.start();
 
-  const result = core.executeCommand(commandInput());
+  const result = await core.executeCommand(commandInput());
 
   assert.deepEqual(result, {
     status: 'succeeded',
@@ -215,7 +215,7 @@ test('bootstrap rejects a blank memoryFilePath', () => {
   );
 });
 
-test('core writes command results through to disk when composed with a memoryFilePath', () => {
+test('core writes command results through to disk when composed with a memoryFilePath', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-persistence-'));
   try {
     const memoryFilePath = join(dir, 'memory.json');
@@ -224,7 +224,7 @@ test('core writes command results through to disk when composed with a memoryFil
     const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
     core.initialize();
     core.start();
-    core.executeCommand(commandInput());
+    await core.executeCommand(commandInput());
 
     const independentStore = new FileMemoryStore(memoryFilePath);
     const records = independentStore.listRecords('command-results');
@@ -233,4 +233,43 @@ test('core writes command results through to disk when composed with a memoryFil
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('bootstrap rejects an invalid model provider and preserves its validation cause', () => {
+  const bootstrap = new CorePipelineBootstrap({
+    buildModelProvider: () => ({}) as never,
+  });
+
+  assert.throws(
+    () => bootstrap.compose(validInput),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'Core model provider composition failed.');
+      assert.ok((error as { cause?: unknown }).cause instanceof TypeError);
+      return true;
+    },
+  );
+});
+
+test('default composition wires a real, working ModelProvider into the specialized agent', async () => {
+  const dependencies = composeCorePipelineDependencies(validInput);
+
+  const handoffResult = await dependencies.specializedAgent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    commandType: 'converse',
+    requestedAt: '2026-08-11T00:00:00.000Z',
+    payload: {
+      commandInput: { type: 'converse', input: { text: 'Sebastian, lembra que prefiro reuniões de manhã' } },
+    },
+  });
+
+  assert.equal(handoffResult.status, 'completed');
+  if (handoffResult.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(handoffResult.output.finalResult, {
+    memoryRecordKind: 'sebastian.memory.fact',
+    content: 'prefiro reuniões de manhã',
+  });
 });

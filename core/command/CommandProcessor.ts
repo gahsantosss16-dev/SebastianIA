@@ -14,7 +14,7 @@ export class CommandProcessor {
       throw new InvalidCommandInputError('Command input must be an object.');
     }
 
-    const supportedTypes = new Set(['greeting', 'remember', 'recall']);
+    const supportedTypes = new Set(['greeting', 'remember', 'recall', 'converse']);
     if (!supportedTypes.has(input.type)) {
       throw new UnsupportedCommandTypeError(`Unsupported command type: ${input.type}`);
     }

@@ -156,3 +156,16 @@ test('CommandProcessor accepts the remember and recall command types', () => {
   assert.equal(recallResult.status, 'succeeded');
   assert.equal(recallResult.output.type, 'recall');
 });
+
+test('CommandProcessor accepts the converse command type', () => {
+  const processor = new CommandProcessor();
+
+  const result = processor.process({
+    type: 'converse',
+    input: { text: 'Sebastian, lembra que prefiro reuniões de manhã' },
+    generatedAt: '2026-08-11T00:00:00.000Z',
+  });
+
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.output.type, 'converse');
+});

@@ -13,10 +13,11 @@ import {
   LOCAL_MEMORY_RECALL_COMMAND_TYPE,
   LOCAL_MEMORY_REMEMBER_COMMAND_TYPE,
 } from './LocalMemoryCapabilityProvider.js';
+import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { createSebastianApplication } from './SebastianApplication.js';
 
 interface CommandExecutor {
-  executeCommand(input: CommandProcessingInput): CapabilityResult;
+  executeCommand(input: CommandProcessingInput): Promise<CapabilityResult>;
   shutdown(): void;
 }
 
@@ -75,7 +76,7 @@ const COMMAND_DEFINITIONS: readonly LocalCommandDefinition[] = [
   },
 ];
 
-const USAGE_SUMMARY = COMMAND_DEFINITIONS.map((definition) => definition.usage).join(' | ');
+const USAGE_SUMMARY = [...COMMAND_DEFINITIONS.map((definition) => definition.usage), '"<free text>"'].join(' | ');
 
 export class LocalCommandInvocationAdapter {
   private readonly createApplication: () => CommandExecutor;
@@ -92,7 +93,7 @@ export class LocalCommandInvocationAdapter {
     this.now = dependencies.now ?? (() => new Date());
   }
 
-  public execute(args: readonly string[]): CapabilityResult {
+  public async execute(args: readonly string[]): Promise<CapabilityResult> {
     const { type, input: payload } = this.resolveCommand(args);
 
     const input: CommandProcessingInput = {
@@ -105,7 +106,7 @@ export class LocalCommandInvocationAdapter {
     let result: CapabilityResult;
 
     try {
-      result = application.executeCommand(input);
+      result = await application.executeCommand(input);
     } catch (executionError) {
       try {
         application.shutdown();
@@ -139,27 +140,31 @@ export class LocalCommandInvocationAdapter {
     }
 
     const definition = COMMAND_DEFINITIONS.find((candidate) => candidate.type === args[0]);
-    if (!definition) {
-      throw new InvalidLocalCommandArgumentsError(`Unsupported local command: ${args[0]}. Usage: ${USAGE_SUMMARY}.`);
+    if (definition) {
+      if (args.length < definition.minArgs || args.length > definition.maxArgs) {
+        throw new InvalidLocalCommandArgumentsError(
+          `Invalid arguments for "${definition.type}". Usage: ${definition.usage}.`,
+        );
+      }
+      return { type: definition.type, input: definition.buildInput(args) };
     }
 
-    if (args.length < definition.minArgs || args.length > definition.maxArgs) {
-      throw new InvalidLocalCommandArgumentsError(
-        `Invalid arguments for "${definition.type}". Usage: ${definition.usage}.`,
-      );
+    const text = args.join(' ').trim();
+    if (text === '') {
+      throw new InvalidLocalCommandArgumentsError(`Command type is required. Usage: ${USAGE_SUMMARY}.`);
     }
 
-    return { type: definition.type, input: definition.buildInput(args) };
+    return { type: LOCAL_CONVERSE_COMMAND_TYPE, input: { text } };
   }
 }
 
-export function runLocalCommand(
+export async function runLocalCommand(
   args: readonly string[],
   output: LocalCommandProcessOutput,
   adapter: LocalCommandInvocationAdapter = new LocalCommandInvocationAdapter(),
-): number {
+): Promise<number> {
   try {
-    const result = adapter.execute(args);
+    const result = await adapter.execute(args);
     output.stdout(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {

@@ -107,3 +107,12 @@ export class CoreSpecializedAgentHandoffError extends BaseCorePipelineIntegratio
     });
   }
 }
+
+export class CoreSpecializedAgentFinalResultInvalidError extends BaseCorePipelineIntegrationError {
+  public constructor(message: string, options: CorePipelineIntegrationErrorOptions = {}) {
+    super(message, {
+      code: ErrorCodes.INVALID_ARGUMENT,
+      ...options,
+    });
+  }
+}

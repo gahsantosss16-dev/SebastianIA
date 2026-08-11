@@ -13,10 +13,10 @@ import type { CommandProcessingInput } from '../../core/command/index.js';
 import { core as defaultApplicationCore } from '../../core/index.js';
 import type { Logger } from '../../core/logger.js';
 
-function withTempDataDir(run: (dataDir: string) => void): void {
+async function withTempDataDir(run: (dataDir: string) => Promise<void>): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-application-'));
   try {
-    run(dataDir);
+    await run(dataDir);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -35,6 +35,14 @@ function recallInput(): CommandProcessingInput {
     type: 'recall',
     input: {},
     generatedAt: '2026-08-11T00:00:01.000Z',
+  };
+}
+
+function converseInput(text: string, generatedAt = '2026-08-11T00:00:00.000Z'): CommandProcessingInput {
+  return {
+    type: 'converse',
+    input: { text },
+    generatedAt,
   };
 }
 
@@ -93,65 +101,65 @@ test('application composition root preserves accepted Core configuration', () =>
   });
 });
 
-test('local application executes a named greeting through the real pipeline', () => {
+test('local application executes a named greeting through the real pipeline', async () => {
   const core = createSebastianApplication({ logger });
 
-  assert.deepEqual(core.executeCommand(greetingInput('Gabriel')), {
+  assert.deepEqual(await core.executeCommand(greetingInput('Gabriel')), {
     status: 'succeeded',
     output: { message: 'Hello, Gabriel!' },
     generatedAt: '2026-07-31T00:00:00.000Z',
   });
 });
 
-test('local greeting returns the generic message without a valid name', () => {
+test('local greeting returns the generic message without a valid name', async () => {
   const core = createSebastianApplication({ logger });
 
-  assert.deepEqual(core.executeCommand(greetingInput('   ')).output, {
+  assert.deepEqual((await core.executeCommand(greetingInput('   '))).output, {
     message: 'Hello!',
   });
-  assert.deepEqual(core.executeCommand(greetingInput(42)).output, {
+  assert.deepEqual((await core.executeCommand(greetingInput(42))).output, {
     message: 'Hello!',
   });
 });
 
-test('local greeting is deterministic and does not mutate command input', () => {
+test('local greeting is deterministic and does not mutate command input', async () => {
   const core = createSebastianApplication({ logger });
   const command = greetingInput('Gabriel');
   const before = structuredClone(command);
 
-  const left = core.executeCommand(command);
-  const right = core.executeCommand(command);
+  const left = await core.executeCommand(command);
+  const right = await core.executeCommand(command);
 
   assert.deepEqual(left, right);
   assert.deepEqual(command, before);
 });
 
-test('default entrypoint exports an operational Core with the local capability', () => {
+test('default entrypoint exports an operational Core with the local capability', async () => {
   assert.equal(defaultApplicationCore.status, 'ready');
-  assert.deepEqual(defaultApplicationCore.executeCommand(greetingInput('Sebastian')).output, {
+  assert.deepEqual((await defaultApplicationCore.executeCommand(greetingInput('Sebastian'))).output, {
     message: 'Hello, Sebastian!',
   });
 });
 
-test('without a dataDir, memory does not persist across separate Core instances', () => {
+test('without a dataDir, memory does not persist across separate Core instances', async () => {
   const first = createSebastianApplication({ logger });
-  first.executeCommand(rememberInput('prefiro reuniões de manhã'));
+  await first.executeCommand(rememberInput('prefiro reuniões de manhã'));
 
   const second = createSebastianApplication({ logger });
-  assert.deepEqual(second.executeCommand(recallInput()).output, {
+  assert.deepEqual((await second.executeCommand(recallInput())).output, {
     message: 'Nenhuma memória registrada ainda.',
     facts: [],
   });
 });
 
-test('with a dataDir, a fact remembered by one Core instance is recalled by a later instance', () => {
-  withTempDataDir((dataDir) => {
+test('with a dataDir, a fact remembered by one Core instance is recalled by a later instance', async () => {
+  await withTempDataDir(async (dataDir) => {
     const writerCore = createSebastianApplication({ logger, dataDir });
-    const rememberResult = writerCore.executeCommand(rememberInput('prefiro reuniões de manhã'));
+    const rememberResult = await writerCore.executeCommand(rememberInput('prefiro reuniões de manhã'));
     assert.deepEqual(rememberResult.output, { fact: 'prefiro reuniões de manhã' });
 
     const readerCore = createSebastianApplication({ logger, dataDir });
-    const recallResult = readerCore.executeCommand(recallInput());
+    const recallResult = await readerCore.executeCommand(recallInput());
 
     assert.equal(recallResult.output.message, '1 memória(s) registrada(s).');
     const facts = recallResult.output.facts as ReadonlyArray<{ readonly content: string }>;
@@ -162,13 +170,64 @@ test('with a dataDir, a fact remembered by one Core instance is recalled by a la
   });
 });
 
-test('recall on a fresh dataDir with no prior facts reports a clear empty-memory message', () => {
-  withTempDataDir((dataDir) => {
+test('recall on a fresh dataDir with no prior facts reports a clear empty-memory message', async () => {
+  await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });
 
-    assert.deepEqual(core.executeCommand(recallInput()).output, {
+    assert.deepEqual((await core.executeCommand(recallInput())).output, {
       message: 'Nenhuma memória registrada ainda.',
       facts: [],
+    });
+  });
+});
+
+test('natural language remember, in one Core instance, is recalled by natural language in a later instance', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const writerCore = createSebastianApplication({ logger, dataDir });
+    const rememberResult = await writerCore.executeCommand(
+      converseInput('Sebastian, lembra que prefiro reuniões de manhã', '2026-08-11T00:00:00.000Z'),
+    );
+    assert.deepEqual(rememberResult.output, {
+      memoryRecordKind: 'sebastian.memory.fact',
+      content: 'prefiro reuniões de manhã',
+    });
+
+    const readerCore = createSebastianApplication({ logger, dataDir });
+    const respondResult = await readerCore.executeCommand(
+      converseInput('Qual horário eu prefiro para reuniões?', '2026-08-11T00:05:00.000Z'),
+    );
+
+    assert.deepEqual(respondResult.output, {
+      message: 'Sobre isso, você registrou: "prefiro reuniões de manhã".',
+    });
+  });
+});
+
+test('a natural language fact is also visible to the rigid recall command, and vice versa', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const naturalLanguageCore = createSebastianApplication({ logger, dataDir });
+    await naturalLanguageCore.executeCommand(
+      converseInput('Sebastian, lembra que prefiro reuniões de manhã', '2026-08-11T00:00:00.000Z'),
+    );
+
+    const rigidCore = createSebastianApplication({ logger, dataDir });
+    const recallResult = await rigidCore.executeCommand(recallInput());
+    const facts = recallResult.output.facts as ReadonlyArray<{ readonly content: string }>;
+    assert.deepEqual(
+      facts.map((fact) => fact.content),
+      ['prefiro reuniões de manhã'],
+    );
+  });
+});
+
+test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const core = createSebastianApplication({ logger, dataDir });
+
+    const result = await core.executeCommand(converseInput('Qual horário eu prefiro para reuniões?'));
+
+    assert.deepEqual(result.output, {
+      message: 'Ainda não tenho nenhuma memória registrada sobre isso.',
     });
   });
 });

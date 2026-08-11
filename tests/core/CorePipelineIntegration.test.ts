@@ -19,6 +19,7 @@ import {
   CoreCommandResultMemoryWriteBackError,
   CorePipelineExecutionError,
   CoreSpecializedAgentDependencyUnavailableError,
+  CoreSpecializedAgentFinalResultInvalidError,
   CoreSpecializedAgentHandoffError,
   InvalidCoreCommandInputError,
 } from '../../core/CorePipelineIntegrationErrors.js';
@@ -32,7 +33,7 @@ const successfulHydrator: CommandContextHydrator = {
 };
 
 const successfulSpecializedAgent: SpecializedAgent = {
-  handoff: () => ({
+  handoff: async () => ({
     status: 'completed',
     output: { acknowledged: true },
   }),
@@ -97,10 +98,10 @@ function createCoreWithRealPipeline(): SebastianCore {
   return core;
 }
 
-test('Core executes command successfully through public API', () => {
+test('Core executes command successfully through public API', async () => {
   const core = createCoreWithRealPipeline();
 
-  const result = core.executeCommand(createInput());
+  const result = await core.executeCommand(createInput());
 
   assert.equal(result.status, 'succeeded');
   assert.deepEqual(result.output, {
@@ -119,10 +120,10 @@ test('Core executes command successfully through public API', () => {
   });
 });
 
-test('Core rejects invalid command input with typed error', () => {
+test('Core rejects invalid command input with typed error', async () => {
   const core = createCoreWithRealPipeline();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(null as never),
     (error: unknown) => {
       assert.ok(error instanceof InvalidCoreCommandInputError);
@@ -131,12 +132,12 @@ test('Core rejects invalid command input with typed error', () => {
   );
 });
 
-test('Core rejects unavailable pipeline dependencies with typed error', () => {
+test('Core rejects unavailable pipeline dependencies with typed error', async () => {
   const core = new SebastianCore();
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CorePipelineDependencyUnavailableError);
@@ -145,7 +146,7 @@ test('Core rejects unavailable pipeline dependencies with typed error', () => {
   );
 });
 
-test('Core rejects invalid executor dependency contract with typed error', () => {
+test('Core rejects invalid executor dependency contract with typed error', async () => {
   const bundle = createBundle();
   const invalidExecutor = {} as unknown as { execute: never };
   const core = new SebastianCore('Sebastian IA', {}, undefined, {
@@ -158,7 +159,7 @@ test('Core rejects invalid executor dependency contract with typed error', () =>
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CorePipelineDependencyUnavailableError);
@@ -167,7 +168,7 @@ test('Core rejects invalid executor dependency contract with typed error', () =>
   );
 });
 
-test('Core propagates typed errors from pipeline executor', () => {
+test('Core propagates typed errors from pipeline executor', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => {
@@ -185,7 +186,7 @@ test('Core propagates typed errors from pipeline executor', () => {
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof InvalidCommandCapabilityPipelineInputError);
@@ -194,7 +195,7 @@ test('Core propagates typed errors from pipeline executor', () => {
   );
 });
 
-test('Core wraps non-Error throwables from pipeline executor in typed core error', () => {
+test('Core wraps non-Error throwables from pipeline executor in typed core error', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => {
@@ -212,7 +213,7 @@ test('Core wraps non-Error throwables from pipeline executor in typed core error
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CorePipelineExecutionError);
@@ -221,7 +222,7 @@ test('Core wraps non-Error throwables from pipeline executor in typed core error
   );
 });
 
-test('Core delegates command execution directly to pipeline executor', () => {
+test('Core delegates command execution directly to pipeline executor', async () => {
   let called = false;
   let receivedInput: CommandProcessingInput | undefined;
   let receivedBundle: unknown;
@@ -253,7 +254,7 @@ test('Core delegates command execution directly to pipeline executor', () => {
   core.start();
 
   const input = createInput();
-  const result = core.executeCommand(input);
+  const result = await core.executeCommand(input);
 
   assert.equal(called, true);
   assert.equal(receivedInput, input);
@@ -261,7 +262,7 @@ test('Core delegates command execution directly to pipeline executor', () => {
   assert.equal(result, expectedResult);
 });
 
-test('Core executes a single specialized agent handoff after command execution', () => {
+test('Core executes a single specialized agent handoff after command execution', async () => {
   const bundle = createBundle();
   let handoffCount = 0;
   let handoffPayload: unknown;
@@ -273,7 +274,7 @@ test('Core executes a single specialized agent handoff after command execution',
     }),
   };
   const specializedAgent: SpecializedAgent = {
-    handoff: (input) => {
+    handoff: async (input) => {
       handoffCount += 1;
       handoffPayload = input;
       return {
@@ -293,7 +294,7 @@ test('Core executes a single specialized agent handoff after command execution',
   core.initialize();
   core.start();
 
-  core.executeCommand(createInput());
+  await core.executeCommand(createInput());
 
   assert.equal(handoffCount, 1);
   assert.deepEqual(handoffPayload, {
@@ -312,7 +313,7 @@ test('Core executes a single specialized agent handoff after command execution',
   });
 });
 
-test('Core rejects missing specialized agent dependency contract with typed error', () => {
+test('Core rejects missing specialized agent dependency contract with typed error', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => ({
@@ -332,7 +333,7 @@ test('Core rejects missing specialized agent dependency contract with typed erro
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CoreSpecializedAgentDependencyUnavailableError);
@@ -341,7 +342,7 @@ test('Core rejects missing specialized agent dependency contract with typed erro
   );
 });
 
-test('Core propagates specialized agent handoff failure as typed core error', () => {
+test('Core propagates specialized agent handoff failure as typed core error', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => ({
@@ -356,7 +357,7 @@ test('Core propagates specialized agent handoff failure as typed core error', ()
     bundle,
     commandContextHydrator: successfulHydrator,
     specializedAgent: {
-      handoff: () => ({
+      handoff: async () => ({
         status: 'failed',
         error: new Error('handoff failed'),
       }),
@@ -366,7 +367,7 @@ test('Core propagates specialized agent handoff failure as typed core error', ()
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CoreSpecializedAgentHandoffError);
@@ -375,7 +376,194 @@ test('Core propagates specialized agent handoff failure as typed core error', ()
   );
 });
 
-test('Core writes validated command result to memory after successful execution', () => {
+test('Core adopts a valid finalResult from the agent as the effective result', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: async () => ({
+        status: 'completed',
+        output: { finalResult: { message: 'agent-provided answer' } },
+      }),
+    },
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  const result = await core.executeCommand(createInput());
+
+  assert.deepEqual(result, {
+    status: 'succeeded',
+    output: { message: 'agent-provided answer' },
+    generatedAt: '2026-07-31T01:00:00.000Z',
+  });
+});
+
+test('Core write-back receives the agent finalResult output, not the original capability output', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+  let writtenOutput: unknown;
+  const writer: CommandResultMemoryWriter = {
+    write: (input) => {
+      writtenOutput = input.output;
+      return { status: 'recorded', key: 'k', recordedAt: '2026-07-31T01:00:01.000Z' };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: async () => ({
+        status: 'completed',
+        output: { finalResult: { message: 'agent-provided answer' } },
+      }),
+    },
+    commandResultMemoryWriter: writer,
+  });
+  core.initialize();
+  core.start();
+
+  await core.executeCommand(createInput());
+
+  assert.deepEqual(writtenOutput, { message: 'agent-provided answer' });
+});
+
+test('Core preserves the capability result unchanged when the agent does not provide a finalResult', async () => {
+  const core = createCoreWithRealPipeline();
+
+  const result = await core.executeCommand(createInput());
+
+  assert.deepEqual(result.output, {
+    echoed: { message: 'hello' },
+    source: result.output.source,
+  });
+});
+
+test('Core rejects an invalid finalResult (array) with a typed error and does not write back', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+  let writeCount = 0;
+  const writer: CommandResultMemoryWriter = {
+    write: () => {
+      writeCount += 1;
+      return { status: 'recorded', key: 'k', recordedAt: '2026-07-31T01:00:01.000Z' };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: async () => ({
+        status: 'completed',
+        output: { finalResult: ['not', 'an', 'object'] },
+      }),
+    },
+    commandResultMemoryWriter: writer,
+  });
+  core.initialize();
+  core.start();
+
+  await assert.rejects(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreSpecializedAgentFinalResultInvalidError);
+      return true;
+    },
+  );
+  assert.equal(writeCount, 0);
+});
+
+test('Core rejects an invalid finalResult (null) with a typed error', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: async () => ({
+        status: 'completed',
+        output: { finalResult: null },
+      }),
+    },
+    commandResultMemoryWriter: successfulWriteBackWriter,
+  });
+  core.initialize();
+  core.start();
+
+  await assert.rejects(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreSpecializedAgentFinalResultInvalidError);
+      return true;
+    },
+  );
+});
+
+test('Core rejects missing memory writer dependency contract with typed error', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: successfulSpecializedAgent,
+    commandResultMemoryWriter: {} as never,
+  });
+  core.initialize();
+  core.start();
+
+  await assert.rejects(
+    () => core.executeCommand(createInput()),
+    (error: unknown) => {
+      assert.ok(error instanceof CoreCommandResultMemoryDependencyUnavailableError);
+      return true;
+    },
+  );
+});
+
+test('Core writes validated command result to memory after successful execution', async () => {
   const bundle = createBundle();
   let called = false;
   let captured: unknown;
@@ -410,7 +598,7 @@ test('Core writes validated command result to memory after successful execution'
   core.start();
 
   const input = createInput();
-  core.executeCommand(input);
+  await core.executeCommand(input);
 
   assert.equal(called, true);
   assert.deepEqual(captured, {
@@ -427,36 +615,7 @@ test('Core writes validated command result to memory after successful execution'
   });
 });
 
-test('Core rejects missing memory writer dependency contract with typed error', () => {
-  const bundle = createBundle();
-  const executor = {
-    execute: () => ({
-      status: 'succeeded' as const,
-      output: { delegated: true },
-      generatedAt: '2026-07-31T01:00:00.000Z',
-    }),
-  };
-
-  const core = new SebastianCore('Sebastian IA', {}, undefined, {
-    executor,
-    bundle,
-    commandContextHydrator: successfulHydrator,
-    specializedAgent: successfulSpecializedAgent,
-    commandResultMemoryWriter: {} as never,
-  });
-  core.initialize();
-  core.start();
-
-  assert.throws(
-    () => core.executeCommand(createInput()),
-    (error: unknown) => {
-      assert.ok(error instanceof CoreCommandResultMemoryDependencyUnavailableError);
-      return true;
-    },
-  );
-});
-
-test('Core propagates typed memory write-back failure as typed core write-back error', () => {
+test('Core propagates typed memory write-back failure as typed core write-back error', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => ({
@@ -483,7 +642,7 @@ test('Core propagates typed memory write-back failure as typed core write-back e
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CoreCommandResultMemoryWriteBackError);
@@ -492,7 +651,7 @@ test('Core propagates typed memory write-back failure as typed core write-back e
   );
 });
 
-test('Core hydrates context before pipeline execution when hydration is available', () => {
+test('Core hydrates context before pipeline execution when hydration is available', async () => {
   const bundle = createBundle();
   let receivedInput: CommandProcessingInput | undefined;
   const executor = {
@@ -543,7 +702,7 @@ test('Core hydrates context before pipeline execution when hydration is availabl
     generatedAt: '2026-07-31T00:00:00.000Z',
   };
 
-  core.executeCommand(input);
+  await core.executeCommand(input);
 
   assert.deepEqual(receivedInput, {
     ...input,
@@ -563,7 +722,7 @@ test('Core hydrates context before pipeline execution when hydration is availabl
   });
 });
 
-test('Core keeps original input when hydration returns absent', () => {
+test('Core keeps original input when hydration returns absent', async () => {
   const bundle = createBundle();
   let receivedInput: CommandProcessingInput | undefined;
   const executor = {
@@ -588,12 +747,12 @@ test('Core keeps original input when hydration returns absent', () => {
   core.start();
 
   const input = createInput();
-  core.executeCommand(input);
+  await core.executeCommand(input);
 
   assert.equal(receivedInput, input);
 });
 
-test('Core rejects missing context hydrator dependency contract with typed error', () => {
+test('Core rejects missing context hydrator dependency contract with typed error', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => ({
@@ -613,7 +772,7 @@ test('Core rejects missing context hydrator dependency contract with typed error
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CoreCommandContextHydrationDependencyUnavailableError);
@@ -622,7 +781,7 @@ test('Core rejects missing context hydrator dependency contract with typed error
   );
 });
 
-test('Core propagates typed context hydration failure as typed core hydration error', () => {
+test('Core propagates typed context hydration failure as typed core hydration error', async () => {
   const bundle = createBundle();
   const executor = {
     execute: () => ({
@@ -644,7 +803,7 @@ test('Core propagates typed context hydration failure as typed core hydration er
   core.initialize();
   core.start();
 
-  assert.throws(
+  await assert.rejects(
     () => core.executeCommand(createInput()),
     (error: unknown) => {
       assert.ok(error instanceof CoreCommandContextHydrationError);
@@ -653,22 +812,22 @@ test('Core propagates typed context hydration failure as typed core hydration er
   );
 });
 
-test('Core command execution is deterministic for identical inputs and bundle', () => {
+test('Core command execution is deterministic for identical inputs and bundle', async () => {
   const core = createCoreWithRealPipeline();
   const input = createInput();
 
-  const left = core.executeCommand(input);
-  const right = core.executeCommand(input);
+  const left = await core.executeCommand(input);
+  const right = await core.executeCommand(input);
 
   assert.deepEqual(left, right);
 });
 
-test('Core does not mutate input when executing command pipeline', () => {
+test('Core does not mutate input when executing command pipeline', async () => {
   const core = createCoreWithRealPipeline();
   const input = createInput();
   const before = structuredClone(input);
 
-  core.executeCommand(input);
+  await core.executeCommand(input);
 
   assert.deepEqual(input, before);
 });

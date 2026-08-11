@@ -215,7 +215,7 @@ test('start failure prevents returning a partial Core and preserves cause', () =
   assert.equal(initializeCount, 1);
 });
 
-test('operational bootstrap is deterministic for identical input', () => {
+test('operational bootstrap is deterministic for identical input', async () => {
   const left = bootstrapCoreOperationalRuntime(bootstrapInput);
   const right = bootstrapCoreOperationalRuntime(bootstrapInput);
 
@@ -223,13 +223,13 @@ test('operational bootstrap is deterministic for identical input', () => {
   assert.equal(left.status, right.status);
   assert.deepEqual(left.getConfig(), right.getConfig());
   assert.deepEqual(left.getLifecycleState(), right.getLifecycleState());
-  assert.deepEqual(left.executeCommand(commandInput()), right.executeCommand(commandInput()));
+  assert.deepEqual(await left.executeCommand(commandInput()), await right.executeCommand(commandInput()));
 });
 
-test('returned Core executes commands through the composed real pipeline', () => {
+test('returned Core executes commands through the composed real pipeline', async () => {
   const core = bootstrapCoreOperationalRuntime(bootstrapInput);
 
-  assert.deepEqual(core.executeCommand(commandInput()), {
+  assert.deepEqual(await core.executeCommand(commandInput()), {
     status: 'succeeded',
     output: { echoed: { message: 'hello' } },
     generatedAt: '2026-07-31T00:00:00.000Z',
