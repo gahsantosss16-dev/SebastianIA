@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -406,6 +407,64 @@ test('creating a file over an existing one and appending to a missing one report
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });
+
+function initGitRepo(dir: string): void {
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  spawnSync('git', ['config', 'user.name', 'Sebastian Test'], { cwd: dir });
+}
+
+function commitAll(dir: string, message: string): void {
+  spawnSync('git', ['add', '-A'], { cwd: dir });
+  spawnSync('git', ['commit', '-q', '-m', message], { cwd: dir });
+}
+
+test('the development executor vertical slice works end-to-end through SebastianApplication in a real, temporary Git repository', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-devexec-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        { toolId: 'validation.test', executable: process.execPath, args: ['-e', "console.log('tudo certo')"] },
+      ],
+    });
+
+    const status = await core.executeCommand(converseInput('Qual é o estado deste repositório?', '2026-08-12T00:00:00.000Z'));
+    assert.ok((status.output as { readonly message: string }).message.includes('sem alterações pendentes'));
+
+    const edit = await core.executeCommand(
+      converseInput('Altere o arquivo exemplo.ts substituindo const x = 1; por const x = 2;', '2026-08-12T00:00:01.000Z'),
+    );
+    assert.deepEqual(edit.output, { message: 'Arquivo "exemplo.ts" atualizado.' });
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+
+    const diff = await core.executeCommand(converseInput('Mostre as alterações atuais', '2026-08-12T00:00:02.000Z'));
+    assert.ok((diff.output as { readonly message: string }).message.includes('const x = 2;'));
+
+    const validation = await core.executeCommand(converseInput('Execute os testes do projeto', '2026-08-12T00:00:03.000Z'));
+    assert.deepEqual(validation.output, { message: 'Validação "validation.test" concluída com sucesso (exit code 0).' });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "the real default authorizedCommands run this very project's own npm scripts without a shell when none are overridden",
+  { timeout: 60000 },
+  async () => {
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: process.cwd() });
+
+    const result = await core.executeCommand(converseInput('Execute o typecheck', '2026-08-12T00:00:00.000Z'));
+
+    const output = result.output as { readonly message: string };
+    assert.ok(output.message.startsWith('Validação "validation.typecheck" concluída'));
+  },
+);
 
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {

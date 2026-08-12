@@ -24,7 +24,10 @@ import {
 import {
   InMemorySpecializedTool,
   LocalFilesystemInspectionTool,
+  LocalGitInspectionTool,
+  LocalAuthorizedCommandTool,
   LocalToolDispatcher,
+  type AuthorizedCommandDefinition,
   type SpecializedTool,
 } from './tool/index.js';
 import {
@@ -54,6 +57,13 @@ export interface CorePipelineBootstrapInput {
    * `process.cwd()` when omitted.
    */
   readonly allowedFilesystemRoot?: string;
+  /**
+   * Pre-authorized commands (e.g. `validation.test`) the workspace's
+   * composition chooses to expose. Never derived from user text, and empty
+   * by default - a workspace that configures none simply has no runnable
+   * validations.
+   */
+  readonly authorizedCommands?: readonly AuthorizedCommandDefinition[];
 }
 
 interface CorePipelineExecutorLike {
@@ -67,7 +77,10 @@ export interface CorePipelineBootstrapFactories {
   readonly buildCoordinator?: (bindings: CommandCapabilityBindings) => CommandCapabilityExecutionCoordinator;
   readonly buildExecutor?: (coordinator: CommandCapabilityExecutionCoordinator) => CorePipelineExecutorLike;
   readonly buildCommandContextHydrator?: (memoryFilePath: string | undefined) => CommandContextHydrator;
-  readonly buildSpecializedTool?: (allowedFilesystemRoot: string) => SpecializedTool;
+  readonly buildSpecializedTool?: (
+    allowedFilesystemRoot: string,
+    authorizedCommands: readonly AuthorizedCommandDefinition[],
+  ) => SpecializedTool;
   readonly buildModelProvider?: () => ModelProvider;
   readonly buildSpecializedAgent?: (tool: SpecializedTool, modelProvider: ModelProvider) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
@@ -94,8 +107,13 @@ export class CorePipelineBootstrap {
             : new FileCommandContextHydrator(new FileMemoryStore(memoryFilePath))),
       buildSpecializedTool:
         factories.buildSpecializedTool ??
-        ((allowedFilesystemRoot) =>
-          new LocalToolDispatcher(new InMemorySpecializedTool(), new LocalFilesystemInspectionTool(allowedFilesystemRoot))),
+        ((allowedFilesystemRoot, authorizedCommands) =>
+          new LocalToolDispatcher(
+            new InMemorySpecializedTool(),
+            new LocalFilesystemInspectionTool(allowedFilesystemRoot),
+            new LocalGitInspectionTool(allowedFilesystemRoot),
+            new LocalAuthorizedCommandTool(allowedFilesystemRoot, authorizedCommands),
+          )),
       buildModelProvider:
         factories.buildModelProvider ?? (() => new DevelopmentModelProvider()),
       buildSpecializedAgent:
@@ -118,7 +136,10 @@ export class CorePipelineBootstrap {
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
     const commandContextHydrator = this.composeCommandContextHydrator(input.memoryFilePath);
-    const specializedTool = this.composeSpecializedTool(input.allowedFilesystemRoot ?? process.cwd());
+    const specializedTool = this.composeSpecializedTool(
+      input.allowedFilesystemRoot ?? process.cwd(),
+      input.authorizedCommands ?? [],
+    );
     const modelProvider = this.composeModelProvider();
     const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider);
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
@@ -152,6 +173,10 @@ export class CorePipelineBootstrap {
       throw new CorePipelineBootstrapError(
         'Core pipeline allowedFilesystemRoot must be a non-empty string when provided.',
       );
+    }
+
+    if (input.authorizedCommands !== undefined && !Array.isArray(input.authorizedCommands)) {
+      throw new CorePipelineBootstrapError('Core pipeline authorizedCommands must be an array when provided.');
     }
   }
 
@@ -223,9 +248,12 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeSpecializedTool(allowedFilesystemRoot: string): SpecializedTool {
+  private composeSpecializedTool(
+    allowedFilesystemRoot: string,
+    authorizedCommands: readonly AuthorizedCommandDefinition[],
+  ): SpecializedTool {
     try {
-      const specializedTool = this.factories.buildSpecializedTool(allowedFilesystemRoot);
+      const specializedTool = this.factories.buildSpecializedTool(allowedFilesystemRoot, authorizedCommands);
       if (!specializedTool || typeof specializedTool.invoke !== 'function') {
         throw new TypeError('Core specialized tool must provide invoke.');
       }

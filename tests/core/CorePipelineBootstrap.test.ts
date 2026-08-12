@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -574,5 +575,103 @@ test('workspace writes stay confined to allowedFilesystemRoot end-to-end through
     }
   } finally {
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+function initGitRepo(dir: string): void {
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  spawnSync('git', ['config', 'user.name', 'Sebastian Test'], { cwd: dir });
+}
+
+function commitAll(dir: string, message: string): void {
+  spawnSync('git', ['add', '-A'], { cwd: dir });
+  spawnSync('git', ['commit', '-q', '-m', message], { cwd: dir });
+}
+
+test('the development executor vertical slice works end-to-end through SebastianCore in a real, temporary Git repository: status, edit, diff, validation', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-devexec-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const dependencies = composeCorePipelineDependencies({
+      ...validInputWithConverse,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        { toolId: 'validation.test', executable: process.execPath, args: ['-e', "console.log('tudo certo')"] },
+      ],
+    });
+    const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
+    core.initialize();
+    core.start();
+
+    // A. clean state
+    const initialStatus = await core.executeCommand(
+      converseCommandInput('Qual é o estado deste repositório?', '2026-08-12T00:00:00.000Z'),
+    );
+    assert.ok((initialStatus.output as { readonly message: string }).message.includes('sem alterações pendentes'));
+
+    // B. edit an allowed textual file
+    const editResult = await core.executeCommand(
+      converseCommandInput('Altere o arquivo exemplo.ts substituindo const x = 1; por const x = 2;', '2026-08-12T00:00:01.000Z'),
+    );
+    assert.deepEqual(editResult.output, { message: 'Arquivo "exemplo.ts" atualizado.' });
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+
+    // C. status now reflects the real change
+    const statusAfterEdit = await core.executeCommand(
+      converseCommandInput('Qual é o estado deste repositório?', '2026-08-12T00:00:02.000Z'),
+    );
+    assert.ok((statusAfterEdit.output as { readonly message: string }).message.includes('exemplo.ts'));
+
+    // D. diff shows the real change
+    const diffResult = await core.executeCommand(
+      converseCommandInput('Mostre as alterações atuais', '2026-08-12T00:00:03.000Z'),
+    );
+    assert.ok((diffResult.output as { readonly message: string }).message.includes('const x = 2;'));
+
+    // E/F. an authorized validation runs for real and reports a real result
+    const validationResult = await core.executeCommand(
+      converseCommandInput('Execute os testes do projeto', '2026-08-12T00:00:04.000Z'),
+    );
+    assert.deepEqual(validationResult.output, {
+      message: 'Validação "validation.test" concluída com sucesso (exit code 0).',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('replaceText refuses to edit a file with pre-existing uncommitted changes end-to-end through SebastianCore', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-devexec-dirty-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+    // G. a prior, unrelated modification already sits uncommitted
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1; // alterado manualmente antes\n');
+
+    const dependencies = composeCorePipelineDependencies({
+      ...validInputWithConverse,
+      allowedFilesystemRoot: root,
+    });
+    const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
+    core.initialize();
+    core.start();
+
+    // H. Sebastian is asked to edit that same file
+    const editResult = await core.executeCommand(
+      converseCommandInput('Altere o arquivo exemplo.ts substituindo const x = 1; por const x = 2;', '2026-08-12T00:00:00.000Z'),
+    );
+
+    // I. it refuses due to dirty-file protection, leaving the file untouched
+    assert.deepEqual(editResult.output, {
+      message: '"exemplo.ts" já possui alterações não commitadas; não vou editá-lo automaticamente.',
+    });
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 1; // alterado manualmente antes\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

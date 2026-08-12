@@ -676,6 +676,178 @@ test('the project workspace block neither breaks nor is affected by greeting, re
   });
 });
 
+function initGitRepo(dir: string): void {
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  spawnSync('git', ['config', 'user.name', 'Sebastian Test'], { cwd: dir });
+}
+
+function commitAll(dir: string, message: string): void {
+  spawnSync('git', ['add', '-A'], { cwd: dir });
+  spawnSync('git', ['commit', '-q', '-m', message], { cwd: dir });
+}
+
+test('a real CLI process reports real Git status and diff for a temporary repository', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      commitAll(fixtureRoot, 'initial commit');
+
+      const cleanStatus = spawnSync(process.execPath, [compiledCliPath, 'Qual é o estado deste repositório?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+      assert.equal(cleanStatus.status, 0);
+      const cleanResult = JSON.parse(cleanStatus.stdout.trim()) as { output: { message: string } };
+      assert.ok(cleanResult.output.message.includes('sem alterações pendentes'));
+
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 2;\n');
+
+      const dirtyStatus = spawnSync(process.execPath, [compiledCliPath, 'Qual é o estado deste repositório?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+      assert.equal(dirtyStatus.status, 0);
+      const dirtyResult = JSON.parse(dirtyStatus.stdout.trim()) as { output: { message: string } };
+      assert.ok(dirtyResult.output.message.includes('exemplo.ts'));
+
+      const diff = spawnSync(process.execPath, [compiledCliPath, 'Mostre as alterações atuais'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+      assert.equal(diff.status, 0);
+      const diffResult = JSON.parse(diff.stdout.trim()) as { output: { message: string } };
+      assert.ok(diffResult.output.message.includes('const x = 2;'));
+    });
+  });
+});
+
+test('a real CLI process edits a file via replaceText in a temporary Git repository, and a later process sees the change', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      commitAll(fixtureRoot, 'initial commit');
+      const env = isolatedEnv(dataDir);
+
+      const editProcess = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Altere o arquivo exemplo.ts substituindo const x = 1; por const x = 2;'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(editProcess.error, undefined);
+      assert.equal(editProcess.status, 0);
+      assert.equal(editProcess.stderr, '');
+      const editResult = JSON.parse(editProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(editResult.output.message, 'Arquivo "exemplo.ts" atualizado.');
+
+      const readProcess = spawnSync(process.execPath, [compiledCliPath, 'Leia o arquivo exemplo.ts'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(readProcess.status, 0);
+      const readResult = JSON.parse(readProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(readResult.output.message, 'Conteúdo de "exemplo.ts":\nconst x = 2;\n');
+    });
+  });
+});
+
+test('a real CLI process refuses to edit a file that already has uncommitted Git changes, without crashing', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      commitAll(fixtureRoot, 'initial commit');
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1; // já alterado manualmente\n');
+
+      const editProcess = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Altere o arquivo exemplo.ts substituindo const x = 1; por const x = 2;'],
+        { cwd: fixtureRoot, encoding: 'utf8', env: isolatedEnv(dataDir) },
+      );
+
+      assert.equal(editProcess.error, undefined);
+      assert.equal(editProcess.status, 0);
+      assert.equal(editProcess.stderr, '');
+      const editResult = JSON.parse(editProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(
+        editResult.output.message,
+        '"exemplo.ts" já possui alterações não commitadas; não vou editá-lo automaticamente.',
+      );
+      assert.equal(readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'), 'const x = 1; // já alterado manualmente\n');
+    });
+  });
+});
+
+test('a real CLI process runs this project\'s own authorized build validation and reports a real result', () => {
+  withIsolatedDataDir((dataDir) => {
+    const execution = spawnSync(process.execPath, [compiledCliPath, 'Execute o build'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env: isolatedEnv(dataDir),
+      timeout: 60000,
+    });
+
+    assert.equal(execution.error, undefined);
+    assert.equal(execution.status, 0);
+    assert.equal(execution.stderr, '');
+    const result = JSON.parse(execution.stdout.trim()) as { output: { message: string } };
+    assert.equal(result.output.message, 'Validação "validation.build" concluída com sucesso (exit code 0).');
+  });
+});
+
+test('the development executor block neither breaks nor is affected by greeting, remember, recall, tasks and workspace notes sharing the same real CLI process family', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      commitAll(fixtureRoot, 'initial commit');
+      const env = isolatedEnv(dataDir);
+
+      const greeting = spawnSync(process.execPath, [compiledCliPath, 'greeting', 'Gabriel'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(greeting.status, 0);
+
+      const createNote = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Crie uma nota chamada pendencias.md com: revisar autenticação'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(createNote.status, 0);
+
+      const editCode = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Altere o arquivo exemplo.ts substituindo const x = 1; por const x = 2;'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(editCode.status, 0);
+      assert.deepEqual(JSON.parse(editCode.stdout.trim()).output, { message: 'Arquivo "exemplo.ts" atualizado.' });
+
+      const status = spawnSync(process.execPath, [compiledCliPath, 'Qual é o estado deste repositório?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(status.status, 0);
+
+      const recall = spawnSync(process.execPath, [compiledCliPath, 'recall'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(recall.status, 0);
+    });
+  });
+});
+
 test('greeting, remember and recall remain fully functional through the real CLI after the converse evolution', () => {
   withIsolatedDataDir((dataDir) => {
     const env = isolatedEnv(dataDir);

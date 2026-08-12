@@ -11,7 +11,14 @@ import {
   FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID,
   FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID,
   FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID,
+  FILESYSTEM_REPLACE_TEXT_TOOL_ID,
 } from '../tool/LocalFilesystemInspectionTool.js';
+import { GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID } from '../tool/LocalGitInspectionTool.js';
+import {
+  VALIDATION_TEST_TOOL_ID,
+  VALIDATION_BUILD_TOOL_ID,
+  VALIDATION_TYPECHECK_TOOL_ID,
+} from '../tool/LocalAuthorizedCommandTool.js';
 
 const REMEMBER_MARKER = 'lembra que';
 const LIST_DIRECTORY_MARKER = 'arquivos existem';
@@ -22,6 +29,11 @@ const COMPLETE_TASK_PATTERN = /marca\s+(.+?)\s+como feita/i;
 const DESCRIBE_WORKSPACE_MARKER = 'qual projeto';
 const CREATE_TEXT_FILE_PATTERN = /crie (?:uma nota|um arquivo) chamad[ao]\s+(.+?)\s+com:\s*(.+)$/i;
 const APPEND_TEXT_FILE_PATTERN = /acrescente (?:na nota|no arquivo)\s+(.+?):\s*(.+)$/i;
+const REPLACE_TEXT_PATTERN = /altere o arquivo\s+(.+?)\s+substituindo\s+(.+?)\s+por\s+(.+)$/i;
+const GIT_DIFF_MARKER = 'alterações atuais';
+const RUN_TEST_MARKER = 'execute os testes';
+const RUN_BUILD_MARKER = 'execute o build';
+const RUN_TYPECHECK_MARKER = 'execute o typecheck';
 const MAX_TASK_CONTENT_LENGTH = 500;
 const MAX_LISTED_PENDING_TASKS = 500;
 const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
@@ -76,6 +88,33 @@ export class DevelopmentModelProvider implements ModelProvider {
     const appendTextFile = this.extractAppendTextFileRequest(request.text);
     if (appendTextFile !== undefined) {
       return { intent: 'useTool', toolId: FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID, toolInput: appendTextFile };
+    }
+
+    const replaceTextRequest = this.extractReplaceTextRequest(request.text);
+    if (replaceTextRequest !== undefined) {
+      return { intent: 'useTool', toolId: FILESYSTEM_REPLACE_TEXT_TOOL_ID, toolInput: replaceTextRequest };
+    }
+
+    const lowerText = request.text.toLowerCase();
+
+    if (lowerText.includes('estado') && lowerText.includes('repositório')) {
+      return { intent: 'useTool', toolId: GIT_STATUS_TOOL_ID, toolInput: {} };
+    }
+
+    if (lowerText.includes(GIT_DIFF_MARKER)) {
+      return { intent: 'useTool', toolId: GIT_DIFF_TOOL_ID, toolInput: {} };
+    }
+
+    if (lowerText.includes(RUN_TEST_MARKER)) {
+      return { intent: 'useTool', toolId: VALIDATION_TEST_TOOL_ID, toolInput: {} };
+    }
+
+    if (lowerText.includes(RUN_BUILD_MARKER)) {
+      return { intent: 'useTool', toolId: VALIDATION_BUILD_TOOL_ID, toolInput: {} };
+    }
+
+    if (lowerText.includes(RUN_TYPECHECK_MARKER)) {
+      return { intent: 'useTool', toolId: VALIDATION_TYPECHECK_TOOL_ID, toolInput: {} };
     }
 
     const listDirectoryPath = this.extractListDirectoryPath(request.text);
@@ -174,6 +213,27 @@ export class DevelopmentModelProvider implements ModelProvider {
     const path = this.cleanPathFragment(rawPath);
     const content = rawContent.trim();
     return path === '' || content === '' ? undefined : { path, content };
+  }
+
+  /**
+   * Minimal, deliberately narrow recognition of "altere o arquivo X
+   * substituindo Y por Z" proving the fs.replaceText intent end-to-end.
+   * Occurrence-count validation (not found / ambiguous) is entirely the
+   * Tool's responsibility, not this extraction.
+   */
+  private extractReplaceTextRequest(text: string): Readonly<Record<string, unknown>> | undefined {
+    const match = text.match(REPLACE_TEXT_PATTERN);
+    const rawPath = match?.[1];
+    const rawSearchText = match?.[2];
+    const rawReplaceText = match?.[3];
+    if (rawPath === undefined || rawSearchText === undefined || rawReplaceText === undefined) {
+      return undefined;
+    }
+
+    const path = this.cleanPathFragment(rawPath);
+    const searchText = rawSearchText.trim();
+    const replaceText = rawReplaceText.trim();
+    return path === '' || searchText === '' ? undefined : { path, searchText, replaceText };
   }
 
   /** Minimal, deliberately narrow marker recognition proving the "add a task" intent end-to-end. */

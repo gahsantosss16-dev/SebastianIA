@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,7 @@ import {
   FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID,
   FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID,
   FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID,
+  FILESYSTEM_REPLACE_TEXT_TOOL_ID,
   LocalFilesystemInspectionTool,
 } from '../../core/tool/LocalFilesystemInspectionTool.js';
 import { InvalidSpecializedToolInvocationInputError } from '../../core/tool/SpecializedToolInvocationErrors.js';
@@ -42,6 +44,31 @@ function writeInvocation(toolId: string, path: string, content: string): Special
     requestedAt: '2026-08-11T00:00:00.000Z',
     payload: { path, content },
   };
+}
+
+function replaceInvocation(
+  path: string,
+  searchText: string,
+  replaceText: string,
+): SpecializedToolInvocationInput {
+  return {
+    toolId: FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    responsibilityId: 'capability.execute.converse',
+    requestedAt: '2026-08-11T00:00:00.000Z',
+    payload: { path, searchText, replaceText },
+  };
+}
+
+function initGitRepo(dir: string): void {
+  spawnSync('git', ['init', '-q'], { cwd: dir });
+  spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+  spawnSync('git', ['config', 'user.name', 'Sebastian Test'], { cwd: dir });
+}
+
+function commitAll(dir: string, message: string): void {
+  spawnSync('git', ['add', '-A'], { cwd: dir });
+  spawnSync('git', ['commit', '-q', '-m', message], { cwd: dir });
 }
 
 test('lists the entries of an allowed directory, sorted by name', () => {
@@ -546,6 +573,209 @@ test('rejects appending to a file reached only through a symlink escaping the al
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test('replaces a single exact occurrence of text, preserving the rest of the file', () => {
+  withFixtureRoot((root) => {
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\nconst y = 2;\n');
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('exemplo.ts', 'const x = 1;', 'const x = 42;'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.outcome, 'ok');
+    assert.equal(result.output.message, 'Arquivo "exemplo.ts" atualizado.');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 42;\nconst y = 2;\n');
+  });
+});
+
+test('rejects a replacement when the search text does not exist, leaving the file untouched', () => {
+  withFixtureRoot((root) => {
+    const original = 'const x = 1;\n';
+    writeFileSync(join(root, 'exemplo.ts'), original);
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('exemplo.ts', 'const z = 99;', 'const z = 100;'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'searchTextNotFound');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), original);
+  });
+});
+
+test('rejects a replacement when the search text occurs more than once, leaving the file untouched', () => {
+  withFixtureRoot((root) => {
+    const original = 'x = 1;\nx = 1;\n';
+    writeFileSync(join(root, 'exemplo.ts'), original);
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('exemplo.ts', 'x = 1;', 'x = 2;'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'multipleOccurrences');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), original);
+  });
+});
+
+test('rejects replacing text in a file that does not exist', () => {
+  withFixtureRoot((root) => {
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('nao-existe.ts', 'x', 'y'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'notFound');
+  });
+});
+
+test('rejects replacing text in a binary file', () => {
+  withFixtureRoot((root) => {
+    writeFileSync(join(root, 'binario.dat'), Buffer.from([0x00, 0x01, 0x02]));
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('binario.dat', 'x', 'y'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'binaryFile');
+  });
+});
+
+test('rejects replacing text in a file above the 256 KiB limit', () => {
+  withFixtureRoot((root) => {
+    writeFileSync(join(root, 'grande.txt'), 'a'.repeat(256 * 1024 + 1));
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('grande.txt', 'a', 'b'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'fileTooLarge');
+  });
+});
+
+test('rejects replacing text via traversal or absolute path', () => {
+  withFixtureRoot((root) => {
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const traversal = tool.invoke(replaceInvocation(join('..', 'fora.ts'), 'x', 'y'));
+    assert.equal(traversal.status, 'completed');
+    if (traversal.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(traversal.output.reasonCode, 'outsideRoot');
+
+    const absolute = tool.invoke(replaceInvocation(join(root, 'exemplo.ts'), 'x', 'y'));
+    assert.equal(absolute.status, 'completed');
+    if (absolute.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(absolute.output.reasonCode, 'absolutePathRejected');
+  });
+});
+
+test('rejects replacing text reached only through a symlink escaping the allowed root', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'sebastian-fs-tool-symlink-replace-'));
+  const root = join(parent, 'projeto');
+  const outside = join(parent, 'fora-da-raiz');
+  mkdirSync(root);
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'existente.txt'), 'conteúdo original');
+
+  const linkPath = join(root, 'atalho');
+  let symlinkCreated = true;
+  try {
+    symlinkSync(outside, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    symlinkCreated = false;
+  }
+
+  try {
+    if (!symlinkCreated) {
+      return;
+    }
+
+    const tool = new LocalFilesystemInspectionTool(root);
+    const result = tool.invoke(replaceInvocation('atalho/existente.txt', 'conteúdo', 'outro'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'outsideRoot');
+    assert.equal(readFileSync(join(outside, 'existente.txt'), 'utf8'), 'conteúdo original');
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('refuses to edit a file that already has uncommitted Git changes, without touching it', () => {
+  withFixtureRoot((root) => {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1; // já alterado manualmente\n');
+
+    const tool = new LocalFilesystemInspectionTool(root);
+    const result = tool.invoke(replaceInvocation('exemplo.ts', 'const x = 1;', 'const x = 2;'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.reasonCode, 'fileAlreadyModified');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 1; // já alterado manualmente\n');
+  });
+});
+
+test('edits a clean, committed file normally inside a Git repository', () => {
+  withFixtureRoot((root) => {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const tool = new LocalFilesystemInspectionTool(root);
+    const result = tool.invoke(replaceInvocation('exemplo.ts', 'const x = 1;', 'const x = 2;'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.outcome, 'ok');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+  });
+});
+
+test('edits normally when the allowed root is not a Git repository at all', () => {
+  withFixtureRoot((root) => {
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    const tool = new LocalFilesystemInspectionTool(root);
+
+    const result = tool.invoke(replaceInvocation('exemplo.ts', 'const x = 1;', 'const x = 2;'));
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(result.output.outcome, 'ok');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+  });
 });
 
 test('describes the workspace using the allowed root folder name and its top-level entry count', () => {

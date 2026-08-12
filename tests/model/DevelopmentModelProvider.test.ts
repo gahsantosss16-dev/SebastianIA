@@ -454,6 +454,94 @@ test('interpret falls back to a generic response when create/append markers have
   assert.equal(decision.intent, 'respond');
 });
 
+test('interpret recognizes "altere o arquivo X substituindo Y por Z" as a useTool replaceText decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Altere o arquivo src/exemplo.ts substituindo X por Y',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.replaceText',
+    toolInput: { path: 'src/exemplo.ts', searchText: 'X', replaceText: 'Y' },
+  });
+});
+
+test('interpret recognizes a marker asking about the repository state as a useTool git.status decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Qual é o estado deste repositório?',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, { intent: 'useTool', toolId: 'git.status', toolInput: {} });
+});
+
+test('interpret recognizes "mostre as alterações atuais" as a useTool git.diff decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Mostre as alterações atuais',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, { intent: 'useTool', toolId: 'git.diff', toolInput: {} });
+});
+
+test('interpret recognizes "execute os testes" as a useTool validation.test decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Execute os testes do projeto',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, { intent: 'useTool', toolId: 'validation.test', toolInput: {} });
+});
+
+test('interpret recognizes "execute o build" as a useTool validation.build decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Execute o build',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, { intent: 'useTool', toolId: 'validation.build', toolInput: {} });
+});
+
+test('interpret recognizes "execute o typecheck" as a useTool validation.typecheck decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Execute o typecheck',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, { intent: 'useTool', toolId: 'validation.typecheck', toolInput: {} });
+});
+
+test('interpret falls back to a generic response when replaceText markers have no search text', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Altere o arquivo src/exemplo.ts substituindo   por Y',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'respond');
+});
+
 test('interpret never performs network I/O and resolves purely locally', async () => {
   const provider = new DevelopmentModelProvider();
   const start = Date.now();

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync, appendFileSync, renameSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
   type SpecializedTool,
@@ -14,18 +14,26 @@ import {
   resolvePathWithinAllowedRoot,
   type LocalFilesystemPathRejectionReason,
 } from './LocalFilesystemPathGuard.js';
+import { runGitCommand } from './LocalGitCommandRunner.js';
 
 export const FILESYSTEM_LIST_DIRECTORY_TOOL_ID = 'fs.listDirectory';
 export const FILESYSTEM_READ_FILE_TOOL_ID = 'fs.readFile';
 export const FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID = 'fs.createTextFile';
 export const FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID = 'fs.appendTextFile';
 export const FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID = 'fs.describeWorkspace';
+export const FILESYSTEM_REPLACE_TEXT_TOOL_ID = 'fs.replaceText';
 
 /** Shared ceiling for both reading and writing text content - a file can never exceed this size through this Tool, read or write. */
 const MAX_TEXT_FILE_BYTES = 256 * 1024;
 const MAX_DIRECTORY_ENTRIES = 500;
 
-type FilesystemOperation = 'listDirectory' | 'readFile' | 'createTextFile' | 'appendTextFile' | 'describeWorkspace';
+type FilesystemOperation =
+  | 'listDirectory'
+  | 'readFile'
+  | 'createTextFile'
+  | 'appendTextFile'
+  | 'describeWorkspace'
+  | 'replaceText';
 
 type FilesystemRejectionReason =
   | LocalFilesystemPathRejectionReason
@@ -37,7 +45,10 @@ type FilesystemRejectionReason =
   | 'invalidPath'
   | 'alreadyExists'
   | 'contentTooLarge'
-  | 'appendExceedsLimit';
+  | 'appendExceedsLimit'
+  | 'searchTextNotFound'
+  | 'multipleOccurrences'
+  | 'fileAlreadyModified';
 
 interface FilesystemEntrySummary {
   readonly name: string;
@@ -112,6 +123,9 @@ export class LocalFilesystemInspectionTool implements SpecializedTool {
     const requestedPath = this.extractRequestedPath(input.payload);
     const content =
       operation === 'createTextFile' || operation === 'appendTextFile' ? this.extractContent(input.payload) : '';
+    const searchText = operation === 'replaceText' ? this.extractRequiredStringField(input.payload, 'searchText') : '';
+    const replacementText =
+      operation === 'replaceText' ? this.extractRequiredStringField(input.payload, 'replaceText') : '';
 
     try {
       const canonicalRoot = this.getCanonicalAllowedRoot();
@@ -130,6 +144,11 @@ export class LocalFilesystemInspectionTool implements SpecializedTool {
       }
       if (operation === 'readFile') {
         return this.completed(this.readFile(resolution.absolutePath, requestedPath));
+      }
+      if (operation === 'replaceText') {
+        return this.completed(
+          this.replaceText(canonicalRoot, resolution.absolutePath, requestedPath, searchText, replacementText),
+        );
       }
 
       return this.completed(this.appendTextFile(resolution.absolutePath, requestedPath, content));
@@ -293,6 +312,93 @@ export class LocalFilesystemInspectionTool implements SpecializedTool {
   }
 
   /**
+   * Reads the target's current content, requires the search text to match
+   * exactly once (never guesses among multiple matches, never silently
+   * no-ops when the text isn't found), and writes the result through a
+   * temp-file-then-rename in the same directory - the file is either fully
+   * the old content or fully the new content, never partially written. When
+   * the allowed root is a Git repository and the target already carries
+   * uncommitted changes, the edit is refused before any write, so Sebastian
+   * never silently compounds unrelated in-progress work.
+   */
+  private replaceText(
+    canonicalRoot: string,
+    absolutePath: string,
+    requestedPath: string,
+    searchText: string,
+    replacementText: string,
+  ): FilesystemOperationOutput {
+    const stat = statSync(absolutePath);
+    const displayPath = this.displayPath(requestedPath);
+
+    if (!stat.isFile()) {
+      return this.rejected('replaceText', requestedPath, 'notAFile');
+    }
+
+    if (stat.size > MAX_TEXT_FILE_BYTES) {
+      return this.rejected('replaceText', requestedPath, 'fileTooLarge');
+    }
+
+    const buffer = readFileSync(absolutePath);
+    if (buffer.includes(0)) {
+      return this.rejected('replaceText', requestedPath, 'binaryFile');
+    }
+
+    const currentContent = buffer.toString('utf8');
+    const occurrences = this.countOccurrences(currentContent, searchText);
+    if (occurrences === 0) {
+      return this.rejected('replaceText', requestedPath, 'searchTextNotFound');
+    }
+    if (occurrences > 1) {
+      return this.rejected('replaceText', requestedPath, 'multipleOccurrences');
+    }
+
+    const newContent = currentContent.replace(searchText, replacementText);
+    const newContentBytes = Buffer.byteLength(newContent, 'utf8');
+    if (newContentBytes > MAX_TEXT_FILE_BYTES) {
+      return this.rejected('replaceText', requestedPath, 'contentTooLarge');
+    }
+
+    if (this.hasUncommittedChanges(canonicalRoot, requestedPath)) {
+      return this.rejected('replaceText', requestedPath, 'fileAlreadyModified');
+    }
+
+    this.writeAtomically(absolutePath, newContent);
+
+    return {
+      operation: 'replaceText',
+      outcome: 'ok',
+      path: displayPath,
+      sizeBytes: newContentBytes,
+      message: `Arquivo "${displayPath}" atualizado.`,
+    };
+  }
+
+  private countOccurrences(content: string, searchText: string): number {
+    if (searchText === '') {
+      return 0;
+    }
+    return content.split(searchText).length - 1;
+  }
+
+  /**
+   * Best-effort, scoped to this single file: when the allowed root is not a
+   * Git repository (or git itself is unavailable), this returns false and
+   * the edit proceeds - filesystem protections alone remain in force, per
+   * the documented "still works outside Git" behavior.
+   */
+  private hasUncommittedChanges(canonicalRoot: string, requestedPath: string): boolean {
+    const outcome = runGitCommand(canonicalRoot, ['status', '--porcelain=v1', '--', requestedPath]);
+    return outcome.ranAsGitRepo && outcome.stdout.trim() !== '';
+  }
+
+  private writeAtomically(targetPath: string, content: string): void {
+    const tempPath = `${targetPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    writeFileSync(tempPath, content, 'utf8');
+    renameSync(tempPath, targetPath);
+  }
+
+  /**
    * Minimal, local, zero-dependency workspace identity: the allowed root's
    * own folder name plus a top-level entry count. No indexing, no
    * embeddings, no external service - just what the filesystem already
@@ -354,6 +460,12 @@ export class LocalFilesystemInspectionTool implements SpecializedTool {
         return `O conteúdo é grande demais para criar "${displayPath}" (limite de 256 KiB).`;
       case 'appendExceedsLimit':
         return `Acrescentar esse conteúdo faria "${displayPath}" ultrapassar o limite de 256 KiB.`;
+      case 'searchTextNotFound':
+        return `Não encontrei o texto indicado em "${displayPath}".`;
+      case 'multipleOccurrences':
+        return `O texto indicado aparece mais de uma vez em "${displayPath}"; seja mais específico para evitar uma edição ambígua.`;
+      case 'fileAlreadyModified':
+        return `"${displayPath}" já possui alterações não commitadas; não vou editá-lo automaticamente.`;
     }
   }
 
@@ -378,6 +490,9 @@ export class LocalFilesystemInspectionTool implements SpecializedTool {
     if (toolId === FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID) {
       return 'describeWorkspace';
     }
+    if (toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID) {
+      return 'replaceText';
+    }
     throw new InvalidSpecializedToolInvocationInputError(
       `Local filesystem inspection tool does not support toolId "${toolId}".`,
     );
@@ -394,13 +509,17 @@ export class LocalFilesystemInspectionTool implements SpecializedTool {
   }
 
   private extractContent(payload: Readonly<Record<string, unknown>>): string {
-    const content = (payload as { readonly content?: unknown }).content;
-    if (typeof content !== 'string') {
+    return this.extractRequiredStringField(payload, 'content');
+  }
+
+  private extractRequiredStringField(payload: Readonly<Record<string, unknown>>, field: string): string {
+    const value = (payload as Record<string, unknown>)[field];
+    if (typeof value !== 'string') {
       throw new InvalidSpecializedToolInvocationInputError(
-        'Local filesystem inspection tool payload must include a string content for this operation.',
+        `Local filesystem inspection tool payload must include a string ${field} for this operation.`,
       );
     }
-    return content;
+    return value;
   }
 
   private getCanonicalAllowedRoot(): string {

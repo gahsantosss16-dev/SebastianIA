@@ -350,6 +350,46 @@ test('specialized agent invokes the Tool for a workspace write decision and rela
   assert.deepEqual(result.output.finalResult, { message: 'Nota "pendencias.md" criada.' });
 });
 
+test('specialized agent invokes the Tool for a git-inspection decision and relays its message', async () => {
+  let invocationPayload: unknown;
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'useTool', toolId: 'git.status', toolInput: {} }),
+  };
+  const agent = new InMemorySpecializedAgent(
+    {
+      invoke: (input) => {
+        invocationPayload = input;
+        return {
+          status: 'completed',
+          output: { operation: 'status', outcome: 'ok', branch: 'main', clean: true, message: 'Branch "main", sem alterações pendentes.' },
+        };
+      },
+    },
+    modelProvider,
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Qual é o estado deste repositório?' } } },
+  });
+
+  assert.deepEqual(invocationPayload, {
+    toolId: 'git.status',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    responsibilityId: 'capability.execute.converse',
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: {},
+  });
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'Branch "main", sem alterações pendentes.' });
+});
+
 test('specialized agent turns an addTask decision into a task-created finalResult', async () => {
   const modelProvider: ModelProvider = {
     interpret: async () => ({ intent: 'addTask', content: 'comprar leite' }),
