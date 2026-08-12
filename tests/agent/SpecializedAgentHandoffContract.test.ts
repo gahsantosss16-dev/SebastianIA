@@ -7,7 +7,7 @@ import {
 } from '../../core/agent/index.js';
 import { SpecializedToolInvocationFailureError } from '../../core/tool/index.js';
 import type { ModelInterpretationDecision, ModelProvider } from '../../core/model/ModelProviderContract.js';
-import type { DevelopmentTaskPlan, DevelopmentTaskResult } from '../../core/development/index.js';
+import type { DevelopmentTaskPlan, DevelopmentTaskResult, GoalDefinition, GoalExecutionResult } from '../../core/development/index.js';
 
 test('specialized agent returns completed for valid handoff input', async () => {
   let invokeCount = 0;
@@ -531,6 +531,94 @@ test('specialized agent delegates developTask execution to an explicitly injecte
     assert.fail('Expected completed status.');
   }
   assert.deepEqual(result.output.finalResult, { message: 'stub result', developmentTask: stubResult });
+});
+
+test('specialized agent runs a pursueGoal decision through its default GoalExecutionOrchestrator, investigating with the injected Tool (SPEC-046)', async () => {
+  const goal: GoalDefinition = {
+    objective: 'Descubra por que os testes estão falhando.',
+    authorization: 'readOnly',
+    validationToolId: 'validation.test',
+  };
+  const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'pursueGoal', goal }) };
+  const invokedToolIds: string[] = [];
+  const outputsByToolId: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+    'git.status': { operation: 'status', outcome: 'ok', branch: 'main', clean: true, changedFiles: [] },
+    'validation.test': { operation: 'validation', outcome: 'ok', toolId: 'validation.test', succeeded: true, exitCode: 0 },
+  };
+
+  const agent = new InMemorySpecializedAgent(
+    {
+      invoke: (input) => {
+        invokedToolIds.push(input.toolId);
+        return { status: 'completed', output: outputsByToolId[input.toolId] ?? {} };
+      },
+    },
+    modelProvider,
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Descubra por que os testes estão falhando.' } } },
+  });
+
+  assert.deepEqual(invokedToolIds, ['git.status', 'validation.test']);
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  const finalResult = result.output.finalResult as { readonly message: string; readonly goalExecution: GoalExecutionResult };
+  assert.equal(typeof finalResult.message, 'string');
+  assert.equal(finalResult.goalExecution.status, 'completed');
+  assert.equal(finalResult.goalExecution.authorization, 'readOnly');
+  assert.deepEqual(finalResult.goalExecution.filesChanged, []);
+
+  const memoryExtras = result.output.memoryExtras as { conversationTurn: { kind: string } } | undefined;
+  assert.equal(memoryExtras?.conversationTurn.kind, 'pursueGoal');
+});
+
+test('specialized agent delegates pursueGoal execution to an explicitly injected GoalExecutionOrchestrator instead of building its own', async () => {
+  const goal: GoalDefinition = { objective: 'x', authorization: 'readOnly', validationToolId: 'validation.test' };
+  const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'pursueGoal', goal }) };
+  let receivedGoal: GoalDefinition | undefined;
+  const stubResult: GoalExecutionResult = {
+    objective: 'x',
+    authorization: 'readOnly',
+    status: 'completed',
+    steps: [],
+    decisions: [],
+    filesChanged: [],
+    message: 'stub goal result',
+  };
+
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => assert.fail('The injected orchestrator, not the raw Tool, should have been used.') },
+    modelProvider,
+    undefined,
+    {
+      execute: (receivedGoalArg) => {
+        receivedGoal = receivedGoalArg;
+        return stubResult;
+      },
+    },
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'qualquer texto' } } },
+  });
+
+  assert.deepEqual(receivedGoal, goal);
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'stub goal result', goalExecution: stubResult });
 });
 
 test('specialized agent turns an addTask decision into a task-created finalResult', async () => {

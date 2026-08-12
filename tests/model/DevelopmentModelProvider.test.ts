@@ -817,6 +817,140 @@ test('interpret still recognizes an explicit "altere o arquivo" edit request ove
   });
 });
 
+test('interpret recognizes "descubra por que os testes estão falhando" as a read-only pursueGoal (SPEC-046)', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Sebastian, analise esse projeto e descubra por que os testes estão falhando.',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'pursueGoal');
+  if (decision.intent !== 'pursueGoal') {
+    assert.fail('Expected pursueGoal intent.');
+  }
+  assert.equal(decision.goal.authorization, 'readOnly');
+  assert.equal(decision.goal.validationToolId, 'validation.test');
+  assert.equal(decision.goal.fix, undefined);
+});
+
+test('interpret recognizes an investigation goal for the build, picking the build validation toolId', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Investigue por que o build está quebrando.',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'pursueGoal');
+  if (decision.intent !== 'pursueGoal') {
+    assert.fail('Expected pursueGoal intent.');
+  }
+  assert.equal(decision.goal.authorization, 'readOnly');
+  assert.equal(decision.goal.validationToolId, 'validation.build');
+});
+
+test('interpret recognizes "corrija o arquivo X substituindo Y por Z" as a write-authorized pursueGoal with a concrete fix', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Corrija o arquivo exemplo.ts substituindo const x = 1; por const x = 2;',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'pursueGoal',
+    goal: {
+      objective: 'Corrija o arquivo exemplo.ts substituindo const x = 1; por const x = 2;',
+      authorization: 'writeAuthorized',
+      validationToolId: 'validation.test',
+      fix: { path: 'exemplo.ts', searchText: 'const x = 1;', replaceText: 'const x = 2;' },
+    },
+  });
+});
+
+test('interpret recognizes a vague "corrija esse problema" as write-authorized but without a concrete fix - investigation only, no edit is fabricated', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Corrija esse problema nos testes.',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'pursueGoal');
+  if (decision.intent !== 'pursueGoal') {
+    assert.fail('Expected pursueGoal intent.');
+  }
+  assert.equal(decision.goal.authorization, 'writeAuthorized');
+  assert.equal(decision.goal.fix, undefined);
+});
+
+test('interpret recognizes "conserte o build" as write-authorized, inferring the build validation toolId even without the word "problema"', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Conserte o build.',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'pursueGoal');
+  if (decision.intent !== 'pursueGoal') {
+    assert.fail('Expected pursueGoal intent.');
+  }
+  assert.equal(decision.goal.authorization, 'writeAuthorized');
+  assert.equal(decision.goal.validationToolId, 'validation.build');
+});
+
+test('interpret never treats generic continuation wording ("continua"/"resolve"/"pode seguir") alone as authorization to pursue a goal', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  for (const text of ['Continua', 'Resolve', 'Pode seguir']) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-08-12T00:00:00.000Z' });
+    assert.notEqual(decision.intent, 'pursueGoal', `expected "${text}" to never produce a pursueGoal decision`);
+  }
+});
+
+test('interpret turns a memory-driven resumption into a pursuable goal when the relevant memory names a concrete failing target (SPEC-046 section 9)', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Sebastian, veja onde paramos nesse projeto e continue o trabalho.',
+    rememberedFacts: [fact('o projeto Sebastian IA tem os testes falhando na SPEC-046', 'f1', '2026-08-11T00:00:00.000Z')],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'pursueGoal');
+  if (decision.intent !== 'pursueGoal') {
+    assert.fail('Expected pursueGoal intent.');
+  }
+  assert.equal(decision.goal.authorization, 'readOnly');
+  assert.equal(decision.goal.validationToolId, 'validation.test');
+  assert.ok(decision.goal.objective.includes('testes falhando'));
+});
+
+test('interpret falls back to the plain continuation response when a resumption phrase has no relevant, concretely pursuable memory', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Sebastian, veja onde paramos nesse projeto e continue o trabalho.',
+    rememberedFacts: [],
+    recentExchanges: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.notEqual(decision.intent, 'pursueGoal');
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Ainda não tenho um contexto anterior para continuar.',
+    recordable: false,
+  });
+});
+
 test('interpret never performs network I/O and resolves purely locally', async () => {
   const provider = new DevelopmentModelProvider();
   const start = Date.now();

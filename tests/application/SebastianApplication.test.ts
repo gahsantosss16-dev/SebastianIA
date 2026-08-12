@@ -707,6 +707,223 @@ test('SPEC-045: recentExchanges written back by a converse turn never leak into 
   });
 });
 
+test('SPEC-046: a read-only investigation goal concludes without altering any file, and adapts by skipping the diff step when the hypothesis of failure is contradicted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-goal-investigate-passing-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 2;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [{ toolId: 'validation.test', executable: process.execPath, args: ['-e', 'process.exit(0)'] }],
+    });
+
+    const result = await core.executeCommand(
+      converseInput('Sebastian, analise esse projeto e descubra por que os testes estão falhando.', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly goalExecution: { readonly status: string; readonly authorization: string; readonly filesChanged: readonly string[]; readonly steps: ReadonlyArray<{ toolId: string }> };
+    };
+
+    assert.equal(output.goalExecution.status, 'completed');
+    assert.equal(output.goalExecution.authorization, 'readOnly');
+    assert.deepEqual(output.goalExecution.filesChanged, []);
+    assert.deepEqual(
+      output.goalExecution.steps.map((step) => step.toolId),
+      ['git.status', 'validation.test'],
+      'no git.diff step expected once the failure hypothesis is contradicted by a passing validation',
+    );
+    assert.ok(output.message.includes('passando'));
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-046: an investigation goal gathers real evidence when the validation actually fails, and never modifies any file - investigation alone never authorizes a fix', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-goal-investigate-failing-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [{ toolId: 'validation.test', executable: process.execPath, args: ['-e', 'process.exit(1)'] }],
+    });
+
+    const result = await core.executeCommand(
+      converseInput('Descubra por que os testes estão falhando.', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly goalExecution: { readonly status: string; readonly filesChanged: readonly string[]; readonly steps: ReadonlyArray<{ toolId: string }> };
+    };
+
+    assert.equal(output.goalExecution.status, 'completed');
+    assert.deepEqual(output.goalExecution.filesChanged, []);
+    assert.deepEqual(
+      output.goalExecution.steps.map((step) => step.toolId),
+      ['git.status', 'validation.test', 'git.diff'],
+    );
+    assert.ok(output.message.includes('autorização explícita para alterar arquivos'));
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 1;\n', 'investigation must never edit anything');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-046: an explicitly authorized fix goal applies the edit and only reports success once the validation is verified to pass afterward', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-goal-fix-verified-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        {
+          toolId: 'validation.test',
+          executable: process.execPath,
+          args: ['-e', "process.exit(require('fs').readFileSync('exemplo.ts','utf8').includes('const x = 2;') ? 0 : 1)"],
+        },
+      ],
+    });
+
+    const result = await core.executeCommand(
+      converseInput('Corrija o arquivo exemplo.ts substituindo const x = 1; por const x = 2;', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly goalExecution: { readonly status: string; readonly authorization: string; readonly filesChanged: readonly string[] };
+    };
+
+    assert.equal(output.goalExecution.status, 'completed');
+    assert.equal(output.goalExecution.authorization, 'writeAuthorized');
+    assert.deepEqual(output.goalExecution.filesChanged, ['exemplo.ts']);
+    assert.ok(output.message.includes('verificada'));
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-046: a fix goal whose edit does not make the validation pass is reported as failed, never as completed - executing an action is not the same as achieving the objective', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-goal-fix-unverified-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        {
+          toolId: 'validation.test',
+          executable: process.execPath,
+          // Deliberately checks for content the requested edit never produces, so verification must fail.
+          args: ['-e', "process.exit(require('fs').readFileSync('exemplo.ts','utf8').includes('const x = 99;') ? 0 : 1)"],
+        },
+      ],
+    });
+
+    const result = await core.executeCommand(
+      converseInput('Corrija o arquivo exemplo.ts substituindo const x = 1; por const x = 2;', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly goalExecution: { readonly status: string; readonly reason?: string; readonly filesChanged: readonly string[] };
+    };
+
+    assert.equal(output.goalExecution.status, 'failed');
+    assert.equal(output.goalExecution.reason, 'verificationFailed');
+    assert.deepEqual(output.goalExecution.filesChanged, ['exemplo.ts'], 'the edit is preserved for review, never rolled back');
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-046: a resumption phrase reuses SPEC-045 relevant-memory retrieval to turn "onde paramos" into a real, evidence-gathering investigation', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-goal-resume-'));
+  try {
+    await withTempDataDir(async (dataDir) => {
+      initGitRepo(root);
+      writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+      commitAll(root, 'initial commit');
+
+      const core = createSebastianApplication({
+        logger,
+        allowedFilesystemRoot: root,
+        dataDir,
+        authorizedCommands: [{ toolId: 'validation.test', executable: process.execPath, args: ['-e', 'process.exit(1)'] }],
+      });
+
+      await core.executeCommand(
+        converseInput('Sebastian, lembra que o projeto Sebastian IA tem os testes falhando na SPEC-046', '2026-08-12T00:00:00.000Z'),
+      );
+
+      const result = await core.executeCommand(
+        converseInput('Sebastian, veja onde paramos nesse projeto e continue o trabalho.', '2026-08-12T00:00:01.000Z'),
+      );
+
+      const output = result.output as {
+        readonly goalExecution: { readonly status: string; readonly authorization: string; readonly steps: ReadonlyArray<{ toolId: string }> };
+      };
+
+      assert.equal(output.goalExecution.authorization, 'readOnly');
+      assert.equal(output.goalExecution.status, 'completed');
+      assert.deepEqual(
+        output.goalExecution.steps.map((step) => step.toolId),
+        ['git.status', 'validation.test', 'git.diff'],
+      );
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-046: after a goal execution, a later short continuation in a separate Core instance keeps the thread using the SPEC-045 memory brain, unchanged', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-goal-continuity-'));
+  try {
+    await withTempDataDir(async (dataDir) => {
+      initGitRepo(root);
+      writeFileSync(join(root, 'exemplo.ts'), 'const x = 2;\n');
+      commitAll(root, 'initial commit');
+
+      const firstCore = createSebastianApplication({
+        logger,
+        allowedFilesystemRoot: root,
+        dataDir,
+        authorizedCommands: [{ toolId: 'validation.test', executable: process.execPath, args: ['-e', 'process.exit(0)'] }],
+      });
+      const investigation = await firstCore.executeCommand(
+        converseInput('Descubra por que os testes estão falhando.', '2026-08-12T00:00:00.000Z'),
+      );
+
+      const secondCore = createSebastianApplication({ logger, allowedFilesystemRoot: root, dataDir });
+      const continuation = await secondCore.executeCommand(converseInput('Então continua', '2026-08-12T00:01:00.000Z'));
+
+      assert.deepEqual(continuation.output, {
+        message: `Continuando de onde paramos: ${(investigation.output as { readonly message: string }).message}`,
+      });
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });

@@ -17,14 +17,19 @@ import {
 import type {
   ModelInterpretationDecision,
   ModelInterpretationDevelopTaskDecision,
+  ModelInterpretationPursueGoalDecision,
   ModelInterpretationUseToolDecision,
   ModelProvider,
 } from '../model/ModelProviderContract.js';
 import {
   DevelopmentTaskOrchestrator,
+  GoalExecutionOrchestrator,
   type DevelopmentTaskExecutionContext,
   type DevelopmentTaskPlan,
   type DevelopmentTaskResult,
+  type GoalDefinition,
+  type GoalExecutionContext,
+  type GoalExecutionResult,
 } from '../development/index.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
@@ -34,19 +39,26 @@ interface DevelopmentTaskOrchestratorLike {
   execute(plan: DevelopmentTaskPlan, context: DevelopmentTaskExecutionContext): DevelopmentTaskResult;
 }
 
+interface GoalExecutionOrchestratorLike {
+  execute(goal: GoalDefinition, context: GoalExecutionContext): GoalExecutionResult;
+}
+
 export class InMemorySpecializedAgent implements SpecializedAgent {
   private readonly specializedTool: SpecializedTool;
   private readonly modelProvider: ModelProvider | undefined;
   private readonly developmentTaskOrchestrator: DevelopmentTaskOrchestratorLike;
+  private readonly goalExecutionOrchestrator: GoalExecutionOrchestratorLike;
 
   public constructor(
     specializedTool: SpecializedTool = new InMemorySpecializedTool(),
     modelProvider?: ModelProvider,
     developmentTaskOrchestrator?: DevelopmentTaskOrchestratorLike,
+    goalExecutionOrchestrator?: GoalExecutionOrchestratorLike,
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
     this.developmentTaskOrchestrator = developmentTaskOrchestrator ?? new DevelopmentTaskOrchestrator(specializedTool);
+    this.goalExecutionOrchestrator = goalExecutionOrchestrator ?? new GoalExecutionOrchestrator(specializedTool);
   }
 
   public async handoff(input: SpecializedAgentHandoffInput): Promise<SpecializedAgentHandoffResult> {
@@ -96,6 +108,10 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
 
     if (decision.intent === 'developTask') {
       return this.handleDevelopTask(input, decision);
+    }
+
+    if (decision.intent === 'pursueGoal') {
+      return this.handlePursueGoal(input, decision);
     }
 
     let finalResult: Readonly<Record<string, unknown>>;
@@ -247,6 +263,31 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     return {
       status: 'completed',
       output: { finalResult: { message: result.message, developmentTask: result } },
+    };
+  }
+
+  /**
+   * Runs a bounded, adaptive goal (SPEC-046) end to end within this single
+   * handoff - OBJECTIVE → PLAN → ACT → OBSERVE → DECIDE → VERIFY → COMPLETE,
+   * entirely inside `GoalExecutionOrchestrator`. As with `developTask`, the
+   * orchestrator's own bounded, already-summarized result becomes the
+   * finalResult verbatim - no raw stdout/diff, and no unverified "success"
+   * (a fix is only ever reported completed once the orchestrator's own
+   * verification step confirms it).
+   */
+  private handlePursueGoal(
+    input: SpecializedAgentHandoffInput,
+    decision: ModelInterpretationPursueGoalDecision,
+  ): SpecializedAgentHandoffResult {
+    const result = this.goalExecutionOrchestrator.execute(decision.goal, {
+      executionId: input.executionId,
+      responsibilityId: input.responsibilityId,
+      requestedAt: input.requestedAt,
+    });
+
+    return {
+      status: 'completed',
+      output: { finalResult: { message: result.message, goalExecution: result } },
     };
   }
 

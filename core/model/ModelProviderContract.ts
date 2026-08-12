@@ -1,5 +1,6 @@
 import type { PendingTaskRecord, RecentExchangeRecord, RememberedFactRecord } from '../memory/index.js';
 import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
+import type { GoalDefinition } from '../development/GoalExecutionContract.js';
 
 export interface ModelInterpretationRequest {
   readonly text: string;
@@ -79,13 +80,28 @@ export interface ModelInterpretationDevelopTaskDecision {
   readonly plan: DevelopmentTaskPlan;
 }
 
+/**
+ * A decision to pursue a goal (SPEC-046) through the adaptive OBJECTIVE →
+ * PLAN → ACT → OBSERVE → DECIDE → VERIFY → COMPLETE cycle, instead of a
+ * single Tool invocation or an already-fully-formed plan. Unlike
+ * `developTask`, the ModelProvider does not build the step sequence here -
+ * only the goal itself (what to achieve, and what it is authorized to do) -
+ * the Agent's `GoalExecutionOrchestrator` decides each next action from what
+ * the previous one observed.
+ */
+export interface ModelInterpretationPursueGoalDecision {
+  readonly intent: 'pursueGoal';
+  readonly goal: GoalDefinition;
+}
+
 export type ModelInterpretationDecision =
   | ModelInterpretationRememberDecision
   | ModelInterpretationRespondDecision
   | ModelInterpretationUseToolDecision
   | ModelInterpretationAddTaskDecision
   | ModelInterpretationCompleteTaskDecision
-  | ModelInterpretationDevelopTaskDecision;
+  | ModelInterpretationDevelopTaskDecision
+  | ModelInterpretationPursueGoalDecision;
 
 /**
  * Substitutable boundary for natural-language interpretation. Core never

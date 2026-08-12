@@ -20,6 +20,7 @@ import {
   VALIDATION_TYPECHECK_TOOL_ID,
 } from '../tool/LocalAuthorizedCommandTool.js';
 import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
+import type { GoalDefinition } from '../development/GoalExecutionContract.js';
 import {
   ConversationContextComposer,
   type ComposedConversationContext,
@@ -61,6 +62,24 @@ const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
 const NO_MEMORY_ANSWER = 'Ainda não tenho nenhuma memória registrada sobre isso.';
 const NO_PENDING_TASKS_ANSWER = 'Você não tem nenhuma tarefa pendente.';
 
+/**
+ * SPEC-046 goal recognition: deliberately a handful of marker/pattern
+ * checks, exactly like every other recognition in this file - not NLU. Three
+ * shapes are recognized: a concrete, already-authorized fix ("corrija o
+ * arquivo X substituindo Y por Z"), a vague fix request naming no concrete
+ * edit ("corrija esse problema"), and a read-only investigation ("descubra
+ * por que os testes estão falhando"). Authorization is derived exclusively
+ * from which of these matched - never inferred from generic continuation
+ * wording ("continua"/"resolve"/"pode seguir"), which is handled entirely
+ * by the pre-existing contextual layer below and never reaches here.
+ */
+const INVESTIGATE_MARKERS: readonly string[] = ['descubra', 'investigue'];
+const FAILURE_MARKERS: readonly string[] = ['falhando', 'falha', 'quebrando', 'quebrado', 'não passa', 'nao passa'];
+const FIX_MARKERS: readonly string[] = ['corrija', 'conserte'];
+const FIX_GOAL_PATTERN = /corrija o arquivo\s+(.+?)\s+substituindo\s+(.+?)\s+por\s+(.+)$/i;
+/** Both fragments must be present - "onde paramos" alone is already handled as a plain continuationReference by the contextual layer. */
+const RESUME_WORK_MARKERS: readonly string[] = ['onde paramos', 'continue o trabalho'];
+
 /** An answer paired with whether it is worth recording as recent conversation context - see ModelInterpretationRespondDecision.recordable. */
 interface RecordableAnswer {
   readonly answer: string;
@@ -83,6 +102,12 @@ export class DevelopmentModelProvider implements ModelProvider {
 
   public async interpret(request: ModelInterpretationRequest): Promise<ModelInterpretationDecision> {
     this.validateRequest(request);
+
+    const composed = this.contextComposer.compose({
+      text: request.text,
+      rememberedFacts: request.rememberedFacts,
+      recentExchanges: request.recentExchanges ?? [],
+    });
 
     const rememberContent = this.extractRememberContent(request.text);
     if (rememberContent !== undefined) {
@@ -126,6 +151,21 @@ export class DevelopmentModelProvider implements ModelProvider {
     const developTaskPlan = this.extractDevelopTaskPlan(request.text);
     if (developTaskPlan !== undefined) {
       return { intent: 'developTask', plan: developTaskPlan };
+    }
+
+    const fixGoal = this.extractFixGoal(request.text);
+    if (fixGoal !== undefined) {
+      return { intent: 'pursueGoal', goal: fixGoal };
+    }
+
+    const investigateGoal = this.extractInvestigateGoal(request.text);
+    if (investigateGoal !== undefined) {
+      return { intent: 'pursueGoal', goal: investigateGoal };
+    }
+
+    const vagueFixGoal = this.extractVagueFixGoal(request.text);
+    if (vagueFixGoal !== undefined) {
+      return { intent: 'pursueGoal', goal: vagueFixGoal };
     }
 
     const replaceTextRequest = this.extractReplaceTextRequest(request.text);
@@ -173,11 +213,10 @@ export class DevelopmentModelProvider implements ModelProvider {
       };
     }
 
-    const composed = this.contextComposer.compose({
-      text: request.text,
-      rememberedFacts: request.rememberedFacts,
-      recentExchanges: request.recentExchanges ?? [],
-    });
+    const resumeAndPursueGoal = this.extractResumeAndPursueGoal(request.text, composed);
+    if (resumeAndPursueGoal !== undefined) {
+      return { intent: 'pursueGoal', goal: resumeAndPursueGoal };
+    }
 
     if (composed.intent === 'resumptionReference') {
       return { intent: 'respond', ...this.composeResumptionAnswer(composed) };
@@ -357,6 +396,135 @@ export class DevelopmentModelProvider implements ModelProvider {
 
   private stripSurroundingQuotes(fragment: string): string {
     return fragment.trim().replace(/^["'“”]+|["'“”]+$/g, '');
+  }
+
+  /**
+   * Minimal, deliberately narrow recognition of "corrija o arquivo X
+   * substituindo Y por Z" proving the SPEC-046 write-authorized goal
+   * end-to-end: the user already named a concrete edit, so authorization is
+   * `writeAuthorized` and `fix` is populated - the orchestrator still
+   * verifies the validation passes afterward before ever reporting success.
+   */
+  private extractFixGoal(text: string): GoalDefinition | undefined {
+    const match = text.match(FIX_GOAL_PATTERN);
+    const rawPath = match?.[1];
+    const rawSearchText = match?.[2];
+    const rawReplaceText = match?.[3];
+    if (rawPath === undefined || rawSearchText === undefined || rawReplaceText === undefined) {
+      return undefined;
+    }
+
+    const path = this.cleanPathFragment(rawPath);
+    const searchText = this.stripSurroundingQuotes(rawSearchText);
+    const replaceText = this.stripSurroundingQuotes(rawReplaceText);
+    if (path === '' || searchText === '') {
+      return undefined;
+    }
+
+    const validationToolId = this.pickValidationToolId(text.toLowerCase()) ?? VALIDATION_TEST_TOOL_ID;
+    return {
+      objective: text.trim(),
+      authorization: 'writeAuthorized',
+      validationToolId,
+      fix: { path, searchText, replaceText },
+    };
+  }
+
+  /**
+   * "Corrija esse problema"/"conserte os testes" - write is authorized by
+   * the wording itself, but no concrete edit was named. The goal is still
+   * pursued (investigate first), it just never reaches an edit step: see
+   * `GoalExecutionOrchestrator`'s investigate procedure, which reports that
+   * no safe concrete fix could be determined automatically instead of
+   * fabricating one.
+   */
+  private extractVagueFixGoal(text: string): GoalDefinition | undefined {
+    const lower = text.toLowerCase();
+    if (!FIX_MARKERS.some((marker) => lower.includes(marker))) {
+      return undefined;
+    }
+
+    const validationToolId = this.pickValidationToolId(lower);
+    if (!lower.includes('problema') && validationToolId === undefined) {
+      return undefined;
+    }
+
+    return {
+      objective: text.trim(),
+      authorization: 'writeAuthorized',
+      validationToolId: validationToolId ?? VALIDATION_TEST_TOOL_ID,
+    };
+  }
+
+  /**
+   * "Descubra por que os testes estão falhando"/"Investigue o build
+   * quebrado" - read-only by construction: this recognition never produces
+   * a `fix`, and `GoalExecutionOrchestrator` never invokes `fs.replaceText`
+   * for a `readOnly` goal regardless of what it observes.
+   */
+  private extractInvestigateGoal(text: string): GoalDefinition | undefined {
+    const lower = text.toLowerCase();
+    if (!INVESTIGATE_MARKERS.some((marker) => lower.includes(marker))) {
+      return undefined;
+    }
+    if (!FAILURE_MARKERS.some((marker) => lower.includes(marker))) {
+      return undefined;
+    }
+
+    const validationToolId = this.pickValidationToolId(lower);
+    if (validationToolId === undefined) {
+      return undefined;
+    }
+
+    return { objective: text.trim(), authorization: 'readOnly', validationToolId };
+  }
+
+  /**
+   * "Sebastian, veja onde paramos nesse projeto e continue o trabalho" -
+   * turns a memory-driven resumption into an actual goal (SPEC-046 section
+   * 9), reusing the exact same relevance selection the SPEC-045 contextual
+   * layer already computed for this text - never a second memory search.
+   * Only fires when the most relevant memory names something concretely
+   * pursuable (a validation target that is described as failing); otherwise
+   * this falls through to the plain, already-homologated continuation
+   * response below, rather than fabricating a goal from nothing.
+   */
+  private extractResumeAndPursueGoal(text: string, composed: ComposedConversationContext): GoalDefinition | undefined {
+    const lower = text.toLowerCase();
+    if (!RESUME_WORK_MARKERS.every((marker) => lower.includes(marker))) {
+      return undefined;
+    }
+
+    const [top] = composed.relevantMemories;
+    if (!top) {
+      return undefined;
+    }
+
+    const contentLower = top.content.toLowerCase();
+    const mentionsFailure = FAILURE_MARKERS.some((marker) => contentLower.includes(marker));
+    const validationToolId = this.pickValidationToolId(contentLower);
+    if (!mentionsFailure || validationToolId === undefined) {
+      return undefined;
+    }
+
+    return {
+      objective: `Retomar o trabalho: ${top.content}`,
+      authorization: 'readOnly',
+      validationToolId,
+    };
+  }
+
+  private pickValidationToolId(lowerText: string): string | undefined {
+    if (lowerText.includes('typecheck')) {
+      return VALIDATION_TYPECHECK_TOOL_ID;
+    }
+    if (lowerText.includes('build')) {
+      return VALIDATION_BUILD_TOOL_ID;
+    }
+    if (lowerText.includes('teste')) {
+      return VALIDATION_TEST_TOOL_ID;
+    }
+    return undefined;
   }
 
   /** Minimal, deliberately narrow marker recognition proving the "add a task" intent end-to-end. */

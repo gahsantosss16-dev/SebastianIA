@@ -1,0 +1,463 @@
+import type { SpecializedTool, SpecializedToolInvocationResult } from '../tool/SpecializedToolInvocationContract.js';
+import { FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../tool/LocalFilesystemInspectionTool.js';
+import { GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID } from '../tool/LocalGitInspectionTool.js';
+import { InvalidGoalExecutionInputError } from './GoalExecutionErrors.js';
+import type {
+  GoalDefinition,
+  GoalExecutionDecisionRecord,
+  GoalExecutionResult,
+  GoalExecutionStatus,
+  GoalExecutionStepPhase,
+  GoalExecutionStepRecord,
+} from './GoalExecutionContract.js';
+
+/** Hard, non-negotiable ceiling on Tool calls per goal - the guard that guarantees an objective incapable of converging still stops safely instead of looping. */
+export const MAX_GOAL_EXECUTION_STEPS = 6;
+
+const VALIDATION_TOOL_ID_PREFIX = 'validation.';
+
+/** Read-only toolIds a goal may always invoke, regardless of authorization. */
+const READ_ONLY_TOOL_IDS: ReadonlySet<string> = new Set([GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID]);
+
+export interface GoalExecutionContext {
+  readonly executionId: string;
+  readonly responsibilityId: string;
+  readonly requestedAt: string;
+}
+
+type ActOutcome =
+  | { readonly kind: 'output'; readonly output: Readonly<Record<string, unknown>> }
+  | { readonly kind: 'incomplete' }
+  | { readonly kind: 'unauthorized' }
+  | { readonly kind: 'toolFailure' };
+
+/**
+ * Runs a short, adaptive OBJECTIVE → PLAN → ACT → OBSERVE → DECIDE → VERIFY →
+ * COMPLETE cycle over the same `SpecializedTool` interface every other
+ * orchestrator in this codebase already uses - never a new Tool, never a
+ * second dispatch mechanism. Unlike `DevelopmentTaskOrchestrator` (which
+ * executes a plan that is already fully built before execution starts), this
+ * engine decides its next action at runtime from what the previous action
+ * observed - the "adapt when a hypothesis is wrong" behavior this block asks
+ * for. There are exactly two concrete procedures, chosen by whether the goal
+ * carries a concrete `fix`:
+ *
+ * - **investigate** (`goal.fix` absent): inspect Git state, run the
+ *   validation the objective is about, and only gather a diff as further
+ *   evidence when that validation actually failed - if it already passes,
+ *   the cycle stops immediately instead of manufacturing more steps
+ *   (the plan adapting to a contradicted hypothesis). Never touches
+ *   `fs.replaceText`, regardless of `goal.authorization`.
+ * - **fix** (`goal.fix` present and `goal.authorization === 'writeAuthorized'`):
+ *   inspect, apply the one concrete edit the user already specified, and
+ *   then re-run the same validation as verification - a completed status is
+ *   only ever reported when that verification actually passes ("ação
+ *   executada ≠ objetivo concluído").
+ *
+ * `fs.replaceText` is refused, defensively, whenever authorization is not
+ * `writeAuthorized` - even if a `fix` were somehow present on a read-only
+ * goal, this engine would never invoke it.
+ */
+export class GoalExecutionOrchestrator {
+  private readonly specializedTool: SpecializedTool;
+  private readonly maxSteps: number;
+
+  public constructor(specializedTool: SpecializedTool, maxSteps: number = MAX_GOAL_EXECUTION_STEPS) {
+    if (!specializedTool || typeof specializedTool.invoke !== 'function') {
+      throw new InvalidGoalExecutionInputError('Goal execution orchestrator specialized tool must provide invoke.');
+    }
+    if (typeof maxSteps !== 'number' || !Number.isInteger(maxSteps) || maxSteps < 1) {
+      throw new InvalidGoalExecutionInputError('Goal execution orchestrator maxSteps must be a positive integer.');
+    }
+    this.specializedTool = specializedTool;
+    this.maxSteps = maxSteps;
+  }
+
+  public execute(goal: GoalDefinition, context: GoalExecutionContext): GoalExecutionResult {
+    this.validateGoal(goal);
+    this.validateContext(context);
+
+    const run = new GoalExecutionRun(this.specializedTool, this.maxSteps, goal, context);
+    return run.perform();
+  }
+
+  private validateGoal(goal: GoalDefinition): void {
+    const isObject = goal && typeof goal === 'object' && !Array.isArray(goal);
+    if (!isObject) {
+      throw new InvalidGoalExecutionInputError('Goal definition must be an object.');
+    }
+    if (typeof goal.objective !== 'string' || goal.objective.trim() === '') {
+      throw new InvalidGoalExecutionInputError('Goal objective must be a non-empty string.');
+    }
+    if (goal.authorization !== 'readOnly' && goal.authorization !== 'writeAuthorized') {
+      throw new InvalidGoalExecutionInputError('Goal authorization must be "readOnly" or "writeAuthorized".');
+    }
+    if (typeof goal.validationToolId !== 'string' || goal.validationToolId.trim() === '') {
+      throw new InvalidGoalExecutionInputError('Goal validationToolId must be a non-empty string.');
+    }
+    if (goal.fix !== undefined) {
+      const fix = goal.fix;
+      const isFixObject = fix && typeof fix === 'object' && !Array.isArray(fix);
+      if (
+        !isFixObject ||
+        typeof fix.path !== 'string' ||
+        fix.path.trim() === '' ||
+        typeof fix.searchText !== 'string' ||
+        fix.searchText.trim() === '' ||
+        typeof fix.replaceText !== 'string'
+      ) {
+        throw new InvalidGoalExecutionInputError('Goal fix, when provided, must have a non-empty path/searchText and a string replaceText.');
+      }
+    }
+  }
+
+  private validateContext(context: GoalExecutionContext): void {
+    const isObject = context && typeof context === 'object' && !Array.isArray(context);
+    if (!isObject) {
+      throw new InvalidGoalExecutionInputError('Goal execution context must be an object.');
+    }
+    if (typeof context.executionId !== 'string' || context.executionId.trim() === '') {
+      throw new InvalidGoalExecutionInputError('Goal execution context executionId must be a non-empty string.');
+    }
+    if (typeof context.responsibilityId !== 'string' || context.responsibilityId.trim() === '') {
+      throw new InvalidGoalExecutionInputError('Goal execution context responsibilityId must be a non-empty string.');
+    }
+    if (typeof context.requestedAt !== 'string' || context.requestedAt.trim() === '') {
+      throw new InvalidGoalExecutionInputError('Goal execution context requestedAt must be a non-empty string.');
+    }
+  }
+}
+
+/** Per-call, single-use run: keeps the orchestrator instance itself stateless and reusable across many goals. */
+class GoalExecutionRun {
+  private readonly steps: GoalExecutionStepRecord[] = [];
+  private readonly decisions: GoalExecutionDecisionRecord[] = [];
+  private readonly filesChanged: string[] = [];
+  private stepCounter = 0;
+
+  public constructor(
+    private readonly specializedTool: SpecializedTool,
+    private readonly maxSteps: number,
+    private readonly goal: GoalDefinition,
+    private readonly context: GoalExecutionContext,
+  ) {}
+
+  public perform(): GoalExecutionResult {
+    const statusOutcome = this.act('inspect', GIT_STATUS_TOOL_ID, {});
+    if (statusOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(statusOutcome), this.reasonFor(statusOutcome));
+    }
+    this.recordGitStep(this.currentStepId(), 'inspect', GIT_STATUS_TOOL_ID, statusOutcome.output);
+
+    if (this.goal.fix && this.goal.authorization === 'writeAuthorized') {
+      return this.performFix();
+    }
+    return this.performInvestigation();
+  }
+
+  private performInvestigation(): GoalExecutionResult {
+    const validationOutcome = this.act('verify', this.goal.validationToolId, {});
+    if (validationOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(validationOutcome), this.reasonFor(validationOutcome));
+    }
+
+    const validation = this.recordValidationStep('verify', validationOutcome.output);
+    if (!validation.ranAsValidation) {
+      return this.conclude('failed', validation.reasonCode ?? 'validationRejected');
+    }
+
+    if (validation.succeeded) {
+      this.decisions.push({
+        afterStepId: this.currentStepId(),
+        observation: `Validação "${this.goal.validationToolId}" está passando.`,
+        decision: 'Hipótese de falha não confirmada; encerrando investigação sem aprofundar.',
+      });
+      return this.conclude('completed', undefined, this.composeInvestigationMessage(true, validation.exitCode));
+    }
+
+    this.decisions.push({
+      afterStepId: this.currentStepId(),
+      observation: `Validação "${this.goal.validationToolId}" está falhando (exit code ${validation.exitCode}).`,
+      decision: 'Reunindo evidência adicional (diff) antes de concluir a investigação.',
+    });
+
+    const diffOutcome = this.act('evidence', GIT_DIFF_TOOL_ID, {});
+    if (diffOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(diffOutcome), this.reasonFor(diffOutcome));
+    }
+    this.recordGitStep(this.currentStepId(), 'evidence', GIT_DIFF_TOOL_ID, diffOutcome.output);
+
+    return this.conclude('completed', undefined, this.composeInvestigationMessage(false, validation.exitCode));
+  }
+
+  private performFix(): GoalExecutionResult {
+    const fix = this.goal.fix;
+    if (!fix) {
+      return this.conclude('failed', 'missingFixAction');
+    }
+
+    const fixOutcome = this.act('act', FILESYSTEM_REPLACE_TEXT_TOOL_ID, {
+      path: fix.path,
+      searchText: fix.searchText,
+      replaceText: fix.replaceText,
+    });
+    if (fixOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(fixOutcome), this.reasonFor(fixOutcome));
+    }
+
+    const replaceOutput = fixOutcome.output;
+    const replaceOk = replaceOutput.outcome === 'ok';
+    const path = typeof replaceOutput.path === 'string' ? replaceOutput.path : fix.path;
+    const message = typeof replaceOutput.message === 'string' ? replaceOutput.message : 'Edição recusada.';
+
+    this.steps.push({
+      stepId: this.currentStepId(),
+      phase: 'act',
+      toolId: FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+      outcome: replaceOk ? 'ok' : 'rejected',
+      summary: replaceOk ? `Arquivo "${path}" atualizado.` : message,
+    });
+
+    if (!replaceOk) {
+      const reasonCode = typeof replaceOutput.reasonCode === 'string' ? replaceOutput.reasonCode : 'editRejected';
+      this.decisions.push({
+        afterStepId: this.currentStepId(),
+        observation: message,
+        decision: 'Edição recusada; interrompendo antes de verificar, nada foi alterado.',
+      });
+      return this.conclude('blocked', reasonCode, message);
+    }
+
+    this.filesChanged.push(path);
+    this.decisions.push({
+      afterStepId: this.currentStepId(),
+      observation: `Arquivo "${path}" atualizado.`,
+      decision: `Verificando a correção executando a validação "${this.goal.validationToolId}".`,
+    });
+
+    const verifyOutcome = this.act('verify', this.goal.validationToolId, {});
+    if (verifyOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(verifyOutcome), this.reasonFor(verifyOutcome));
+    }
+    const verification = this.recordValidationStep('verify', verifyOutcome.output);
+    if (verification.outcome === 'failed' && !verification.ranAsValidation) {
+      return this.conclude('failed', verification.reasonCode ?? 'validationRejected');
+    }
+
+    const diffOutcome = this.act('evidence', GIT_DIFF_TOOL_ID, {});
+    if (diffOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(diffOutcome), this.reasonFor(diffOutcome));
+    }
+    this.recordGitStep(this.currentStepId(), 'evidence', GIT_DIFF_TOOL_ID, diffOutcome.output);
+
+    if (verification.succeeded) {
+      return this.conclude(
+        'completed',
+        undefined,
+        `Correção aplicada e verificada: "${path}" foi alterado e a validação "${this.goal.validationToolId}" agora passa (exit code ${verification.exitCode}).`,
+      );
+    }
+
+    return this.conclude(
+      'failed',
+      'verificationFailed',
+      `Correção aplicada em "${path}", mas a validação "${this.goal.validationToolId}" ainda falha (exit code ${verification.exitCode}); a alteração foi preservada para revisão.`,
+    );
+  }
+
+  /**
+   * The single point every Tool invocation goes through: enforces the step
+   * limit before acting (never after), enforces the fixed, authorization-aware
+   * allow-list, and turns a genuinely unexpected Tool failure into a safe
+   * stop - exactly the same defense-in-depth discipline already established
+   * by `DevelopmentTaskOrchestrator`.
+   */
+  private act(phase: GoalExecutionStepPhase, toolId: string, toolInput: Readonly<Record<string, unknown>>): ActOutcome {
+    if (this.steps.length >= this.maxSteps) {
+      return { kind: 'incomplete' };
+    }
+    if (!this.isToolAllowed(toolId)) {
+      this.stepCounter += 1;
+      this.steps.push({
+        stepId: `step-${this.stepCounter}`,
+        phase,
+        toolId,
+        outcome: 'failed',
+        summary: `Tool "${toolId}" não está autorizada para esta execução orientada a objetivo.`,
+      });
+      return { kind: 'unauthorized' };
+    }
+
+    this.stepCounter += 1;
+    const toolResult: SpecializedToolInvocationResult = this.specializedTool.invoke({
+      toolId,
+      executionId: this.context.executionId,
+      responsibilityId: this.context.responsibilityId,
+      requestedAt: this.context.requestedAt,
+      payload: toolInput,
+    });
+
+    if (!this.isSuccessfulInvocation(toolResult)) {
+      this.steps.push({
+        stepId: `step-${this.stepCounter}`,
+        phase,
+        toolId,
+        outcome: 'failed',
+        summary: `A etapa com "${toolId}" falhou inesperadamente.`,
+      });
+      return { kind: 'toolFailure' };
+    }
+
+    return { kind: 'output', output: toolResult.output };
+  }
+
+  private isSuccessfulInvocation(
+    result: SpecializedToolInvocationResult,
+  ): result is { readonly status: 'completed'; readonly output: Readonly<Record<string, unknown>> } {
+    return (
+      !!result &&
+      typeof result === 'object' &&
+      result.status === 'completed' &&
+      !!result.output &&
+      typeof result.output === 'object' &&
+      !Array.isArray(result.output)
+    );
+  }
+
+  private isToolAllowed(toolId: string): boolean {
+    if (READ_ONLY_TOOL_IDS.has(toolId) || toolId.startsWith(VALIDATION_TOOL_ID_PREFIX)) {
+      return true;
+    }
+    if (toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID) {
+      return this.goal.authorization === 'writeAuthorized';
+    }
+    return false;
+  }
+
+  private recordGitStep(stepId: string, phase: GoalExecutionStepPhase, toolId: string, output: Readonly<Record<string, unknown>>): void {
+    if (output.outcome !== 'ok') {
+      this.steps.push({ stepId, phase, toolId, outcome: 'ok', summary: 'Este workspace não é um repositório Git.' });
+      return;
+    }
+
+    if (toolId === GIT_STATUS_TOOL_ID) {
+      const clean = output.clean === true;
+      const branch = typeof output.branch === 'string' ? output.branch : 'desconhecida';
+      const summary = clean ? `Branch "${branch}", sem alterações pendentes.` : `Branch "${branch}", com alterações pendentes.`;
+      this.steps.push({ stepId, phase, toolId, outcome: 'ok', summary });
+      return;
+    }
+
+    const diff = typeof output.diff === 'string' ? output.diff : '';
+    const hasChanges = diff.trim() !== '';
+    const truncated = output.truncated === true;
+    const summary = hasChanges
+      ? `Há alterações não commitadas${truncated ? ' (diff truncado)' : ''}.`
+      : 'Não há alterações no momento.';
+    this.steps.push({ stepId, phase, toolId, outcome: 'ok', summary });
+  }
+
+  private recordValidationStep(
+    phase: GoalExecutionStepPhase,
+    output: Readonly<Record<string, unknown>>,
+  ): { readonly outcome: 'ok' | 'failed'; readonly succeeded: boolean; readonly exitCode: unknown; readonly reasonCode?: string; readonly ranAsValidation: boolean } {
+    const stepId = this.currentStepId();
+
+    if (output.outcome === 'ok') {
+      const succeeded = output.succeeded === true;
+      const exitCode = typeof output.exitCode === 'number' || output.exitCode === null ? output.exitCode : 'desconhecido';
+      this.steps.push({
+        stepId,
+        phase,
+        toolId: this.goal.validationToolId,
+        outcome: succeeded ? 'ok' : 'failed',
+        summary: `Validação "${this.goal.validationToolId}" ${succeeded ? 'concluída com sucesso' : 'falhou'} (exit code ${exitCode}).`,
+      });
+      return { outcome: succeeded ? 'ok' : 'failed', succeeded, exitCode, ranAsValidation: true };
+    }
+
+    const reasonCode = typeof output.reasonCode === 'string' ? output.reasonCode : 'validationRejected';
+    const message = typeof output.message === 'string' ? output.message : 'Validação recusada.';
+    this.steps.push({ stepId, phase, toolId: this.goal.validationToolId, outcome: 'failed', summary: message });
+    return { outcome: 'failed', succeeded: false, exitCode: undefined, reasonCode, ranAsValidation: false };
+  }
+
+  private composeInvestigationMessage(passing: boolean, exitCode: unknown): string {
+    if (passing) {
+      return `Investigação concluída: a validação "${this.goal.validationToolId}" está passando atualmente (exit code ${exitCode}); não encontrei evidência de falha para investigar mais a fundo.`;
+    }
+
+    const base = `Investigação concluída: a validação "${this.goal.validationToolId}" está falhando (exit code ${exitCode}).`;
+    if (this.goal.authorization === 'writeAuthorized') {
+      return `${base} Não foi possível determinar uma correção segura e concreta automaticamente; informe o texto exato a ser substituído para eu aplicar a correção.`;
+    }
+    return `${base} Corrigir isso exigiria autorização explícita para alterar arquivos.`;
+  }
+
+  private statusFor(outcome: ActOutcome): GoalExecutionStatus {
+    if (outcome.kind === 'incomplete') {
+      return 'incomplete';
+    }
+    return 'failed';
+  }
+
+  private reasonFor(outcome: ActOutcome): string {
+    if (outcome.kind === 'incomplete') {
+      return 'stepLimitExceeded';
+    }
+    if (outcome.kind === 'unauthorized') {
+      return 'toolNotAuthorized';
+    }
+    return 'unexpectedToolFailure';
+  }
+
+  private currentStepId(): string {
+    return `step-${this.stepCounter}`;
+  }
+
+  private conclude(status: GoalExecutionStatus, reason: string | undefined, explicitMessage?: string): GoalExecutionResult {
+    const message = explicitMessage ?? this.composeFallbackMessage(status, reason);
+    return {
+      objective: this.goal.objective,
+      authorization: this.goal.authorization,
+      status,
+      steps: Object.freeze([...this.steps]),
+      decisions: Object.freeze([...this.decisions]),
+      filesChanged: Object.freeze(Array.from(new Set(this.filesChanged))),
+      ...(reason === undefined ? {} : { reason }),
+      message,
+    };
+  }
+
+  private composeFallbackMessage(status: GoalExecutionStatus, reason: string | undefined): string {
+    if (status === 'incomplete') {
+      return `Não consegui concluir o objetivo dentro do limite de ${this.maxSteps} passos; parando com segurança. Evidências reunidas até aqui: ${this.summarizeSteps()}.`;
+    }
+    if (status === 'blocked') {
+      return `Objetivo interrompido antes de qualquer alteração: ${this.friendlyReason(reason)}`;
+    }
+    return `Objetivo não concluído: ${this.friendlyReason(reason)}`;
+  }
+
+  private summarizeSteps(): string {
+    if (this.steps.length === 0) {
+      return 'nenhuma';
+    }
+    return this.steps.map((step) => step.summary).join(' ');
+  }
+
+  private friendlyReason(reason: string | undefined): string {
+    switch (reason) {
+      case 'toolNotAuthorized':
+        return 'uma etapa exigiria uma ferramenta não autorizada para este objetivo.';
+      case 'unexpectedToolFailure':
+        return 'uma etapa falhou de forma inesperada.';
+      case 'validationRejected':
+        return 'a validação necessária não está autorizada.';
+      case 'missingFixAction':
+        return 'nenhuma correção concreta foi especificada.';
+      default:
+        return reason ? `motivo: ${reason}.` : 'motivo não especificado.';
+    }
+  }
+}

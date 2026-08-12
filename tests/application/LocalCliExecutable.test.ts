@@ -822,6 +822,22 @@ function writeFixtureValidationScripts(fixtureRoot: string, exitCode: number): v
   );
 }
 
+/** Same fixture shape, but the "test" script's real exit code depends on the real, current content of exemplo.ts - what actually lets a SPEC-046 fix be genuinely verified rather than just assumed. */
+function writeContentAwareFixtureValidationScript(fixtureRoot: string, expectedSubstring: string): void {
+  writeFileSync(
+    join(fixtureRoot, 'check.js'),
+    `process.exit(require('fs').readFileSync('exemplo.ts', 'utf8').includes(${JSON.stringify(expectedSubstring)}) ? 0 : 1);\n`,
+  );
+  writeFileSync(
+    join(fixtureRoot, 'package.json'),
+    JSON.stringify({
+      name: 'sebastian-goal-fixture',
+      version: '1.0.0',
+      scripts: { test: 'node check.js', build: 'node check.js', typecheck: 'node check.js' },
+    }),
+  );
+}
+
 test('a real CLI process completes the full SPEC-044 developTask vertical slice in one invocation: edit, validate, git status and git diff', () => {
   withIsolatedDataDir((dataDir) => {
     withIsolatedFixtureRoot((fixtureRoot) => {
@@ -1050,6 +1066,88 @@ test('SPEC-045: a real CLI process selects the fact relevant to the question ins
       questionResult.output.message,
       'Sobre isso, você registrou: "o projeto Sebastian IA está na fase de memória inteligente".',
     );
+  });
+});
+
+test('SPEC-046: a real CLI process investigates a real failing validation end-to-end and reports evidence without touching any file', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      writeFixtureValidationScripts(fixtureRoot, 1);
+      commitAll(fixtureRoot, 'initial commit');
+
+      const execution = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Sebastian, analise esse projeto e descubra por que os testes estão falhando.'],
+        { cwd: fixtureRoot, encoding: 'utf8', env: isolatedEnv(dataDir), timeout: 60000 },
+      );
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as {
+        output: {
+          message: string;
+          goalExecution: { status: string; authorization: string; filesChanged: readonly string[]; steps: ReadonlyArray<{ toolId: string }> };
+        };
+      };
+
+      assert.equal(result.output.goalExecution.status, 'completed');
+      assert.equal(result.output.goalExecution.authorization, 'readOnly');
+      assert.deepEqual(result.output.goalExecution.filesChanged, []);
+      assert.deepEqual(
+        result.output.goalExecution.steps.map((step) => step.toolId),
+        ['git.status', 'validation.test', 'git.diff'],
+      );
+      assert.ok(result.output.message.includes('autorização explícita para alterar arquivos'));
+      assert.equal(readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'), 'const x = 1;\n');
+    });
+  });
+});
+
+test('SPEC-046: a real CLI process demonstrates the difference between an investigative request and an explicitly authorized fix request', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      writeContentAwareFixtureValidationScript(fixtureRoot, 'const x = 2;');
+      commitAll(fixtureRoot, 'initial commit');
+      const env = isolatedEnv(dataDir);
+
+      const investigate = spawnSync(process.execPath, [compiledCliPath, 'Descubra por que os testes estão falhando.'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+        timeout: 60000,
+      });
+      assert.equal(investigate.status, 0);
+      const investigateResult = JSON.parse(investigate.stdout.trim()) as {
+        output: { goalExecution: { authorization: string; filesChanged: readonly string[] } };
+      };
+      assert.equal(investigateResult.output.goalExecution.authorization, 'readOnly');
+      assert.deepEqual(investigateResult.output.goalExecution.filesChanged, []);
+      assert.equal(
+        readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'),
+        'const x = 1;\n',
+        'a purely investigative request must never touch the file',
+      );
+
+      const fix = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Corrija o arquivo exemplo.ts substituindo const x = 1; por const x = 2;'],
+        { cwd: fixtureRoot, encoding: 'utf8', env, timeout: 60000 },
+      );
+      assert.equal(fix.status, 0);
+      const fixResult = JSON.parse(fix.stdout.trim()) as {
+        output: { message: string; goalExecution: { status: string; authorization: string; filesChanged: readonly string[] } };
+      };
+      assert.equal(fixResult.output.goalExecution.authorization, 'writeAuthorized');
+      assert.equal(fixResult.output.goalExecution.status, 'completed');
+      assert.deepEqual(fixResult.output.goalExecution.filesChanged, ['exemplo.ts']);
+      assert.ok(fixResult.output.message.includes('verificada'));
+      assert.equal(readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+    });
   });
 });
 
