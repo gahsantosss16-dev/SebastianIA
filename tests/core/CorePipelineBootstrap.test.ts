@@ -71,11 +71,11 @@ const validInputWithConverse = {
   ],
 } as const;
 
-function converseCommandInput(text: string): CommandProcessingInput {
+function converseCommandInput(text: string, generatedAt = '2026-08-11T00:00:00.000Z'): CommandProcessingInput {
   return {
     type: 'converse',
     input: { text },
-    generatedAt: '2026-08-11T00:00:00.000Z',
+    generatedAt,
   };
 }
 
@@ -386,5 +386,91 @@ test('bootstrap keeps filesystem access confined to allowedFilesystemRoot end-to
     });
   } finally {
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('a task added, listed, completed and listed again persists correctly across separate SebastianCore instances sharing a memoryFilePath', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-tasks-'));
+  try {
+    const memoryFilePath = join(dir, 'memory.json');
+    const newCore = () => {
+      const core = new SebastianCore(
+        'Sebastian IA',
+        {},
+        undefined,
+        composeCorePipelineDependencies({ ...validInputWithConverse, memoryFilePath }),
+      );
+      core.initialize();
+      core.start();
+      return core;
+    };
+
+    const addResult = await newCore().executeCommand(
+      converseCommandInput('Adiciona uma tarefa: comprar leite', '2026-08-11T00:00:00.000Z'),
+    );
+    assert.deepEqual(addResult.output, {
+      memoryRecordKind: 'sebastian.memory.task.created',
+      content: 'comprar leite',
+    });
+
+    const firstListing = await newCore().executeCommand(
+      converseCommandInput('Quais são minhas tarefas?', '2026-08-11T00:01:00.000Z'),
+    );
+    assert.deepEqual(firstListing.output, { message: 'Suas tarefas pendentes: comprar leite.' });
+
+    const completeResult = await newCore().executeCommand(
+      converseCommandInput("Marca 'comprar leite' como feita", '2026-08-11T00:02:00.000Z'),
+    );
+    assert.deepEqual(completeResult.output, {
+      memoryRecordKind: 'sebastian.memory.task.completed',
+      taskId: 'converse:2026-08-11T00:00:00.000Z',
+    });
+
+    const secondListing = await newCore().executeCommand(
+      converseCommandInput('Quais são minhas tarefas?', '2026-08-11T00:03:00.000Z'),
+    );
+    assert.deepEqual(secondListing.output, { message: 'Você não tem nenhuma tarefa pendente.' });
+
+    const independentStore = new FileMemoryStore(memoryFilePath);
+    const records = independentStore.listRecords('command-results');
+    assert.equal(records.length, 4, 'creation, both listings and completion must all persist as separate append-only records');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('completing an unmatched task leaves pending tasks unchanged and does not crash', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-tasks-not-found-'));
+  try {
+    const memoryFilePath = join(dir, 'memory.json');
+    const newCore = () => {
+      const core = new SebastianCore(
+        'Sebastian IA',
+        {},
+        undefined,
+        composeCorePipelineDependencies({ ...validInputWithConverse, memoryFilePath }),
+      );
+      core.initialize();
+      core.start();
+      return core;
+    };
+
+    await newCore().executeCommand(
+      converseCommandInput('Adiciona uma tarefa: comprar leite', '2026-08-11T00:00:00.000Z'),
+    );
+
+    const completeResult = await newCore().executeCommand(
+      converseCommandInput("Marca 'lavar o carro' como feita", '2026-08-11T00:01:00.000Z'),
+    );
+    assert.deepEqual(completeResult.output, {
+      message: 'Não encontrei nenhuma tarefa pendente correspondente a "lavar o carro".',
+    });
+
+    const listing = await newCore().executeCommand(
+      converseCommandInput('Quais são minhas tarefas?', '2026-08-11T00:02:00.000Z'),
+    );
+    assert.deepEqual(listing.output, { message: 'Suas tarefas pendentes: comprar leite.' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

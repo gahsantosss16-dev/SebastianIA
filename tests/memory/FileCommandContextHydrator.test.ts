@@ -213,6 +213,179 @@ test('hydrator merges legacy remember records and marked converse records chrono
   });
 });
 
+test('hydrator reconstructs a pending task from a task-creation record', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'converse:2026-08-11T00:00:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'comprar leite' },
+      metadata: {},
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+
+    const temporary = outcome.context.temporary as { values: { pendingTasks: unknown[] } };
+    assert.deepEqual(temporary.values.pendingTasks, [
+      { id: 'converse:2026-08-11T00:00:00.000Z', content: 'comprar leite', createdAt: '2026-08-11T00:00:00.000Z' },
+    ]);
+  });
+});
+
+test('a completed task no longer appears among pending tasks, without rewriting the creation record', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'converse:2026-08-11T00:00:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'comprar leite' },
+      metadata: {},
+    });
+    writer.write({
+      executionId: 'converse:2026-08-11T00:01:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:01:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:01:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.completed', taskId: 'converse:2026-08-11T00:00:00.000Z' },
+      metadata: {},
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+
+    // With no facts and no pending tasks left, hydration correctly reports
+    // absent - the important proof here is at the storage level: the
+    // creation record itself must survive completion untouched, append-only.
+    assert.deepEqual(outcome, { status: 'absent' });
+
+    const rawStore = store.listRecords('command-results');
+    assert.equal(rawStore.length, 2, 'both the creation and completion records must be preserved, never merged or removed');
+
+    const creationRecord = rawStore.find((record) => record.executionId === 'converse:2026-08-11T00:00:00.000Z');
+    assert.deepEqual(creationRecord?.output, {
+      memoryRecordKind: 'sebastian.memory.task.created',
+      content: 'comprar leite',
+    });
+
+    const completionRecord = rawStore.find((record) => record.executionId === 'converse:2026-08-11T00:01:00.000Z');
+    assert.deepEqual(completionRecord?.output, {
+      memoryRecordKind: 'sebastian.memory.task.completed',
+      taskId: 'converse:2026-08-11T00:00:00.000Z',
+    });
+  });
+});
+
+test('a pending task remains visible when a different task is completed', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'converse:2026-08-11T00:00:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'comprar leite' },
+      metadata: {},
+    });
+    writer.write({
+      executionId: 'converse:2026-08-11T00:01:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:01:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:01:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'pagar conta' },
+      metadata: {},
+    });
+    writer.write({
+      executionId: 'converse:2026-08-11T00:02:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:02:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:02:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.completed', taskId: 'converse:2026-08-11T00:00:00.000Z' },
+      metadata: {},
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+    const temporary = outcome.context.temporary as { values: { pendingTasks: Array<{ content: string }> } };
+    assert.deepEqual(
+      temporary.values.pendingTasks.map((t) => t.content),
+      ['pagar conta'],
+    );
+  });
+});
+
+test('hydrator sorts pending tasks chronologically and keeps facts alongside tasks', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'remember:2026-08-11T00:00:00.000Z',
+      commandType: 'remember',
+      commandGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { fact: 'prefiro reuniões de manhã' },
+      metadata: {},
+    });
+    writer.write({
+      executionId: 'converse:2026-08-11T00:02:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:02:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:02:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'segunda tarefa' },
+      metadata: {},
+    });
+    writer.write({
+      executionId: 'converse:2026-08-11T00:01:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-11T00:01:00.000Z',
+      resultGeneratedAt: '2026-08-11T00:01:00.000Z',
+      resultStatus: 'succeeded',
+      output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'primeira tarefa' },
+      metadata: {},
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+    const temporary = outcome.context.temporary as {
+      values: { rememberedFacts: Array<{ content: string }>; pendingTasks: Array<{ content: string }> };
+    };
+    assert.deepEqual(
+      temporary.values.pendingTasks.map((task) => task.content),
+      ['primeira tarefa', 'segunda tarefa'],
+    );
+    assert.deepEqual(
+      temporary.values.rememberedFacts.map((fact) => fact.content),
+      ['prefiro reuniões de manhã'],
+    );
+  });
+});
+
 test('hydrator does not treat an unrelated "fact"-shaped output as memory without the explicit discriminator', () => {
   withTempStore((store) => {
     const writer = new FileCommandResultMemoryWriter(store);

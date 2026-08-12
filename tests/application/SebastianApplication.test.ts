@@ -268,6 +268,71 @@ test('converse cannot escape the configured allowedFilesystemRoot through traver
   }
 });
 
+test('a task added by one Core instance is listed as pending, then completed and no longer listed by later instances', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const addCore = createSebastianApplication({ logger, dataDir });
+    const addResult = await addCore.executeCommand(
+      converseInput('Adiciona uma tarefa: comprar leite', '2026-08-11T00:00:00.000Z'),
+    );
+    assert.deepEqual(addResult.output, {
+      memoryRecordKind: 'sebastian.memory.task.created',
+      content: 'comprar leite',
+    });
+
+    const listCore = createSebastianApplication({ logger, dataDir });
+    const listResult = await listCore.executeCommand(
+      converseInput('Quais são minhas tarefas?', '2026-08-11T00:01:00.000Z'),
+    );
+    assert.deepEqual(listResult.output, { message: 'Suas tarefas pendentes: comprar leite.' });
+
+    const completeCore = createSebastianApplication({ logger, dataDir });
+    const completeResult = await completeCore.executeCommand(
+      converseInput("Marca 'comprar leite' como feita", '2026-08-11T00:02:00.000Z'),
+    );
+    assert.deepEqual(completeResult.output, {
+      memoryRecordKind: 'sebastian.memory.task.completed',
+      taskId: 'converse:2026-08-11T00:00:00.000Z',
+    });
+
+    const finalListCore = createSebastianApplication({ logger, dataDir });
+    const finalListResult = await finalListCore.executeCommand(
+      converseInput('Quais são minhas tarefas?', '2026-08-11T00:03:00.000Z'),
+    );
+    assert.deepEqual(finalListResult.output, { message: 'Você não tem nenhuma tarefa pendente.' });
+  });
+});
+
+test('listing tasks with no dataDir and nothing added reports no pending tasks', async () => {
+  const core = createSebastianApplication({ logger });
+
+  const result = await core.executeCommand(converseInput('Quais são minhas tarefas?'));
+
+  assert.deepEqual(result.output, { message: 'Você não tem nenhuma tarefa pendente.' });
+});
+
+test('tasks and remembered facts coexist without interfering with each other', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const writerCore = createSebastianApplication({ logger, dataDir });
+    await writerCore.executeCommand(rememberInput('prefiro reuniões de manhã'));
+    await writerCore.executeCommand(
+      converseInput('Adiciona uma tarefa: comprar leite', '2026-08-11T00:00:00.000Z'),
+    );
+
+    const readerCore = createSebastianApplication({ logger, dataDir });
+    const recallResult = await readerCore.executeCommand(recallInput());
+    const facts = recallResult.output.facts as ReadonlyArray<{ readonly content: string }>;
+    assert.deepEqual(
+      facts.map((fact) => fact.content),
+      ['prefiro reuniões de manhã'],
+    );
+
+    const listResult = await readerCore.executeCommand(
+      converseInput('Quais são minhas tarefas?', '2026-08-11T00:01:00.000Z'),
+    );
+    assert.deepEqual(listResult.output, { message: 'Suas tarefas pendentes: comprar leite.' });
+  });
+});
+
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });

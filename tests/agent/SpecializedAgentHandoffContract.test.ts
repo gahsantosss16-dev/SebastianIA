@@ -191,6 +191,7 @@ test('specialized agent consults the ModelProvider for converse and does not inv
   assert.deepEqual(interpretRequest, {
     text: 'Sebastian, lembra que prefiro reuniões de manhã',
     rememberedFacts: [],
+    pendingTasks: [],
     requestedAt: '2026-08-11T00:00:01.000Z',
   });
   assert.equal(result.status, 'completed');
@@ -303,6 +304,87 @@ test('specialized agent propagates an unexpected Tool failure as a failed handof
     assert.fail('Expected failed status.');
   }
   assert.equal(result.error, failure);
+});
+
+test('specialized agent turns an addTask decision into a task-created finalResult', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'addTask', content: 'comprar leite' }),
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-11T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Adiciona uma tarefa: comprar leite' } } },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, {
+    memoryRecordKind: 'sebastian.memory.task.created',
+    content: 'comprar leite',
+  });
+});
+
+test('specialized agent turns a completeTask decision into a task-completed finalResult', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'completeTask', taskId: 'converse:2026-08-11T00:00:00.000Z' }),
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:02:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-11T00:02:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: "Marca 'comprar leite' como feita" } } },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, {
+    memoryRecordKind: 'sebastian.memory.task.completed',
+    taskId: 'converse:2026-08-11T00:00:00.000Z',
+  });
+});
+
+test('specialized agent forwards hydrated pendingTasks to the ModelProvider request', async () => {
+  let interpretRequest: unknown;
+  const modelProvider: ModelProvider = {
+    interpret: async (request) => {
+      interpretRequest = request;
+      return { intent: 'respond', answer: 'unused' };
+    },
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+  const pendingTasks = [{ id: 't1', content: 'comprar leite', createdAt: '2026-08-11T00:00:00.000Z' }];
+
+  await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:05:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-11T00:05:01.000Z',
+    payload: {
+      commandInput: {
+        type: 'converse',
+        input: { text: 'Quais são minhas tarefas?' },
+        temporary: { values: { pendingTasks } },
+      },
+    },
+  });
+
+  assert.deepEqual(interpretRequest, {
+    text: 'Quais são minhas tarefas?',
+    rememberedFacts: [],
+    pendingTasks,
+    requestedAt: '2026-08-11T00:05:01.000Z',
+  });
 });
 
 test('specialized agent rejects a converse handoff with a missing or blank text', async () => {

@@ -6,7 +6,13 @@ import {
 import { InvalidSpecializedAgentHandoffInputError } from './SpecializedAgentHandoffErrors.js';
 import { InMemorySpecializedTool } from '../tool/InMemorySpecializedTool.js';
 import type { SpecializedTool } from '../tool/SpecializedToolInvocationContract.js';
-import { MEMORY_FACT_RECORD_KIND, type RememberedFactRecord } from '../memory/index.js';
+import {
+  MEMORY_FACT_RECORD_KIND,
+  TASK_CREATED_RECORD_KIND,
+  TASK_COMPLETED_RECORD_KIND,
+  type PendingTaskRecord,
+  type RememberedFactRecord,
+} from '../memory/index.js';
 import type { ModelInterpretationUseToolDecision, ModelProvider } from '../model/ModelProviderContract.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
@@ -46,10 +52,12 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
   ): Promise<SpecializedAgentHandoffResult> {
     const text = this.extractConversationText(input);
     const rememberedFacts = this.extractRememberedFacts(input);
+    const pendingTasks = this.extractPendingTasks(input);
 
     const decision = await modelProvider.interpret({
       text,
       rememberedFacts,
+      pendingTasks,
       requestedAt: input.requestedAt,
     });
 
@@ -57,10 +65,16 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       return this.handleToolUse(input, decision);
     }
 
-    const finalResult: Readonly<Record<string, unknown>> =
-      decision.intent === 'remember'
-        ? { memoryRecordKind: MEMORY_FACT_RECORD_KIND, content: decision.content }
-        : { message: decision.answer };
+    let finalResult: Readonly<Record<string, unknown>>;
+    if (decision.intent === 'remember') {
+      finalResult = { memoryRecordKind: MEMORY_FACT_RECORD_KIND, content: decision.content };
+    } else if (decision.intent === 'addTask') {
+      finalResult = { memoryRecordKind: TASK_CREATED_RECORD_KIND, content: decision.content };
+    } else if (decision.intent === 'completeTask') {
+      finalResult = { memoryRecordKind: TASK_COMPLETED_RECORD_KIND, taskId: decision.taskId };
+    } else {
+      finalResult = { message: decision.answer };
+    }
 
     return {
       status: 'completed',
@@ -171,6 +185,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const rememberedFacts = commandInput?.temporary?.values?.rememberedFacts;
 
     return Array.isArray(rememberedFacts) ? (rememberedFacts as readonly RememberedFactRecord[]) : [];
+  }
+
+  private extractPendingTasks(input: SpecializedAgentHandoffInput): readonly PendingTaskRecord[] {
+    const commandInput = input.payload.commandInput as
+      | { readonly temporary?: { readonly values?: { readonly pendingTasks?: unknown } } }
+      | undefined;
+    const pendingTasks = commandInput?.temporary?.values?.pendingTasks;
+
+    return Array.isArray(pendingTasks) ? (pendingTasks as readonly PendingTaskRecord[]) : [];
   }
 
   private validateInput(input: SpecializedAgentHandoffInput): void {

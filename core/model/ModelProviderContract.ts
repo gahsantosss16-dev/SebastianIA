@@ -1,8 +1,14 @@
-import type { RememberedFactRecord } from '../memory/index.js';
+import type { PendingTaskRecord, RememberedFactRecord } from '../memory/index.js';
 
 export interface ModelInterpretationRequest {
   readonly text: string;
   readonly rememberedFacts: readonly RememberedFactRecord[];
+  /**
+   * Tasks currently derived as pending, hydrated the same way as
+   * rememberedFacts. Optional and defaulting to empty so every pre-existing
+   * caller that has no notion of tasks keeps working unchanged.
+   */
+  readonly pendingTasks?: readonly PendingTaskRecord[];
   readonly requestedAt: string;
 }
 
@@ -14,6 +20,22 @@ export interface ModelInterpretationRememberDecision {
 export interface ModelInterpretationRespondDecision {
   readonly intent: 'respond';
   readonly answer: string;
+}
+
+/** A decision to create a new pending task with the given content. */
+export interface ModelInterpretationAddTaskDecision {
+  readonly intent: 'addTask';
+  readonly content: string;
+}
+
+/**
+ * A decision to complete an already-identified pending task, referenced by
+ * its stable id - never by its text - so the Agent never has to re-resolve
+ * ambiguity when producing the persisted completion record.
+ */
+export interface ModelInterpretationCompleteTaskDecision {
+  readonly intent: 'completeTask';
+  readonly taskId: string;
 }
 
 /**
@@ -31,7 +53,9 @@ export interface ModelInterpretationUseToolDecision {
 export type ModelInterpretationDecision =
   | ModelInterpretationRememberDecision
   | ModelInterpretationRespondDecision
-  | ModelInterpretationUseToolDecision;
+  | ModelInterpretationUseToolDecision
+  | ModelInterpretationAddTaskDecision
+  | ModelInterpretationCompleteTaskDecision;
 
 /**
  * Substitutable boundary for natural-language interpretation. Core never

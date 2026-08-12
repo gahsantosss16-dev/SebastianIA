@@ -415,6 +415,86 @@ test('filesystem inspection through the real CLI neither breaks nor is affected 
   });
 });
 
+test('a task added in one real CLI process is listed, completed, and no longer listed in later, separate real processes', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    const addProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Adiciona uma tarefa: comprar leite'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(addProcess.error, undefined);
+    assert.equal(addProcess.status, 0);
+    assert.equal(addProcess.stderr, '');
+    const addResult = JSON.parse(addProcess.stdout.trim()) as { output: { memoryRecordKind: string; content: string } };
+    assert.deepEqual(addResult.output, { memoryRecordKind: 'sebastian.memory.task.created', content: 'comprar leite' });
+
+    const firstListProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Quais', 'são', 'minhas', 'tarefas?'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(firstListProcess.status, 0);
+    const firstListResult = JSON.parse(firstListProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(firstListResult.output.message, 'Suas tarefas pendentes: comprar leite.');
+
+    const completeProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, "Marca 'comprar leite' como feita"],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(completeProcess.status, 0);
+    const completeResult = JSON.parse(completeProcess.stdout.trim()) as { output: { memoryRecordKind: string; taskId: string } };
+    assert.equal(completeResult.output.memoryRecordKind, 'sebastian.memory.task.completed');
+    assert.equal(typeof completeResult.output.taskId, 'string');
+
+    const secondListProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Quais', 'são', 'minhas', 'tarefas?'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(secondListProcess.status, 0);
+    const secondListResult = JSON.parse(secondListProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(secondListResult.output.message, 'Você não tem nenhuma tarefa pendente.');
+
+    // Distinct real OS processes, same concrete proof pattern already used for remember/recall.
+    assert.notEqual(addProcess.pid, secondListProcess.pid);
+  });
+});
+
+test('completing an unmatched task through the real CLI reports it clearly instead of crashing or completing the wrong task', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'Adiciona uma tarefa: comprar leite'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+
+    const completeProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, "Marca 'lavar o carro' como feita"],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(completeProcess.error, undefined);
+    assert.equal(completeProcess.status, 0);
+    assert.equal(completeProcess.stderr, '');
+    const completeResult = JSON.parse(completeProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(completeResult.output.message, 'Não encontrei nenhuma tarefa pendente correspondente a "lavar o carro".');
+
+    const listProcess = spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'Quais', 'são', 'minhas', 'tarefas?'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(listProcess.status, 0);
+    const listResult = JSON.parse(listProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(listResult.output.message, 'Suas tarefas pendentes: comprar leite.');
+  });
+});
+
 test('greeting, remember and recall remain fully functional through the real CLI after the converse evolution', () => {
   withIsolatedDataDir((dataDir) => {
     const env = isolatedEnv(dataDir);

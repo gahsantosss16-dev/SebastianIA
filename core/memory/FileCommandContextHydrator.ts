@@ -20,11 +20,34 @@ export const MEMORY_REMEMBER_COMMAND_TYPE = 'remember';
  */
 export const MEMORY_FACT_RECORD_KIND = 'sebastian.memory.fact';
 
+/**
+ * Discriminator for a task-creation event. The task's stable identity is the
+ * `executionId` of this very write-back record - never its text - so a task
+ * can be referenced unambiguously later even if its content is edited or
+ * duplicated in spirit by the user.
+ */
+export const TASK_CREATED_RECORD_KIND = 'sebastian.memory.task.created';
+
+/**
+ * Discriminator for a task-completion event. Completion is append-only: it
+ * never rewrites or removes the creation record, it only adds a new record
+ * referencing the created task's id. Current task state is always derived
+ * from the full history, never stored directly.
+ */
+export const TASK_COMPLETED_RECORD_KIND = 'sebastian.memory.task.completed';
+
 /** A single, individually identifiable remembered fact with its own temporal metadata. */
 export interface RememberedFactRecord {
   readonly id: string;
   readonly content: string;
   readonly recordedAt: string;
+}
+
+/** A task derived as still pending after replaying the append-only creation/completion history. */
+export interface PendingTaskRecord {
+  readonly id: string;
+  readonly content: string;
+  readonly createdAt: string;
 }
 
 /**
@@ -43,29 +66,32 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
   public hydrate(request: CommandContextHydrationRequest): CommandContextHydrationResult {
     this.validateRequest(request);
 
-    const facts = this.readRememberedFacts();
-    if (facts.length === 0) {
+    const succeededRecords = this.store
+      .listRecords(COMMAND_RESULTS_NAMESPACE)
+      .filter((record) => record.resultStatus === 'succeeded');
+
+    const facts = this.readRememberedFacts(succeededRecords);
+    const pendingTasks = this.readPendingTasks(succeededRecords);
+
+    if (facts.length === 0 && pendingTasks.length === 0) {
       return { status: 'absent' };
     }
 
     const context: CommandContextHydrationSnapshot = {
       temporary: {
-        values: { rememberedFacts: facts },
+        values: { rememberedFacts: facts, pendingTasks },
       },
     };
 
     return { status: 'hydrated', context };
   }
 
-  private readRememberedFacts(): readonly RememberedFactRecord[] {
-    const records = this.store.listRecords(COMMAND_RESULTS_NAMESPACE);
+  private readRememberedFacts(
+    succeededRecords: readonly Readonly<Record<string, unknown>>[],
+  ): readonly RememberedFactRecord[] {
     const facts: RememberedFactRecord[] = [];
 
-    for (const record of records) {
-      if (record.resultStatus !== 'succeeded') {
-        continue;
-      }
-
+    for (const record of succeededRecords) {
       const fact = this.extractLegacyRememberFact(record) ?? this.extractMarkedMemoryFact(record);
       if (fact) {
         facts.push(fact);
@@ -73,6 +99,54 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
     }
 
     return facts.sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
+  }
+
+  /**
+   * Replays the append-only task history: every creation record is a
+   * candidate, and any completion record referencing a creation's id removes
+   * it from the pending set. Nothing is ever mutated or deleted - "pending"
+   * is a value derived fresh from the full history on every hydration.
+   */
+  private readPendingTasks(
+    succeededRecords: readonly Readonly<Record<string, unknown>>[],
+  ): readonly PendingTaskRecord[] {
+    const createdTasksById = new Map<string, PendingTaskRecord>();
+    const completedTaskIds = new Set<string>();
+
+    for (const record of succeededRecords) {
+      const output = record.output as
+        | { readonly memoryRecordKind?: unknown; readonly content?: unknown; readonly taskId?: unknown }
+        | undefined;
+
+      if (output?.memoryRecordKind === TASK_CREATED_RECORD_KIND) {
+        const task = this.buildTaskRecord(record, typeof output.content === 'string' ? output.content : undefined);
+        if (task) {
+          createdTasksById.set(task.id, task);
+        }
+        continue;
+      }
+
+      if (output?.memoryRecordKind === TASK_COMPLETED_RECORD_KIND && typeof output.taskId === 'string') {
+        completedTaskIds.add(output.taskId);
+      }
+    }
+
+    const pending = [...createdTasksById.values()].filter((task) => !completedTaskIds.has(task.id));
+    return pending.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  private buildTaskRecord(
+    record: Readonly<Record<string, unknown>>,
+    content: string | undefined,
+  ): PendingTaskRecord | undefined {
+    const executionId = typeof record.executionId === 'string' ? record.executionId : undefined;
+    const createdAt = typeof record.resultGeneratedAt === 'string' ? record.resultGeneratedAt : undefined;
+
+    if (!content || !executionId || !createdAt) {
+      return undefined;
+    }
+
+    return { id: executionId, content, createdAt };
   }
 
   /**
