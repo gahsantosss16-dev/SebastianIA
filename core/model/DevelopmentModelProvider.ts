@@ -158,14 +158,19 @@ export class DevelopmentModelProvider implements ModelProvider {
       return { intent: 'pursueGoal', goal: fixGoal };
     }
 
+    // Checked before the pure-investigate marker: a request naming both a
+    // failure ("descubra por que os testes estão falhando") AND a fix verb
+    // ("...e corrija") must be write-authorized, not read-only - the fix
+    // verb is what grants authorization (SPEC-046 section 8), regardless of
+    // which marker happens to appear first in the sentence.
+    const autonomousFixGoal = this.extractVagueFixGoal(request.text);
+    if (autonomousFixGoal !== undefined) {
+      return { intent: 'pursueGoal', goal: autonomousFixGoal };
+    }
+
     const investigateGoal = this.extractInvestigateGoal(request.text);
     if (investigateGoal !== undefined) {
       return { intent: 'pursueGoal', goal: investigateGoal };
-    }
-
-    const vagueFixGoal = this.extractVagueFixGoal(request.text);
-    if (vagueFixGoal !== undefined) {
-      return { intent: 'pursueGoal', goal: vagueFixGoal };
     }
 
     const replaceTextRequest = this.extractReplaceTextRequest(request.text);
@@ -431,12 +436,14 @@ export class DevelopmentModelProvider implements ModelProvider {
   }
 
   /**
-   * "Corrija esse problema"/"conserte os testes" - write is authorized by
-   * the wording itself, but no concrete edit was named. The goal is still
-   * pursued (investigate first), it just never reaches an edit step: see
-   * `GoalExecutionOrchestrator`'s investigate procedure, which reports that
-   * no safe concrete fix could be determined automatically instead of
-   * fabricating one.
+   * "Corrija esse problema"/"conserte os testes"/"descubra por que os testes
+   * estão falhando e corrija" - write is authorized by the wording itself
+   * ("corrija"/"conserte"), but no concrete edit was named here. As of
+   * SPEC-047, this no longer means giving up: `GoalExecutionOrchestrator`
+   * autonomously investigates the real failure, discovers a candidate file
+   * from the failing test's own imports, and forms its own hypothesis for
+   * the edit from the validation's own evidence - this recognition only
+   * grants the authorization, it never invents the fix itself.
    */
   private extractVagueFixGoal(text: string): GoalDefinition | undefined {
     const lower = text.toLowerCase();

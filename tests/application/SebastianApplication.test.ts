@@ -924,6 +924,177 @@ test('SPEC-046: after a goal execution, a later short continuation in a separate
   }
 });
 
+/**
+ * A tiny, realistic buggy fixture for SPEC-047: `calc.js` hardcodes the
+ * wrong discount percentage, `calc.test.js` is a real, currently-failing
+ * `node:test` file asserting the correct one, and `unrelated.js` exists only
+ * to prove the autonomous fix never touches a file the failing test does
+ * not itself import (scope control).
+ */
+function writeAutonomousFixFixture(root: string): void {
+  writeFileSync(
+    join(root, 'calc.js'),
+    ['function getDiscountPercentage() {', '  return 5;', '}', '', 'module.exports = { getDiscountPercentage };', ''].join('\n'),
+  );
+  writeFileSync(
+    join(root, 'calc.test.js'),
+    [
+      "const test = require('node:test');",
+      "const assert = require('node:assert/strict');",
+      "const { getDiscountPercentage } = require('./calc.js');",
+      '',
+      "test('getDiscountPercentage returns the correct discount', () => {",
+      '  assert.strictEqual(getDiscountPercentage(), 10);',
+      '});',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(root, 'unrelated.js'),
+    ['function getRetryLimit() {', '  return 5;', '}', '', 'module.exports = { getRetryLimit };', ''].join('\n'),
+  );
+  // This test suite itself runs under `node --test`, which sets
+  // NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID in the environment; a nested
+  // `node --test` inheriting those vars silently detects the recursion and
+  // skips running entirely ("run() is being called recursively"). This
+  // wrapper - real Node code, no Sebastian involvement - just clears them
+  // before delegating to the real, unmodified `node --test` reporter, so
+  // the evidence Sebastian parses is still node --test's own genuine output.
+  writeFileSync(
+    join(root, 'run-node-test.js'),
+    [
+      "delete process.env.NODE_TEST_CONTEXT;",
+      "delete process.env.NODE_TEST_WORKER_ID;",
+      "const { spawnSync } = require('node:child_process');",
+      "const result = spawnSync(process.execPath, ['--test', 'calc.test.js'], { stdio: 'inherit', cwd: __dirname });",
+      "process.exit(result.status === null ? 1 : result.status);",
+      '',
+    ].join('\n'),
+  );
+}
+
+function nodeTestAuthorizedCommand(): { toolId: string; executable: string; args: readonly string[] } {
+  return { toolId: 'validation.test', executable: process.execPath, args: ['run-node-test.js'] };
+}
+
+test('SPEC-047 cenário A: a purely investigative request diagnoses a real failing test without altering any file', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-autofix-diagnose-'));
+  try {
+    initGitRepo(root);
+    writeAutonomousFixFixture(root);
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: root, authorizedCommands: [nodeTestAuthorizedCommand()] });
+
+    const result = await core.executeCommand(
+      converseInput('Sebastian, descubra por que os testes estão falhando.', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly goalExecution: { readonly status: string; readonly authorization: string; readonly filesChanged: readonly string[] };
+    };
+
+    assert.equal(output.goalExecution.status, 'completed');
+    assert.equal(output.goalExecution.authorization, 'readOnly');
+    assert.deepEqual(output.goalExecution.filesChanged, []);
+    assert.ok(output.message.includes('calc.js'), 'the diagnosis should name the real, autonomously discovered file');
+    assert.equal(readFileSync(join(root, 'calc.js'), 'utf8').includes('return 5;'), true, 'investigation alone must never edit anything');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-047 cenários B/C/F: "descubra e corrija", without naming the file or the edit, autonomously discovers, fixes and verifies the real bug - and never touches the unrelated file', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-autofix-apply-'));
+  try {
+    initGitRepo(root);
+    writeAutonomousFixFixture(root);
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: root, authorizedCommands: [nodeTestAuthorizedCommand()] });
+
+    const result = await core.executeCommand(
+      converseInput('Sebastian, descubra por que esse teste está falhando e corrija.', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly goalExecution: { readonly status: string; readonly authorization: string; readonly filesChanged: readonly string[] };
+    };
+
+    assert.equal(output.goalExecution.authorization, 'writeAuthorized');
+    assert.equal(output.goalExecution.status, 'completed');
+    assert.deepEqual(output.goalExecution.filesChanged, ['calc.js'], 'only the file the failing test actually imports may be changed');
+    assert.ok(output.message.includes('verificada'));
+
+    assert.equal(readFileSync(join(root, 'calc.js'), 'utf8').includes('return 10;'), true, 'the real bug must be genuinely fixed');
+    assert.equal(
+      readFileSync(join(root, 'unrelated.js'), 'utf8').includes('return 5;'),
+      true,
+      'a file the failing test never imports must never be touched, even though it coincidentally shares the same wrong literal',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-047 cenário E: an autonomous, correct-looking fix is never applied when the request was only investigative', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-autofix-no-authorization-'));
+  try {
+    initGitRepo(root);
+    writeAutonomousFixFixture(root);
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: root, authorizedCommands: [nodeTestAuthorizedCommand()] });
+
+    const result = await core.executeCommand(
+      converseInput('Descubra por que os testes estão falhando.', '2026-08-12T00:00:00.000Z'),
+    );
+
+    const output = result.output as { readonly goalExecution: { readonly authorization: string; readonly filesChanged: readonly string[] } };
+
+    assert.equal(output.goalExecution.authorization, 'readOnly');
+    assert.deepEqual(output.goalExecution.filesChanged, []);
+    assert.equal(readFileSync(join(root, 'calc.js'), 'utf8').includes('return 5;'), true);
+
+    const status = await core.executeCommand(converseInput('Qual é o estado deste repositório?', '2026-08-12T00:00:01.000Z'));
+    assert.ok((status.output as { readonly message: string }).message.includes('sem alterações pendentes'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SPEC-047 cenário I: after an autonomous fix, a later short continuation in a separate Core instance keeps the thread using the SPEC-045 memory brain', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-autofix-continuity-'));
+  try {
+    await withTempDataDir(async (dataDir) => {
+      initGitRepo(root);
+      writeAutonomousFixFixture(root);
+      commitAll(root, 'initial commit');
+
+      const firstCore = createSebastianApplication({
+        logger,
+        allowedFilesystemRoot: root,
+        dataDir,
+        authorizedCommands: [nodeTestAuthorizedCommand()],
+      });
+      const fix = await firstCore.executeCommand(
+        converseInput('Sebastian, descubra por que esse teste está falhando e corrija.', '2026-08-12T00:00:00.000Z'),
+      );
+
+      const secondCore = createSebastianApplication({ logger, allowedFilesystemRoot: root, dataDir });
+      const continuation = await secondCore.executeCommand(converseInput('Então continua', '2026-08-12T00:01:00.000Z'));
+
+      assert.deepEqual(continuation.output, {
+        message: `Continuando de onde paramos: ${(fix.output as { readonly message: string }).message}`,
+      });
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });

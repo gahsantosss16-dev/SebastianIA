@@ -906,6 +906,46 @@ test('interpret recognizes "conserte o build" as write-authorized, inferring the
   assert.equal(decision.goal.validationToolId, 'validation.build');
 });
 
+test('interpret grants write authorization (SPEC-047) when a request combines investigation and fix wording, in several distinct formulations', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const formulations = [
+    'Sebastian, descubra por que esse teste está falhando e corrija.',
+    'Investigue por que os testes estão falhando e conserte.',
+    'Descubra o motivo do build estar quebrando e corrija.',
+    'Sebastian, analise esse projeto, descubra a causa do teste falhando, e corrija.',
+  ];
+
+  for (const text of formulations) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-08-12T00:00:00.000Z' });
+    assert.equal(decision.intent, 'pursueGoal', `expected "${text}" to produce a pursueGoal decision`);
+    if (decision.intent !== 'pursueGoal') {
+      assert.fail('unreachable');
+    }
+    assert.equal(decision.goal.authorization, 'writeAuthorized', `expected "${text}" to be write-authorized`);
+    assert.equal(decision.goal.fix, undefined, `expected "${text}" to carry no pre-supplied fix - discovery is autonomous`);
+  }
+});
+
+test('interpret still recognizes pure investigation (no fix wording) as read-only, in several distinct formulations', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const formulations = [
+    'Descubra por que os testes estão falhando.',
+    'Sebastian, investigue por que o typecheck está quebrado.',
+    'Sebastian, analise esse projeto e descubra por que os testes estão falhando.',
+  ];
+
+  for (const text of formulations) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-08-12T00:00:00.000Z' });
+    assert.equal(decision.intent, 'pursueGoal', `expected "${text}" to produce a pursueGoal decision`);
+    if (decision.intent !== 'pursueGoal') {
+      assert.fail('unreachable');
+    }
+    assert.equal(decision.goal.authorization, 'readOnly', `expected "${text}" to remain read-only`);
+  }
+});
+
 test('interpret never treats generic continuation wording ("continua"/"resolve"/"pode seguir") alone as authorization to pursue a goal', async () => {
   const provider = new DevelopmentModelProvider();
 

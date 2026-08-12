@@ -1,7 +1,8 @@
 import type { SpecializedTool, SpecializedToolInvocationResult } from '../tool/SpecializedToolInvocationContract.js';
-import { FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../tool/LocalFilesystemInspectionTool.js';
+import { FILESYSTEM_READ_FILE_TOOL_ID, FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../tool/LocalFilesystemInspectionTool.js';
 import { GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID } from '../tool/LocalGitInspectionTool.js';
 import { InvalidGoalExecutionInputError } from './GoalExecutionErrors.js';
+import { extractImportedRelativePaths, parseFailureEvidence, type FailureEvidence } from './FailureEvidenceParser.js';
 import type {
   GoalDefinition,
   GoalExecutionDecisionRecord,
@@ -11,13 +12,24 @@ import type {
   GoalExecutionStepRecord,
 } from './GoalExecutionContract.js';
 
-/** Hard, non-negotiable ceiling on Tool calls per goal - the guard that guarantees an objective incapable of converging still stops safely instead of looping. */
-export const MAX_GOAL_EXECUTION_STEPS = 6;
+/**
+ * Hard, non-negotiable ceiling on Tool calls per goal - the guard that
+ * guarantees an objective incapable of converging still stops safely instead
+ * of looping. Sized for the worst realistic case of the autonomous fix cycle
+ * (inspect + validate + read the failing test + up to MAX_CANDIDATE_FILES
+ * edit attempts + verify, repeated up to MAX_FIX_ATTEMPTS times, plus a
+ * final diff) - still small and entirely bounded, never open-ended.
+ */
+export const MAX_GOAL_EXECUTION_STEPS = 14;
+/** How many source files, discovered from the failing test's own imports, are ever attempted for an autonomous fix - never a workspace-wide scan. */
+export const MAX_CANDIDATE_FILES = 3;
+/** How many distinct hypotheses (apply → verify) an autonomous fix ever tries before giving up - the "reconsider once, don't loop forever" bound required by this block. */
+export const MAX_FIX_ATTEMPTS = 2;
 
 const VALIDATION_TOOL_ID_PREFIX = 'validation.';
 
-/** Read-only toolIds a goal may always invoke, regardless of authorization. */
-const READ_ONLY_TOOL_IDS: ReadonlySet<string> = new Set([GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID]);
+/** Read-only toolIds a goal may always invoke, regardless of authorization - reading a file is investigation, never a change. */
+const READ_ONLY_TOOL_IDS: ReadonlySet<string> = new Set([GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID, FILESYSTEM_READ_FILE_TOOL_ID]);
 
 export interface GoalExecutionContext {
   readonly executionId: string;
@@ -43,16 +55,30 @@ type ActOutcome =
  * carries a concrete `fix`:
  *
  * - **investigate** (`goal.fix` absent): inspect Git state, run the
- *   validation the objective is about, and only gather a diff as further
- *   evidence when that validation actually failed - if it already passes,
- *   the cycle stops immediately instead of manufacturing more steps
- *   (the plan adapting to a contradicted hypothesis). Never touches
- *   `fs.replaceText`, regardless of `goal.authorization`.
+ *   validation the objective is about, and only dig further when that
+ *   validation actually failed - if it already passes, the cycle stops
+ *   immediately instead of manufacturing more steps (the plan adapting to a
+ *   contradicted hypothesis). Never touches `fs.replaceText`, regardless of
+ *   `goal.authorization`.
  * - **fix** (`goal.fix` present and `goal.authorization === 'writeAuthorized'`):
  *   inspect, apply the one concrete edit the user already specified, and
  *   then re-run the same validation as verification - a completed status is
  *   only ever reported when that verification actually passes ("ação
  *   executada ≠ objetivo concluído").
+ * - **autonomous fix** (`goal.fix` absent, `goal.authorization ===
+ *   'writeAuthorized'`, validation actually failed): SPEC-047's central new
+ *   behavior. The failed validation's own captured output is parsed
+ *   (`FailureEvidenceParser`) for the concrete actual/expected values Node's
+ *   own assertion failure already reports, and for the failing test's own
+ *   file; that test file is read once and its own `require`/`import`
+ *   statements become the only candidate source files ever considered -
+ *   never a workspace-wide scan. Each candidate is tried, in order, as a
+ *   `fs.replaceText(candidate, actual, expected)` hypothesis; a hypothesis
+ *   that does not make the validation pass is never reverted, but a fresh
+ *   hypothesis is formed from the *new* failure's own evidence and tried
+ *   again, up to `MAX_FIX_ATTEMPTS` times. A read-only goal runs the exact
+ *   same evidence gathering to produce a more useful diagnosis, but never
+ *   reaches the edit step.
  *
  * `fs.replaceText` is refused, defensively, whenever authorization is not
  * `writeAuthorized` - even if a `fix` were somehow present on a read-only
@@ -172,22 +198,234 @@ class GoalExecutionRun {
         observation: `Validação "${this.goal.validationToolId}" está passando.`,
         decision: 'Hipótese de falha não confirmada; encerrando investigação sem aprofundar.',
       });
-      return this.conclude('completed', undefined, this.composeInvestigationMessage(true, validation.exitCode));
+      return this.conclude('completed', undefined, this.composeInvestigationMessage(validation.exitCode));
     }
+
+    return this.investigateFailure(validation.exitCode, validationOutcome.output);
+  }
+
+  /**
+   * Reached only once the validation is confirmed to actually be failing.
+   * Shared by both authorization tiers: extracts real evidence from the
+   * validation's own output and discovers candidate source files from the
+   * failing test's own imports. `writeAuthorized` goes on to attempt an
+   * autonomous fix from that evidence; `readOnly` only uses it to produce a
+   * genuinely useful diagnosis, never an edit.
+   */
+  private investigateFailure(exitCode: unknown, validationOutput: Readonly<Record<string, unknown>>): GoalExecutionResult {
+    const evidence = this.extractEvidence(validationOutput);
+
+    const candidatesOutcome = this.discoverCandidateFiles(evidence.testFilePath);
+    if (candidatesOutcome.kind === 'stop') {
+      return candidatesOutcome.result;
+    }
+    const candidates = candidatesOutcome.candidates;
 
     this.decisions.push({
       afterStepId: this.currentStepId(),
-      observation: `Validação "${this.goal.validationToolId}" está falhando (exit code ${validation.exitCode}).`,
-      decision: 'Reunindo evidência adicional (diff) antes de concluir a investigação.',
+      observation: `Validação "${this.goal.validationToolId}" está falhando (exit code ${exitCode}).`,
+      decision:
+        candidates.length > 0
+          ? `${candidates.length} arquivo(s) candidato(s) identificado(s) a partir das importações do teste: ${candidates.join(', ')}.`
+          : 'Nenhum arquivo candidato identificável a partir da evidência disponível.',
     });
 
+    if (this.goal.authorization === 'writeAuthorized') {
+      return this.pursueAutonomousFix(exitCode, evidence, candidates);
+    }
+
+    return this.reportDiagnosis(exitCode, evidence, candidates);
+  }
+
+  private reportDiagnosis(
+    exitCode: unknown,
+    evidence: FailureEvidence,
+    candidates: readonly string[],
+  ): GoalExecutionResult {
     const diffOutcome = this.act('evidence', GIT_DIFF_TOOL_ID, {});
     if (diffOutcome.kind !== 'output') {
       return this.conclude(this.statusFor(diffOutcome), this.reasonFor(diffOutcome));
     }
     this.recordGitStep(this.currentStepId(), 'evidence', GIT_DIFF_TOOL_ID, diffOutcome.output);
 
-    return this.conclude('completed', undefined, this.composeInvestigationMessage(false, validation.exitCode));
+    return this.conclude('completed', undefined, this.composeDiagnosisMessage(exitCode, evidence, candidates));
+  }
+
+  /**
+   * The central new behavior of this block: tries, in order, up to
+   * `MAX_FIX_ATTEMPTS` hypotheses - each one an `fs.replaceText` on the
+   * first candidate whose current content still contains the hypothesis's
+   * "actual" literal, followed immediately by re-running the validation as
+   * verification. A hypothesis that does not make the validation pass is
+   * never reverted; a fresh hypothesis is instead formed from that new
+   * failure's own evidence (`FailureEvidenceParser` runs again on the new
+   * output) - genuine reconsideration grounded in new observation, not a
+   * blind retry.
+   */
+  private pursueAutonomousFix(
+    initialExitCode: unknown,
+    initialEvidence: FailureEvidence,
+    candidates: readonly string[],
+  ): GoalExecutionResult {
+    let currentEvidence = initialEvidence;
+    let attempts = 0;
+
+    while (
+      attempts < MAX_FIX_ATTEMPTS &&
+      currentEvidence.actualLiteral !== undefined &&
+      currentEvidence.expectedLiteral !== undefined &&
+      candidates.length > 0
+    ) {
+      const applyOutcome = this.tryApplyHypothesis(candidates, currentEvidence.actualLiteral, currentEvidence.expectedLiteral);
+      if (applyOutcome.kind === 'stop') {
+        return applyOutcome.result;
+      }
+      if (applyOutcome.kind === 'none') {
+        break;
+      }
+
+      attempts += 1;
+
+      const verifyOutcome = this.act('verify', this.goal.validationToolId, {});
+      if (verifyOutcome.kind !== 'output') {
+        return this.conclude(this.statusFor(verifyOutcome), this.reasonFor(verifyOutcome));
+      }
+      const verification = this.recordValidationStep('verify', verifyOutcome.output);
+      if (!verification.ranAsValidation) {
+        return this.conclude('failed', verification.reasonCode ?? 'validationRejected');
+      }
+
+      if (verification.succeeded) {
+        return this.concludeAfterFinalEvidence(
+          'completed',
+          undefined,
+          this.composeFixSuccessMessage(applyOutcome.path, currentEvidence, attempts, verification.exitCode),
+        );
+      }
+
+      this.decisions.push({
+        afterStepId: this.currentStepId(),
+        observation: `A hipótese aplicada em "${applyOutcome.path}" não resolveu; validação ainda falha (exit code ${verification.exitCode}).`,
+        decision:
+          attempts < MAX_FIX_ATTEMPTS
+            ? 'Reconsiderando a hipótese com base na nova evidência.'
+            : 'Limite de tentativas de correção atingido.',
+      });
+
+      currentEvidence = this.extractEvidence(verifyOutcome.output);
+    }
+
+    if (this.filesChanged.length > 0) {
+      return this.concludeAfterFinalEvidence(
+        'failed',
+        'verificationFailed',
+        this.composeFixExhaustedMessage(initialExitCode),
+      );
+    }
+
+    return this.reportDiagnosis(initialExitCode, initialEvidence, candidates);
+  }
+
+  /** Tries each candidate, in order, as the target of `fs.replaceText(candidate, actualLiteral, expectedLiteral)`, stopping at the first one accepted. */
+  private tryApplyHypothesis(
+    candidates: readonly string[],
+    actualLiteral: string,
+    expectedLiteral: string,
+  ): { readonly kind: 'applied'; readonly path: string } | { readonly kind: 'none' } | { readonly kind: 'stop'; readonly result: GoalExecutionResult } {
+    for (const candidate of candidates) {
+      const attemptOutcome = this.act('act', FILESYSTEM_REPLACE_TEXT_TOOL_ID, {
+        path: candidate,
+        searchText: actualLiteral,
+        replaceText: expectedLiteral,
+      });
+      if (attemptOutcome.kind !== 'output') {
+        return { kind: 'stop', result: this.conclude(this.statusFor(attemptOutcome), this.reasonFor(attemptOutcome)) };
+      }
+
+      const output = attemptOutcome.output;
+      const applied = output.outcome === 'ok';
+      const path = typeof output.path === 'string' ? output.path : candidate;
+      const message = typeof output.message === 'string' ? output.message : 'Edição recusada.';
+
+      this.steps.push({
+        stepId: this.currentStepId(),
+        phase: 'act',
+        toolId: FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+        outcome: applied ? 'ok' : 'rejected',
+        summary: applied
+          ? `Arquivo "${path}" atualizado (hipótese: "${actualLiteral}" → "${expectedLiteral}").`
+          : message,
+      });
+
+      if (applied) {
+        this.filesChanged.push(path);
+        return { kind: 'applied', path };
+      }
+
+      this.decisions.push({
+        afterStepId: this.currentStepId(),
+        observation: message,
+        decision: 'Candidato não se aplica a esta hipótese; tentando o próximo, se houver.',
+      });
+    }
+
+    return { kind: 'none' };
+  }
+
+  /**
+   * Reads the failing test file exactly once (never more) and parses its
+   * own `require`/`import` statements for candidate source files - the only
+   * discovery mechanism this block uses. Absent evidence of a test file, or
+   * a file that cannot be read, simply yields no candidates rather than
+   * falling back to any broader search.
+   */
+  private discoverCandidateFiles(
+    testFilePath: string | undefined,
+  ): { readonly kind: 'ok'; readonly candidates: readonly string[] } | { readonly kind: 'stop'; readonly result: GoalExecutionResult } {
+    if (testFilePath === undefined) {
+      return { kind: 'ok', candidates: [] };
+    }
+
+    const readOutcome = this.act('inspect', FILESYSTEM_READ_FILE_TOOL_ID, { path: testFilePath });
+    if (readOutcome.kind !== 'output') {
+      return { kind: 'stop', result: this.conclude(this.statusFor(readOutcome), this.reasonFor(readOutcome)) };
+    }
+
+    const output = readOutcome.output;
+    const ok = output.outcome === 'ok' && typeof output.content === 'string';
+    this.steps.push({
+      stepId: this.currentStepId(),
+      phase: 'inspect',
+      toolId: FILESYSTEM_READ_FILE_TOOL_ID,
+      outcome: ok ? 'ok' : 'rejected',
+      summary: ok
+        ? `Arquivo de teste "${testFilePath}" inspecionado em busca de arquivos relacionados.`
+        : typeof output.message === 'string'
+          ? output.message
+          : `Não foi possível ler "${testFilePath}".`,
+    });
+
+    if (!ok) {
+      return { kind: 'ok', candidates: [] };
+    }
+
+    const candidates = extractImportedRelativePaths(output.content as string, testFilePath).slice(0, MAX_CANDIDATE_FILES);
+    return { kind: 'ok', candidates };
+  }
+
+  private extractEvidence(validationOutput: Readonly<Record<string, unknown>>): FailureEvidence {
+    const stdout = typeof validationOutput.stdout === 'string' ? validationOutput.stdout : '';
+    const stderr = typeof validationOutput.stderr === 'string' ? validationOutput.stderr : '';
+    return parseFailureEvidence(`${stdout}\n${stderr}`);
+  }
+
+  private concludeAfterFinalEvidence(status: GoalExecutionStatus, reason: string | undefined, message: string): GoalExecutionResult {
+    const diffOutcome = this.act('evidence', GIT_DIFF_TOOL_ID, {});
+    if (diffOutcome.kind !== 'output') {
+      return this.conclude(this.statusFor(diffOutcome), this.reasonFor(diffOutcome));
+    }
+    this.recordGitStep(this.currentStepId(), 'evidence', GIT_DIFF_TOOL_ID, diffOutcome.output);
+    return this.conclude(status, reason, message);
   }
 
   private performFix(): GoalExecutionResult {
@@ -382,16 +620,43 @@ class GoalExecutionRun {
     return { outcome: 'failed', succeeded: false, exitCode: undefined, reasonCode, ranAsValidation: false };
   }
 
-  private composeInvestigationMessage(passing: boolean, exitCode: unknown): string {
-    if (passing) {
-      return `Investigação concluída: a validação "${this.goal.validationToolId}" está passando atualmente (exit code ${exitCode}); não encontrei evidência de falha para investigar mais a fundo.`;
-    }
+  private composeInvestigationMessage(exitCode: unknown): string {
+    return `Investigação concluída: a validação "${this.goal.validationToolId}" está passando atualmente (exit code ${exitCode}); não encontrei evidência de falha para investigar mais a fundo.`;
+  }
 
+  /**
+   * Used both when a `readOnly` goal reaches its final report, and when a
+   * `writeAuthorized` goal's autonomous fix never even found a hypothesis to
+   * try - the same honest, evidence-grounded diagnosis either way, differing
+   * only in the closing sentence about what authorization would still be
+   * needed.
+   */
+  private composeDiagnosisMessage(exitCode: unknown, evidence: FailureEvidence, candidates: readonly string[]): string {
     const base = `Investigação concluída: a validação "${this.goal.validationToolId}" está falhando (exit code ${exitCode}).`;
-    if (this.goal.authorization === 'writeAuthorized') {
-      return `${base} Não foi possível determinar uma correção segura e concreta automaticamente; informe o texto exato a ser substituído para eu aplicar a correção.`;
-    }
-    return `${base} Corrigir isso exigiria autorização explícita para alterar arquivos.`;
+    const evidenceSentence =
+      evidence.actualLiteral !== undefined && evidence.expectedLiteral !== undefined
+        ? ` O teste esperava ${evidence.expectedLiteral} mas obteve ${evidence.actualLiteral}.`
+        : '';
+    const candidateSentence = candidates.length > 0 ? ` Possível causa em: ${candidates.join(', ')}.` : '';
+    const closing =
+      this.goal.authorization === 'writeAuthorized'
+        ? ' Não foi possível determinar uma correção segura e concreta automaticamente a partir dessa evidência; informe o texto exato a ser substituído para eu aplicar a correção.'
+        : ' Corrigir isso exigiria autorização explícita para alterar arquivos.';
+    return `${base}${evidenceSentence}${candidateSentence}${closing}`;
+  }
+
+  private composeFixSuccessMessage(path: string, evidence: FailureEvidence, attempts: number, exitCode: unknown): string {
+    const hypothesisSentence =
+      evidence.actualLiteral !== undefined && evidence.expectedLiteral !== undefined
+        ? ` (hipótese: ${evidence.actualLiteral} → ${evidence.expectedLiteral})`
+        : '';
+    const reconsideredSentence = attempts > 1 ? ' após reconsiderar a hipótese inicial' : '';
+    return `Correção aplicada e verificada${reconsideredSentence}: "${path}" foi alterado${hypothesisSentence} e a validação "${this.goal.validationToolId}" agora passa (exit code ${exitCode}).`;
+  }
+
+  private composeFixExhaustedMessage(initialExitCode: unknown): string {
+    const files = Array.from(new Set(this.filesChanged));
+    return `Tentei ${files.length} hipótese(s) de correção (${files.join(', ')}), mas a validação "${this.goal.validationToolId}" continua falhando; nenhuma alteração foi revertida automaticamente - revise manualmente.`;
   }
 
   private statusFor(outcome: ActOutcome): GoalExecutionStatus {

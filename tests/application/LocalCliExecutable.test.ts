@@ -1151,6 +1151,95 @@ test('SPEC-046: a real CLI process demonstrates the difference between an invest
   });
 });
 
+/**
+ * A tiny, realistic buggy fixture for SPEC-047's autonomous discovery+fix,
+ * driven through the compiled CLI's default (package.json-based) validation
+ * scripts. `run-node-test.js` clears NODE_TEST_CONTEXT/NODE_TEST_WORKER_ID
+ * before delegating to the real, unmodified `node --test` reporter - this
+ * test file itself runs under `node --test`, and without clearing those
+ * inherited variables Node's own recursion guard would silently skip the
+ * nested run (a real Node behavior, not a Sebastian limitation).
+ */
+function writeAutonomousFixCliFixture(fixtureRoot: string): void {
+  writeFileSync(
+    join(fixtureRoot, 'calc.js'),
+    ['function getDiscountPercentage() {', '  return 5;', '}', '', 'module.exports = { getDiscountPercentage };', ''].join('\n'),
+  );
+  writeFileSync(
+    join(fixtureRoot, 'calc.test.js'),
+    [
+      "const test = require('node:test');",
+      "const assert = require('node:assert/strict');",
+      "const { getDiscountPercentage } = require('./calc.js');",
+      '',
+      "test('getDiscountPercentage returns the correct discount', () => {",
+      '  assert.strictEqual(getDiscountPercentage(), 10);',
+      '});',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(fixtureRoot, 'unrelated.js'),
+    ['function getRetryLimit() {', '  return 5;', '}', '', 'module.exports = { getRetryLimit };', ''].join('\n'),
+  );
+  writeFileSync(
+    join(fixtureRoot, 'run-node-test.js'),
+    [
+      'delete process.env.NODE_TEST_CONTEXT;',
+      'delete process.env.NODE_TEST_WORKER_ID;',
+      "const { spawnSync } = require('node:child_process');",
+      "const result = spawnSync(process.execPath, ['--test', 'calc.test.js'], { stdio: 'inherit', cwd: __dirname });",
+      'process.exit(result.status === null ? 1 : result.status);',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(fixtureRoot, 'package.json'),
+    JSON.stringify({
+      name: 'sebastian-autofix-fixture',
+      version: '1.0.0',
+      scripts: { test: 'node run-node-test.js', build: 'node run-node-test.js', typecheck: 'node run-node-test.js' },
+    }),
+  );
+}
+
+test('SPEC-047: a real CLI process autonomously discovers the file, forms the hypothesis and fixes a genuinely failing test, without oldText/newText ever being supplied', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeAutonomousFixCliFixture(fixtureRoot);
+      commitAll(fixtureRoot, 'initial commit');
+
+      const execution = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Sebastian, descubra por que esse teste está falhando e corrija.'],
+        { cwd: fixtureRoot, encoding: 'utf8', env: isolatedEnv(dataDir), timeout: 60000 },
+      );
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as {
+        output: {
+          message: string;
+          goalExecution: { status: string; authorization: string; filesChanged: readonly string[] };
+        };
+      };
+
+      assert.equal(result.output.goalExecution.authorization, 'writeAuthorized');
+      assert.equal(result.output.goalExecution.status, 'completed');
+      assert.deepEqual(result.output.goalExecution.filesChanged, ['calc.js']);
+      assert.ok(result.output.message.includes('verificada'));
+      assert.equal(readFileSync(join(fixtureRoot, 'calc.js'), 'utf8').includes('return 10;'), true);
+      assert.equal(
+        readFileSync(join(fixtureRoot, 'unrelated.js'), 'utf8').includes('return 5;'),
+        true,
+        'the file the failing test never imports must remain untouched',
+      );
+    });
+  });
+});
+
 test('greeting, remember and recall remain fully functional through the real CLI after the converse evolution', () => {
   withIsolatedDataDir((dataDir) => {
     const env = isolatedEnv(dataDir);

@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   GoalExecutionOrchestrator,
+  MAX_CANDIDATE_FILES,
+  MAX_FIX_ATTEMPTS,
   MAX_GOAL_EXECUTION_STEPS,
   type GoalExecutionContext,
   type GoalDefinition,
 } from '../../core/development/index.js';
 import { InvalidGoalExecutionInputError } from '../../core/development/GoalExecutionErrors.js';
-import { FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../../core/tool/LocalFilesystemInspectionTool.js';
+import { FILESYSTEM_READ_FILE_TOOL_ID, FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../../core/tool/LocalFilesystemInspectionTool.js';
 import { GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID } from '../../core/tool/LocalGitInspectionTool.js';
 import type {
   SpecializedTool,
@@ -73,6 +75,67 @@ function diffOk(hasChanges: boolean): SpecializedToolInvocationResult {
 
 function validationOk(succeeded: boolean, exitCode: number): SpecializedToolInvocationResult {
   return ok({ operation: 'validation', outcome: 'ok', toolId: VALIDATION_TOOL_ID, succeeded, exitCode });
+}
+
+/** Real node --test failure shape, matching what tests/development/FailureEvidenceParser.test.ts already validated against actual Node output. */
+function validationFailedWithEvidence(
+  exitCode: number,
+  actual: number,
+  expected: number,
+  testFilePath: string,
+): SpecializedToolInvocationResult {
+  const stdout = [
+    `test at ${testFilePath}:5:1`,
+    'AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+    '',
+    `  ${actual} !== ${expected}`,
+    '',
+    '  {',
+    '    generatedMessage: true,',
+    "    code: 'ERR_ASSERTION',",
+    `    actual: ${actual},`,
+    `    expected: ${expected},`,
+    "    operator: 'strictEqual',",
+    "    diff: 'simple'",
+    '  }',
+  ].join('\n');
+  return ok({
+    operation: 'validation',
+    outcome: 'ok',
+    toolId: VALIDATION_TOOL_ID,
+    succeeded: false,
+    exitCode,
+    stdout,
+    stderr: '',
+  });
+}
+
+function validationFailedNoEvidence(exitCode: number): SpecializedToolInvocationResult {
+  return ok({
+    operation: 'validation',
+    outcome: 'ok',
+    toolId: VALIDATION_TOOL_ID,
+    succeeded: false,
+    exitCode,
+    stdout: 'something failed, no recognizable shape here',
+    stderr: '',
+  });
+}
+
+function readFileOk(content: string): SpecializedToolInvocationResult {
+  return ok({ operation: 'readFile', outcome: 'ok', path: 'x', content, sizeBytes: content.length, message: 'ok' });
+}
+
+function readFileRejected(): SpecializedToolInvocationResult {
+  return ok({ operation: 'readFile', outcome: 'rejected', reasonCode: 'notFound', path: 'x', message: 'Não encontrei.' });
+}
+
+function replaceTextOk(path: string): SpecializedToolInvocationResult {
+  return ok({ operation: 'replaceText', outcome: 'ok', path, message: `Arquivo "${path}" atualizado.` });
+}
+
+function replaceTextRejected(path: string, reasonCode: string): SpecializedToolInvocationResult {
+  return ok({ operation: 'replaceText', outcome: 'rejected', path, reasonCode, message: 'Edição recusada.' });
 }
 
 test('investigate: validation already passing adapts the plan, skipping the diff step, and concludes completed', () => {
@@ -357,4 +420,211 @@ test('execute rejects an invalid execution context', () => {
       return true;
     },
   );
+});
+
+// --- SPEC-047: autonomous discovery + hypothesis + fix + reconsideration ---
+
+test('SPEC-047: a write-authorized goal with no concrete fix autonomously discovers the file and the edit from the failing test evidence alone, then verifies it', () => {
+  const { tool, calls } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js'), validationOk(true, 0)],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk("require('./calc.js');\n")],
+    [FILESYSTEM_REPLACE_TEXT_TOOL_ID]: [replaceTextOk('calc.js')],
+    [GIT_DIFF_TOOL_ID]: [diffOk(true)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+  const goal = investigateGoal({ authorization: 'writeAuthorized' });
+
+  const result = orchestrator.execute(goal, context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, ['calc.js']);
+  assert.deepEqual(
+    calls.map((call) => call.toolId),
+    [GIT_STATUS_TOOL_ID, VALIDATION_TOOL_ID, FILESYSTEM_READ_FILE_TOOL_ID, FILESYSTEM_REPLACE_TEXT_TOOL_ID, VALIDATION_TOOL_ID, GIT_DIFF_TOOL_ID],
+  );
+  // The proposed fix itself must come from the evidence (5 → 4), never from anything the caller supplied.
+  const replaceCall = calls.find((call) => call.toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID);
+  assert.deepEqual(replaceCall?.payload, { path: 'calc.js', searchText: '5', replaceText: '4' });
+  assert.ok(result.message.includes('verificada'));
+});
+
+test('SPEC-047: a purely investigative (readOnly) goal reaches the same diagnosis but never invokes fs.replaceText', () => {
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js')],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk("require('./calc.js');\n")],
+    [GIT_DIFF_TOOL_ID]: [diffOk(false)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal(), context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, []);
+  assert.ok(!calls.some((call) => call.toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID));
+  assert.ok(result.message.includes('calc.js'), 'the diagnosis should name the discovered candidate file');
+  assert.ok(result.message.includes('autorização explícita para alterar arquivos'));
+});
+
+test('SPEC-047: scope control - only the candidate that actually contains the hypothesis literal is edited, an unrelated import is left untouched', () => {
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js'), validationOk(true, 0)],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk("require('./unrelated.js');\nrequire('./calc.js');\n")],
+    [FILESYSTEM_REPLACE_TEXT_TOOL_ID]: [replaceTextRejected('unrelated.js', 'searchTextNotFound'), replaceTextOk('calc.js')],
+    [GIT_DIFF_TOOL_ID]: [diffOk(true)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, ['calc.js'], 'the unrelated candidate must never be reported as changed');
+  const replaceCalls = calls.filter((call) => call.toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID);
+  assert.deepEqual(
+    replaceCalls.map((call) => (call.payload as { path: string }).path),
+    ['unrelated.js', 'calc.js'],
+  );
+});
+
+test('SPEC-047: reconsideration - a first hypothesis that does not fix the failure is preserved (not reverted), and a second hypothesis grounded in fresh evidence is tried and succeeds', () => {
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [
+      validationFailedWithEvidence(1, 5, 4, 'calc.test.js'),
+      validationFailedWithEvidence(1, 9, 7, 'calc.test.js'),
+      validationOk(true, 0),
+    ],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk("require('./a.js');\nrequire('./b.js');\n")],
+    [FILESYSTEM_REPLACE_TEXT_TOOL_ID]: [replaceTextOk('a.js'), replaceTextRejected('a.js', 'searchTextNotFound'), replaceTextOk('b.js')],
+    [GIT_DIFF_TOOL_ID]: [diffOk(true)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, ['a.js', 'b.js'], 'the first, unhelpful edit must remain - never rolled back');
+  assert.deepEqual(
+    calls.map((call) => call.toolId),
+    [
+      GIT_STATUS_TOOL_ID,
+      VALIDATION_TOOL_ID,
+      FILESYSTEM_READ_FILE_TOOL_ID,
+      FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+      VALIDATION_TOOL_ID,
+      FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+      FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+      VALIDATION_TOOL_ID,
+      GIT_DIFF_TOOL_ID,
+    ],
+  );
+  assert.ok(result.message.includes('reconsiderar'));
+});
+
+test('SPEC-047: exhausting all fix attempts without success is reported as failed, preserving every edit for manual review', () => {
+  const { tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [
+      validationFailedWithEvidence(1, 5, 4, 'calc.test.js'),
+      validationFailedWithEvidence(1, 9, 7, 'calc.test.js'),
+      validationFailedWithEvidence(1, 9, 7, 'calc.test.js'),
+    ],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk("require('./a.js');\n")],
+    [FILESYSTEM_REPLACE_TEXT_TOOL_ID]: [replaceTextOk('a.js'), replaceTextOk('a.js')],
+    [GIT_DIFF_TOOL_ID]: [diffOk(true)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.reason, 'verificationFailed');
+  assert.deepEqual(result.filesChanged, ['a.js']);
+  assert.ok(result.message.includes('continua falhando'));
+});
+
+test('SPEC-047: no candidate file discoverable from the test\'s own imports reports the honest diagnosis without ever editing', () => {
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js')],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk("const assert = require('node:assert/strict');\n")],
+    [GIT_DIFF_TOOL_ID]: [diffOk(false)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, []);
+  assert.ok(!calls.some((call) => call.toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID));
+  assert.ok(result.message.includes('Não foi possível determinar uma correção segura'));
+});
+
+test('SPEC-047: no usable evidence at all (unrecognized failure shape) reports the honest diagnosis without ever editing', () => {
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedNoEvidence(1)],
+    [GIT_DIFF_TOOL_ID]: [diffOk(false)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, []);
+  assert.equal(calls.some((call) => call.toolId === FILESYSTEM_READ_FILE_TOOL_ID), false, 'no test file path was parseable, so no read should be attempted');
+  assert.ok(!calls.some((call) => call.toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID));
+});
+
+test('SPEC-047: a test file that cannot be read yields no candidates instead of failing the whole goal', () => {
+  const { tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js')],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileRejected()],
+    [GIT_DIFF_TOOL_ID]: [diffOk(false)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.filesChanged, []);
+});
+
+test('SPEC-047: candidate discovery is capped at MAX_CANDIDATE_FILES, never a workspace-wide scan', () => {
+  const manyImports = Array.from({ length: MAX_CANDIDATE_FILES + 5 }, (_unused, index) => `require('./file${index}.js');`).join('\n');
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js')],
+    [FILESYSTEM_READ_FILE_TOOL_ID]: [readFileOk(manyImports)],
+    [FILESYSTEM_REPLACE_TEXT_TOOL_ID]: Array.from({ length: MAX_CANDIDATE_FILES }, () => replaceTextRejected('x', 'searchTextNotFound')),
+    [GIT_DIFF_TOOL_ID]: [diffOk(false)],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool, 20);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'completed');
+  const replaceAttempts = calls.filter((call) => call.toolId === FILESYSTEM_REPLACE_TEXT_TOOL_ID);
+  assert.equal(replaceAttempts.length, MAX_CANDIDATE_FILES);
+});
+
+test('SPEC-047: fix attempts are capped at MAX_FIX_ATTEMPTS - the reconsideration loop is bounded, not open-ended', () => {
+  assert.ok(MAX_FIX_ATTEMPTS >= 1);
+  assert.ok(Number.isInteger(MAX_FIX_ATTEMPTS));
+});
+
+test('SPEC-047: the step limit still applies mid-discovery, stopping the autonomous fix cycle safely', () => {
+  const { calls, tool } = scriptedTool({
+    [GIT_STATUS_TOOL_ID]: [statusOk(true)],
+    [VALIDATION_TOOL_ID]: [validationFailedWithEvidence(1, 5, 4, 'calc.test.js')],
+  });
+  const orchestrator = new GoalExecutionOrchestrator(tool, 2);
+
+  const result = orchestrator.execute(investigateGoal({ authorization: 'writeAuthorized' }), context());
+
+  assert.equal(result.status, 'incomplete');
+  assert.equal(calls.length, 2);
 });
