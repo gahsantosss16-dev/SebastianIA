@@ -333,6 +333,80 @@ test('tasks and remembered facts coexist without interfering with each other', a
   });
 });
 
+test('the project workspace vertical slice works end-to-end through SebastianApplication: identity, listing, reading, creating, appending and project context', async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'sebastian-application-workspace-'));
+  try {
+    await withTempDataDir(async (dataDir) => {
+      writeFileSync(join(fixtureRoot, 'README.md'), 'projeto de exemplo');
+
+      const writerCore = createSebastianApplication({ logger, allowedFilesystemRoot: fixtureRoot, dataDir });
+
+      const identity = await writerCore.executeCommand(converseInput('Em qual projeto estou?', '2026-08-11T00:00:00.000Z'));
+      assert.ok((identity.output as { readonly message: string }).message.includes('1 item na raiz'));
+
+      await writerCore.executeCommand(
+        converseInput('Sebastian, lembra que este projeto usa TypeScript', '2026-08-11T00:00:01.000Z'),
+      );
+
+      const creating = await writerCore.executeCommand(
+        converseInput('Crie uma nota chamada pendencias.md com: revisar autenticação', '2026-08-11T00:00:02.000Z'),
+      );
+      assert.deepEqual(creating.output, { message: 'Nota "pendencias.md" criada.' });
+
+      const appending = await writerCore.executeCommand(
+        converseInput('Acrescente na nota pendencias.md: revisar deploy', '2026-08-11T00:00:03.000Z'),
+      );
+      assert.deepEqual(appending.output, { message: 'Conteúdo acrescentado a "pendencias.md".' });
+
+      // A later Core instance, sharing dataDir and allowedFilesystemRoot,
+      // reads back everything created/appended by the earlier one and still
+      // has access to the project context recorded earlier via the
+      // pre-existing remember mechanism - reused as-is for "what do you know
+      // about this project", with no separate project-context store.
+      const readerCore = createSebastianApplication({ logger, allowedFilesystemRoot: fixtureRoot, dataDir });
+
+      const rereading = await readerCore.executeCommand(
+        converseInput('Leia o arquivo pendencias.md', '2026-08-11T00:00:04.000Z'),
+      );
+      assert.deepEqual(rereading.output, {
+        message: 'Conteúdo de "pendencias.md":\nrevisar autenticaçãorevisar deploy',
+      });
+
+      const whatDoYouKnow = await readerCore.executeCommand(
+        converseInput('O que você sabe sobre este projeto?', '2026-08-11T00:00:05.000Z'),
+      );
+      assert.deepEqual(whatDoYouKnow.output, {
+        message: 'Sobre isso, você registrou: "este projeto usa TypeScript".',
+      });
+    });
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test('creating a file over an existing one and appending to a missing one report friendly errors instead of corrupting the workspace', async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'sebastian-application-workspace-errors-'));
+  try {
+    writeFileSync(join(fixtureRoot, 'existente.md'), 'conteúdo original');
+    const core = createSebastianApplication({ logger, allowedFilesystemRoot: fixtureRoot });
+
+    const overwrite = await core.executeCommand(
+      converseInput('Crie uma nota chamada existente.md com: outra coisa', '2026-08-11T00:00:00.000Z'),
+    );
+    assert.deepEqual(overwrite.output, {
+      message: 'Já existe um arquivo em "existente.md"; não vou sobrescrevê-lo.',
+    });
+    assert.equal(readFileSync(join(fixtureRoot, 'existente.md'), 'utf8'), 'conteúdo original');
+
+    const appendMissing = await core.executeCommand(
+      converseInput('Acrescente no arquivo nao-existe.md: x', '2026-08-11T00:00:01.000Z'),
+    );
+    assert.deepEqual(appendMissing.output, { message: 'Não encontrei "nao-existe.md".' });
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });

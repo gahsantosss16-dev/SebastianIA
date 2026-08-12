@@ -495,6 +495,187 @@ test('completing an unmatched task through the real CLI reports it clearly inste
   });
 });
 
+test('a real CLI process reports basic workspace identity via natural language', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      writeFileSync(join(fixtureRoot, 'README.md'), 'x');
+
+      const execution = spawnSync(process.execPath, [compiledCliPath, 'Em qual projeto estou?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env: isolatedEnv(dataDir),
+      });
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as { output: { message: string } };
+      assert.ok(result.output.message.includes('1 item na raiz'));
+    });
+  });
+});
+
+test('a real CLI process creates a note, and a later, separate real process reads its real content', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      const env = isolatedEnv(dataDir);
+
+      const createProcess = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Crie uma nota chamada pendencias.md com: revisar autenticação'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(createProcess.error, undefined);
+      assert.equal(createProcess.status, 0);
+      assert.equal(createProcess.stderr, '');
+      const createResult = JSON.parse(createProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(createResult.output.message, 'Nota "pendencias.md" criada.');
+      assert.equal(readFileSync(join(fixtureRoot, 'pendencias.md'), 'utf8'), 'revisar autenticação');
+
+      const readProcess = spawnSync(process.execPath, [compiledCliPath, 'Leia o arquivo pendencias.md'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(readProcess.status, 0);
+      const readResult = JSON.parse(readProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(readResult.output.message, 'Conteúdo de "pendencias.md":\nrevisar autenticação');
+
+      assert.notEqual(createProcess.pid, readProcess.pid);
+    });
+  });
+});
+
+test('a real CLI process appends to a note, and a later, separate real process sees both the original and the appended content', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      const env = isolatedEnv(dataDir);
+      writeFileSync(join(fixtureRoot, 'pendencias.md'), 'revisar autenticação');
+
+      const appendProcess = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Acrescente na nota pendencias.md: revisar deploy'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(appendProcess.status, 0);
+      const appendResult = JSON.parse(appendProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(appendResult.output.message, 'Conteúdo acrescentado a "pendencias.md".');
+
+      const readProcess = spawnSync(process.execPath, [compiledCliPath, 'Leia o arquivo pendencias.md'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(readProcess.status, 0);
+      const readResult = JSON.parse(readProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(readResult.output.message, 'Conteúdo de "pendencias.md":\nrevisar autenticaçãorevisar deploy');
+    });
+  });
+});
+
+test('a real CLI process refuses to overwrite an existing note and refuses to append to a missing one, without crashing', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      const env = isolatedEnv(dataDir);
+      writeFileSync(join(fixtureRoot, 'existente.md'), 'conteúdo original');
+
+      const overwriteProcess = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Crie uma nota chamada existente.md com: outra coisa'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(overwriteProcess.error, undefined);
+      assert.equal(overwriteProcess.status, 0);
+      assert.equal(overwriteProcess.stderr, '');
+      const overwriteResult = JSON.parse(overwriteProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(overwriteResult.output.message, 'Já existe um arquivo em "existente.md"; não vou sobrescrevê-lo.');
+      assert.equal(readFileSync(join(fixtureRoot, 'existente.md'), 'utf8'), 'conteúdo original');
+
+      const appendMissingProcess = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Acrescente no arquivo nao-existe.md: x'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(appendMissingProcess.status, 0);
+      const appendMissingResult = JSON.parse(appendMissingProcess.stdout.trim()) as { output: { message: string } };
+      assert.equal(appendMissingResult.output.message, 'Não encontrei "nao-existe.md".');
+    });
+  });
+});
+
+test('a real CLI process refuses to create a note outside its working directory and reports it safely, without crashing', () => {
+  withIsolatedDataDir((dataDir) => {
+    const parent = mkdtempSync(join(tmpdir(), 'sebastian-cli-workspace-guard-'));
+    try {
+      const root = join(parent, 'projeto');
+      const outside = join(parent, 'fora');
+      mkdirSync(root);
+      mkdirSync(outside);
+
+      const execution = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Crie uma nota chamada ../fora/nova.md com: x'],
+        { cwd: root, encoding: 'utf8', env: isolatedEnv(dataDir) },
+      );
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as { output: { message: string } };
+      assert.equal(result.output.message, 'O caminho "../fora/nova.md" está fora da área permitida.');
+      assert.equal(existsSync(join(outside, 'nova.md')), false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+});
+
+test('the project workspace block neither breaks nor is affected by greeting, remember, recall and tasks sharing the same real CLI process family', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      const env = isolatedEnv(dataDir);
+
+      const greeting = spawnSync(process.execPath, [compiledCliPath, 'greeting', 'Gabriel'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(greeting.status, 0);
+      assert.deepEqual(JSON.parse(greeting.stdout.trim()).output, { message: 'Hello, Gabriel!' });
+
+      const addTask = spawnSync(process.execPath, [compiledCliPath, 'Adiciona uma tarefa: comprar leite'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(addTask.status, 0);
+
+      const createNote = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'Crie uma nota chamada pendencias.md com: revisar autenticação'],
+        { cwd: fixtureRoot, encoding: 'utf8', env },
+      );
+      assert.equal(createNote.status, 0);
+      assert.deepEqual(JSON.parse(createNote.stdout.trim()).output, { message: 'Nota "pendencias.md" criada.' });
+
+      const recall = spawnSync(process.execPath, [compiledCliPath, 'recall'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(recall.status, 0);
+
+      const listTasks = spawnSync(process.execPath, [compiledCliPath, 'Quais', 'são', 'minhas', 'tarefas?'], {
+        cwd: fixtureRoot,
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(listTasks.status, 0);
+      assert.deepEqual(JSON.parse(listTasks.stdout.trim()).output, { message: 'Suas tarefas pendentes: comprar leite.' });
+    });
+  });
+});
+
 test('greeting, remember and recall remain fully functional through the real CLI after the converse evolution', () => {
   withIsolatedDataDir((dataDir) => {
     const env = isolatedEnv(dataDir);

@@ -382,6 +382,78 @@ test('interpret reports ambiguity instead of arbitrarily completing one of sever
   });
 });
 
+test('interpret recognizes the "qual projeto" marker as a useTool describeWorkspace decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Em qual projeto estou?',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, { intent: 'useTool', toolId: 'fs.describeWorkspace', toolInput: {} });
+});
+
+test('interpret recognizes "crie uma nota chamada X com: Y" as a useTool createTextFile decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Crie uma nota chamada pendencias.md com: revisar autenticação',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.createTextFile',
+    toolInput: { path: 'pendencias.md', content: 'revisar autenticação' },
+  });
+});
+
+test('interpret recognizes "crie um arquivo chamado X com: Y" as a useTool createTextFile decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Crie um arquivo chamado notas.txt com: primeira anotação',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.createTextFile',
+    toolInput: { path: 'notas.txt', content: 'primeira anotação' },
+  });
+});
+
+test('interpret recognizes "acrescente na nota X: Y" as a useTool appendTextFile decision', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Acrescente na nota pendencias.md: revisar deploy',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.appendTextFile',
+    toolInput: { path: 'pendencias.md', content: 'revisar deploy' },
+  });
+});
+
+test('interpret falls back to a generic response when create/append markers have no content', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Crie uma nota chamada pendencias.md com:   ',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'respond');
+});
+
 test('interpret never performs network I/O and resolves purely locally', async () => {
   const provider = new DevelopmentModelProvider();
   const start = Date.now();

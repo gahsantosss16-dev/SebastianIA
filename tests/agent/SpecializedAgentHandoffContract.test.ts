@@ -306,6 +306,50 @@ test('specialized agent propagates an unexpected Tool failure as a failed handof
   assert.equal(result.error, failure);
 });
 
+test('specialized agent invokes the Tool for a workspace write decision and relays its message', async () => {
+  let invocationPayload: unknown;
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({
+      intent: 'useTool',
+      toolId: 'fs.createTextFile',
+      toolInput: { path: 'pendencias.md', content: 'revisar autenticação' },
+    }),
+  };
+  const agent = new InMemorySpecializedAgent(
+    {
+      invoke: (input) => {
+        invocationPayload = input;
+        return {
+          status: 'completed',
+          output: { operation: 'createTextFile', outcome: 'ok', path: 'pendencias.md', message: 'Nota "pendencias.md" criada.' },
+        };
+      },
+    },
+    modelProvider,
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-11T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Crie uma nota chamada pendencias.md com: revisar autenticação' } } },
+  });
+
+  assert.deepEqual(invocationPayload, {
+    toolId: 'fs.createTextFile',
+    executionId: 'converse:2026-08-11T00:00:00.000Z',
+    responsibilityId: 'capability.execute.converse',
+    requestedAt: '2026-08-11T00:00:01.000Z',
+    payload: { path: 'pendencias.md', content: 'revisar autenticação' },
+  });
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'Nota "pendencias.md" criada.' });
+});
+
 test('specialized agent turns an addTask decision into a task-created finalResult', async () => {
   const modelProvider: ModelProvider = {
     interpret: async () => ({ intent: 'addTask', content: 'comprar leite' }),

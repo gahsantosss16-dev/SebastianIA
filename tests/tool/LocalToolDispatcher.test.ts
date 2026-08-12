@@ -4,7 +4,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalToolDispatcher } from '../../core/tool/LocalToolDispatcher.js';
-import { LocalFilesystemInspectionTool, FILESYSTEM_READ_FILE_TOOL_ID } from '../../core/tool/LocalFilesystemInspectionTool.js';
+import {
+  LocalFilesystemInspectionTool,
+  FILESYSTEM_READ_FILE_TOOL_ID,
+  FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID,
+  FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID,
+  FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID,
+} from '../../core/tool/LocalFilesystemInspectionTool.js';
 import { InMemorySpecializedTool } from '../../core/tool/InMemorySpecializedTool.js';
 import { InvalidSpecializedToolInvocationInputError } from '../../core/tool/SpecializedToolInvocationErrors.js';
 import type { SpecializedToolInvocationInput } from '../../core/tool/SpecializedToolInvocationContract.js';
@@ -36,6 +42,51 @@ test('routes filesystem toolIds to the real filesystem tool', () => {
       assert.fail('Expected completed status.');
     }
     assert.equal(result.output.content, 'conteúdo real');
+  });
+});
+
+test('routes the workspace write/identity toolIds to the real filesystem tool', () => {
+  withFixtureRoot((root) => {
+    const dispatcher = new LocalToolDispatcher(new InMemorySpecializedTool(), new LocalFilesystemInspectionTool(root));
+
+    const createResult = dispatcher.invoke({
+      toolId: FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID,
+      executionId: 'x',
+      responsibilityId: 'y',
+      requestedAt: '2026-08-11T00:00:00.000Z',
+      payload: { path: 'nota.md', content: 'conteúdo real' },
+    });
+    assert.equal(createResult.status, 'completed');
+    if (createResult.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(createResult.output.outcome, 'ok');
+
+    const appendResult = dispatcher.invoke({
+      toolId: FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID,
+      executionId: 'x',
+      responsibilityId: 'y',
+      requestedAt: '2026-08-11T00:00:01.000Z',
+      payload: { path: 'nota.md', content: ' mais' },
+    });
+    assert.equal(appendResult.status, 'completed');
+    if (appendResult.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(appendResult.output.outcome, 'ok');
+
+    const describeResult = dispatcher.invoke({
+      toolId: FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID,
+      executionId: 'x',
+      responsibilityId: 'y',
+      requestedAt: '2026-08-11T00:00:02.000Z',
+      payload: {},
+    });
+    assert.equal(describeResult.status, 'completed');
+    if (describeResult.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal(describeResult.output.outcome, 'ok');
   });
 });
 

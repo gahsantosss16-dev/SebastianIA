@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -472,5 +472,107 @@ test('completing an unmatched task leaves pending tasks unchanged and does not c
     assert.deepEqual(listing.output, { message: 'Suas tarefas pendentes: comprar leite.' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the full project workspace vertical slice works end-to-end through SebastianCore: identity, listing, reading, creating and appending', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-workspace-'));
+  try {
+    writeFileSync(join(dir, 'README.md'), 'projeto de exemplo');
+
+    const dependencies = composeCorePipelineDependencies({
+      ...validInputWithConverse,
+      allowedFilesystemRoot: dir,
+    });
+    const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
+    core.initialize();
+    core.start();
+
+    const identity = await core.executeCommand(converseCommandInput('Em qual projeto estou?', '2026-08-11T00:00:00.000Z'));
+    const identityMessage = (identity.output as { readonly message: string }).message;
+    assert.ok(identityMessage.includes('1 item na raiz'));
+
+    const listing = await core.executeCommand(converseCommandInput('Quais arquivos existem?', '2026-08-11T00:00:01.000Z'));
+    assert.deepEqual(listing.output, { message: 'Arquivos em ".": README.md.' });
+
+    const reading = await core.executeCommand(converseCommandInput('Leia o arquivo README.md', '2026-08-11T00:00:02.000Z'));
+    assert.deepEqual(reading.output, { message: 'Conteúdo de "README.md":\nprojeto de exemplo' });
+
+    const creating = await core.executeCommand(
+      converseCommandInput('Crie uma nota chamada pendencias.md com: revisar autenticação', '2026-08-11T00:00:03.000Z'),
+    );
+    assert.deepEqual(creating.output, { message: 'Nota "pendencias.md" criada.' });
+    assert.equal(readFileSync(join(dir, 'pendencias.md'), 'utf8'), 'revisar autenticação');
+
+    const appending = await core.executeCommand(
+      converseCommandInput('Acrescente na nota pendencias.md: revisar deploy', '2026-08-11T00:00:04.000Z'),
+    );
+    assert.deepEqual(appending.output, { message: 'Conteúdo acrescentado a "pendencias.md".' });
+    assert.equal(readFileSync(join(dir, 'pendencias.md'), 'utf8'), 'revisar autenticaçãorevisar deploy');
+
+    const rereading = await core.executeCommand(converseCommandInput('Leia o arquivo pendencias.md', '2026-08-11T00:00:05.000Z'));
+    assert.deepEqual(rereading.output, {
+      message: 'Conteúdo de "pendencias.md":\nrevisar autenticaçãorevisar deploy',
+    });
+
+    const recreating = await core.executeCommand(
+      converseCommandInput('Crie uma nota chamada pendencias.md com: outra coisa', '2026-08-11T00:00:06.000Z'),
+    );
+    assert.deepEqual(recreating.output, {
+      message: 'Já existe um arquivo em "pendencias.md"; não vou sobrescrevê-lo.',
+    });
+    assert.equal(readFileSync(join(dir, 'pendencias.md'), 'utf8'), 'revisar autenticaçãorevisar deploy');
+
+    const appendingMissing = await core.executeCommand(
+      converseCommandInput('Acrescente no arquivo nao-existe.md: x', '2026-08-11T00:00:07.000Z'),
+    );
+    assert.deepEqual(appendingMissing.output, { message: 'Não encontrei "nao-existe.md".' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('workspace writes stay confined to allowedFilesystemRoot end-to-end through SebastianCore: traversal, absolute path and symlink escape', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'sebastian-core-bootstrap-workspace-guard-'));
+  try {
+    const root = join(parent, 'projeto');
+    const outside = join(parent, 'fora');
+    mkdirSync(root);
+    mkdirSync(outside);
+
+    const dependencies = composeCorePipelineDependencies({
+      ...validInputWithConverse,
+      allowedFilesystemRoot: root,
+    });
+    const core = new SebastianCore('Sebastian IA', {}, undefined, dependencies);
+    core.initialize();
+    core.start();
+
+    const traversal = await core.executeCommand(
+      converseCommandInput('Crie uma nota chamada ../fora/nova.md com: x', '2026-08-11T00:00:00.000Z'),
+    );
+    assert.deepEqual(traversal.output, {
+      message: 'O caminho "../fora/nova.md" está fora da área permitida.',
+    });
+    assert.equal(existsSync(join(outside, 'nova.md')), false);
+
+    let symlinkCreated = true;
+    try {
+      symlinkSync(outside, join(root, 'atalho'), process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      symlinkCreated = false;
+    }
+
+    if (symlinkCreated) {
+      const throughSymlink = await core.executeCommand(
+        converseCommandInput('Crie uma nota chamada atalho/nova.md com: x', '2026-08-11T00:00:01.000Z'),
+      );
+      assert.deepEqual(throughSymlink.output, {
+        message: 'O caminho "atalho/nova.md" está fora da área permitida.',
+      });
+      assert.equal(existsSync(join(outside, 'nova.md')), false);
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
   }
 });

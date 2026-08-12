@@ -8,6 +8,9 @@ import { InvalidModelInterpretationRequestError } from './ModelProviderContractE
 import {
   FILESYSTEM_LIST_DIRECTORY_TOOL_ID,
   FILESYSTEM_READ_FILE_TOOL_ID,
+  FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID,
+  FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID,
+  FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID,
 } from '../tool/LocalFilesystemInspectionTool.js';
 
 const REMEMBER_MARKER = 'lembra que';
@@ -16,6 +19,9 @@ const READ_FILE_MARKER = 'leia o arquivo';
 const ADD_TASK_MARKER = 'adiciona uma tarefa';
 const LIST_TASKS_MARKER = 'minhas tarefas';
 const COMPLETE_TASK_PATTERN = /marca\s+(.+?)\s+como feita/i;
+const DESCRIBE_WORKSPACE_MARKER = 'qual projeto';
+const CREATE_TEXT_FILE_PATTERN = /crie (?:uma nota|um arquivo) chamad[ao]\s+(.+?)\s+com:\s*(.+)$/i;
+const APPEND_TEXT_FILE_PATTERN = /acrescente (?:na nota|no arquivo)\s+(.+?):\s*(.+)$/i;
 const MAX_TASK_CONTENT_LENGTH = 500;
 const MAX_LISTED_PENDING_TASKS = 500;
 const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
@@ -56,6 +62,20 @@ export class DevelopmentModelProvider implements ModelProvider {
 
     if (request.text.toLowerCase().includes(LIST_TASKS_MARKER)) {
       return { intent: 'respond', answer: this.composeTaskListAnswer(request.pendingTasks ?? []) };
+    }
+
+    if (request.text.toLowerCase().includes(DESCRIBE_WORKSPACE_MARKER)) {
+      return { intent: 'useTool', toolId: FILESYSTEM_DESCRIBE_WORKSPACE_TOOL_ID, toolInput: {} };
+    }
+
+    const createTextFile = this.extractCreateTextFileRequest(request.text);
+    if (createTextFile !== undefined) {
+      return { intent: 'useTool', toolId: FILESYSTEM_CREATE_TEXT_FILE_TOOL_ID, toolInput: createTextFile };
+    }
+
+    const appendTextFile = this.extractAppendTextFileRequest(request.text);
+    if (appendTextFile !== undefined) {
+      return { intent: 'useTool', toolId: FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID, toolInput: appendTextFile };
     }
 
     const listDirectoryPath = this.extractListDirectoryPath(request.text);
@@ -121,6 +141,39 @@ export class DevelopmentModelProvider implements ModelProvider {
     const rest = text.slice(markerIndex + READ_FILE_MARKER.length);
     const path = this.cleanPathFragment(rest);
     return path === '' ? undefined : path;
+  }
+
+  /**
+   * Minimal, deliberately narrow recognition of "create a note/file named X
+   * with: Y" proving the fs.createTextFile intent end-to-end. Actual
+   * overwrite protection and content limits are enforced by the Tool, not
+   * here - this only extracts the two free-form fragments.
+   */
+  private extractCreateTextFileRequest(text: string): Readonly<Record<string, unknown>> | undefined {
+    const match = text.match(CREATE_TEXT_FILE_PATTERN);
+    const rawPath = match?.[1];
+    const rawContent = match?.[2];
+    if (rawPath === undefined || rawContent === undefined) {
+      return undefined;
+    }
+
+    const path = this.cleanPathFragment(rawPath);
+    const content = rawContent.trim();
+    return path === '' || content === '' ? undefined : { path, content };
+  }
+
+  /** Minimal, deliberately narrow recognition of "append to note/file X: Y" proving the fs.appendTextFile intent end-to-end. */
+  private extractAppendTextFileRequest(text: string): Readonly<Record<string, unknown>> | undefined {
+    const match = text.match(APPEND_TEXT_FILE_PATTERN);
+    const rawPath = match?.[1];
+    const rawContent = match?.[2];
+    if (rawPath === undefined || rawContent === undefined) {
+      return undefined;
+    }
+
+    const path = this.cleanPathFragment(rawPath);
+    const content = rawContent.trim();
+    return path === '' || content === '' ? undefined : { path, content };
   }
 
   /** Minimal, deliberately narrow marker recognition proving the "add a task" intent end-to-end. */
