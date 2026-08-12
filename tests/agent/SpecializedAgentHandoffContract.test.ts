@@ -7,6 +7,7 @@ import {
 } from '../../core/agent/index.js';
 import { SpecializedToolInvocationFailureError } from '../../core/tool/index.js';
 import type { ModelProvider } from '../../core/model/ModelProviderContract.js';
+import type { DevelopmentTaskPlan, DevelopmentTaskResult } from '../../core/development/index.js';
 
 test('specialized agent returns completed for valid handoff input', async () => {
   let invokeCount = 0;
@@ -388,6 +389,147 @@ test('specialized agent invokes the Tool for a git-inspection decision and relay
     assert.fail('Expected completed status.');
   }
   assert.deepEqual(result.output.finalResult, { message: 'Branch "main", sem alterações pendentes.' });
+});
+
+test('specialized agent runs a developTask decision through its default orchestrator, invoking the Tool for every plan step', async () => {
+  const plan: DevelopmentTaskPlan = {
+    objective: 'Substituir texto em "exemplo.ts" e executar a validação "validation.test".',
+    steps: [
+      {
+        stepId: 'edit',
+        description: 'Substituir o texto indicado em "exemplo.ts".',
+        toolId: 'fs.replaceText',
+        toolInput: { path: 'exemplo.ts', searchText: 'const x = 1;', replaceText: 'const x = 2;' },
+      },
+      { stepId: 'validate', description: 'Executar a validação "validation.test".', toolId: 'validation.test', toolInput: {} },
+      { stepId: 'status', description: 'Consultar o estado do repositório Git após a alteração.', toolId: 'git.status', toolInput: {} },
+      { stepId: 'diff', description: 'Consultar o diff atual do repositório Git após a alteração.', toolId: 'git.diff', toolInput: {} },
+    ],
+  };
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'developTask', plan }),
+  };
+  const invokedToolIds: string[] = [];
+  const outputsByToolId: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+    'fs.replaceText': { operation: 'replaceText', outcome: 'ok', path: 'exemplo.ts', message: 'Arquivo "exemplo.ts" atualizado.' },
+    'validation.test': { operation: 'validation', outcome: 'ok', toolId: 'validation.test', succeeded: true, exitCode: 0, message: 'ok' },
+    'git.status': { operation: 'status', outcome: 'ok', branch: 'main', clean: false, changedFiles: [{ status: 'M', path: 'exemplo.ts' }], message: 'ok' },
+    'git.diff': { operation: 'diff', outcome: 'ok', diff: '- const x = 1;\n+ const x = 2;\n', truncated: false, message: 'ok' },
+  };
+
+  const agent = new InMemorySpecializedAgent({
+    invoke: (input) => {
+      invokedToolIds.push(input.toolId);
+      return { status: 'completed', output: outputsByToolId[input.toolId] ?? {} };
+    },
+  }, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: {
+      commandInput: {
+        type: 'converse',
+        input: { text: 'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.' },
+      },
+    },
+  });
+
+  assert.deepEqual(invokedToolIds, ['fs.replaceText', 'validation.test', 'git.status', 'git.diff']);
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  const finalResult = result.output.finalResult as { readonly message: string; readonly developmentTask: DevelopmentTaskResult };
+  assert.equal(typeof finalResult.message, 'string');
+  assert.equal(finalResult.developmentTask.status, 'completed');
+  assert.deepEqual(finalResult.developmentTask.filesChanged, ['exemplo.ts']);
+});
+
+test('specialized agent reports a blocked developTask when the edit step is refused for an already-modified file', async () => {
+  const plan: DevelopmentTaskPlan = {
+    objective: 'Substituir texto em "exemplo.ts".',
+    steps: [
+      { stepId: 'edit', description: 'Substituir o texto indicado em "exemplo.ts".', toolId: 'fs.replaceText', toolInput: { path: 'exemplo.ts', searchText: 'X', replaceText: 'Y' } },
+      { stepId: 'validate', description: 'Executar a validação "validation.test".', toolId: 'validation.test', toolInput: {} },
+    ],
+  };
+  const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'developTask', plan }) };
+  const invokedToolIds: string[] = [];
+
+  const agent = new InMemorySpecializedAgent({
+    invoke: (input) => {
+      invokedToolIds.push(input.toolId);
+      return {
+        status: 'completed',
+        output: {
+          operation: 'replaceText',
+          outcome: 'rejected',
+          path: 'exemplo.ts',
+          reasonCode: 'fileAlreadyModified',
+          message: '"exemplo.ts" já possui alterações não commitadas; não vou editá-lo automaticamente.',
+        },
+      };
+    },
+  }, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'No arquivo exemplo.ts, substitua X por Y e execute os testes' } } },
+  });
+
+  assert.deepEqual(invokedToolIds, ['fs.replaceText']);
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  const finalResult = result.output.finalResult as { readonly developmentTask: DevelopmentTaskResult };
+  assert.equal(finalResult.developmentTask.status, 'blocked');
+  assert.equal(finalResult.developmentTask.reason, 'fileAlreadyModified');
+});
+
+test('specialized agent delegates developTask execution to an explicitly injected orchestrator instead of building its own', async () => {
+  const plan: DevelopmentTaskPlan = { objective: 'x', steps: [{ stepId: 's', description: 'd', toolId: 'git.status', toolInput: {} }] };
+  const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'developTask', plan }) };
+  let receivedPlan: DevelopmentTaskPlan | undefined;
+  const stubResult: DevelopmentTaskResult = {
+    objective: 'x',
+    status: 'completed',
+    steps: [],
+    filesChanged: [],
+    message: 'stub result',
+  };
+
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => assert.fail('The injected orchestrator, not the raw Tool, should have been used.') },
+    modelProvider,
+    {
+      execute: (receivedPlanArg) => {
+        receivedPlan = receivedPlanArg;
+        return stubResult;
+      },
+    },
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'qualquer texto' } } },
+  });
+
+  assert.deepEqual(receivedPlan, plan);
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'stub result', developmentTask: stubResult });
 });
 
 test('specialized agent turns an addTask decision into a task-created finalResult', async () => {

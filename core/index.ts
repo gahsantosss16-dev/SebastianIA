@@ -23,6 +23,7 @@ export * from './agent/index.js';
 export * from './tool/index.js';
 export * from './memory/index.js';
 export * from './model/index.js';
+export * from './development/index.js';
 export * from './conversation/index.js';
 export * from './context/index.js';
 export * from './command/index.js';

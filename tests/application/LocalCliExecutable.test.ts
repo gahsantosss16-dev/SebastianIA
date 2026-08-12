@@ -801,6 +801,125 @@ test('a real CLI process runs this project\'s own authorized build validation an
   });
 });
 
+/**
+ * The compiled CLI always authorizes this very project's own npm scripts
+ * (`application/SebastianApplication.ts`'s `defaultAuthorizedCommands`), so a
+ * developTask e2e run needs the isolated fixture repository to be a real,
+ * tiny project of its own - with a `package.json` defining fast, real
+ * test/build/typecheck scripts - exactly the same trust boundary already
+ * documented in SPEC-043 (authorizing a validation means authorizing
+ * whatever script that project defines).
+ */
+function writeFixtureValidationScripts(fixtureRoot: string, exitCode: number): void {
+  writeFileSync(join(fixtureRoot, 'check.js'), `process.exit(${exitCode});\n`);
+  writeFileSync(
+    join(fixtureRoot, 'package.json'),
+    JSON.stringify({
+      name: 'sebastian-developtask-fixture',
+      version: '1.0.0',
+      scripts: { test: 'node check.js', build: 'node check.js', typecheck: 'node check.js' },
+    }),
+  );
+}
+
+test('a real CLI process completes the full SPEC-044 developTask vertical slice in one invocation: edit, validate, git status and git diff', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      writeFixtureValidationScripts(fixtureRoot, 0);
+      commitAll(fixtureRoot, 'initial commit');
+
+      const execution = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.'],
+        { cwd: fixtureRoot, encoding: 'utf8', env: isolatedEnv(dataDir), timeout: 60000 },
+      );
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as {
+        output: { developmentTask: { status: string; filesChanged: readonly string[]; steps: ReadonlyArray<{ toolId: string; outcome: string }> } };
+      };
+
+      assert.equal(result.output.developmentTask.status, 'completed');
+      assert.deepEqual(result.output.developmentTask.filesChanged, ['exemplo.ts']);
+      assert.deepEqual(
+        result.output.developmentTask.steps.map((step) => step.toolId),
+        ['fs.replaceText', 'validation.test', 'git.status', 'git.diff'],
+      );
+      assert.equal(readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+    });
+  });
+});
+
+test('a real CLI process reports a blocked developTask, without editing or validating, when the target file already has uncommitted changes', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      writeFixtureValidationScripts(fixtureRoot, 0);
+      commitAll(fixtureRoot, 'initial commit');
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1; // já alterado manualmente\n');
+
+      const execution = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.'],
+        { cwd: fixtureRoot, encoding: 'utf8', env: isolatedEnv(dataDir), timeout: 60000 },
+      );
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as {
+        output: { developmentTask: { status: string; reason?: string; steps: ReadonlyArray<{ toolId: string }> } };
+      };
+
+      assert.equal(result.output.developmentTask.status, 'blocked');
+      assert.equal(result.output.developmentTask.reason, 'fileAlreadyModified');
+      assert.deepEqual(
+        result.output.developmentTask.steps.map((step) => step.toolId),
+        ['fs.replaceText'],
+      );
+      assert.equal(readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'), 'const x = 1; // já alterado manualmente\n');
+    });
+  });
+});
+
+test('a real CLI process reports a failed developTask, preserving the edit and the Git status/diff, when validation does not pass', () => {
+  withIsolatedDataDir((dataDir) => {
+    withIsolatedFixtureRoot((fixtureRoot) => {
+      initGitRepo(fixtureRoot);
+      writeFileSync(join(fixtureRoot, 'exemplo.ts'), 'const x = 1;\n');
+      writeFixtureValidationScripts(fixtureRoot, 1);
+      commitAll(fixtureRoot, 'initial commit');
+
+      const execution = spawnSync(
+        process.execPath,
+        [compiledCliPath, 'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.'],
+        { cwd: fixtureRoot, encoding: 'utf8', env: isolatedEnv(dataDir), timeout: 60000 },
+      );
+
+      assert.equal(execution.error, undefined);
+      assert.equal(execution.status, 0);
+      assert.equal(execution.stderr, '');
+      const result = JSON.parse(execution.stdout.trim()) as {
+        output: { developmentTask: { status: string; reason?: string; filesChanged: readonly string[]; steps: ReadonlyArray<{ toolId: string }> } };
+      };
+
+      assert.equal(result.output.developmentTask.status, 'failed');
+      assert.equal(result.output.developmentTask.reason, 'validationFailed');
+      assert.deepEqual(result.output.developmentTask.filesChanged, ['exemplo.ts']);
+      assert.deepEqual(
+        result.output.developmentTask.steps.map((step) => step.toolId),
+        ['fs.replaceText', 'validation.test', 'git.status', 'git.diff'],
+      );
+      assert.equal(readFileSync(join(fixtureRoot, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+    });
+  });
+});
+
 test('the development executor block neither breaks nor is affected by greeting, remember, recall, tasks and workspace notes sharing the same real CLI process family', () => {
   withIsolatedDataDir((dataDir) => {
     withIsolatedFixtureRoot((fixtureRoot) => {

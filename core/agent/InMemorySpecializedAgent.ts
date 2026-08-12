@@ -13,21 +13,38 @@ import {
   type PendingTaskRecord,
   type RememberedFactRecord,
 } from '../memory/index.js';
-import type { ModelInterpretationUseToolDecision, ModelProvider } from '../model/ModelProviderContract.js';
+import type {
+  ModelInterpretationDevelopTaskDecision,
+  ModelInterpretationUseToolDecision,
+  ModelProvider,
+} from '../model/ModelProviderContract.js';
+import {
+  DevelopmentTaskOrchestrator,
+  type DevelopmentTaskExecutionContext,
+  type DevelopmentTaskPlan,
+  type DevelopmentTaskResult,
+} from '../development/index.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
 
+interface DevelopmentTaskOrchestratorLike {
+  execute(plan: DevelopmentTaskPlan, context: DevelopmentTaskExecutionContext): DevelopmentTaskResult;
+}
+
 export class InMemorySpecializedAgent implements SpecializedAgent {
   private readonly specializedTool: SpecializedTool;
   private readonly modelProvider: ModelProvider | undefined;
+  private readonly developmentTaskOrchestrator: DevelopmentTaskOrchestratorLike;
 
   public constructor(
     specializedTool: SpecializedTool = new InMemorySpecializedTool(),
     modelProvider?: ModelProvider,
+    developmentTaskOrchestrator?: DevelopmentTaskOrchestratorLike,
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
+    this.developmentTaskOrchestrator = developmentTaskOrchestrator ?? new DevelopmentTaskOrchestrator(specializedTool);
   }
 
   public async handoff(input: SpecializedAgentHandoffInput): Promise<SpecializedAgentHandoffResult> {
@@ -63,6 +80,10 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
 
     if (decision.intent === 'useTool') {
       return this.handleToolUse(input, decision);
+    }
+
+    if (decision.intent === 'developTask') {
+      return this.handleDevelopTask(input, decision);
     }
 
     let finalResult: Readonly<Record<string, unknown>>;
@@ -122,6 +143,30 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     }
 
     return { status: 'completed', output: { finalResult: { message } } };
+  }
+
+  /**
+   * Runs a bounded, already-structured development task (SPEC-044) end to
+   * end within this single handoff - a linear, capped sequence of Tool
+   * invocations, never an open-ended or background loop. The orchestrator's
+   * own bounded, pre-summarized result becomes the finalResult verbatim, so
+   * neither raw stdout/stderr nor a raw diff ever reaches the response or
+   * the Memory write-back that reuses the same value.
+   */
+  private handleDevelopTask(
+    input: SpecializedAgentHandoffInput,
+    decision: ModelInterpretationDevelopTaskDecision,
+  ): SpecializedAgentHandoffResult {
+    const result = this.developmentTaskOrchestrator.execute(decision.plan, {
+      executionId: input.executionId,
+      responsibilityId: input.responsibilityId,
+      requestedAt: input.requestedAt,
+    });
+
+    return {
+      status: 'completed',
+      output: { finalResult: { message: result.message, developmentTask: result } },
+    };
   }
 
   private handleToolDelegation(input: SpecializedAgentHandoffInput): SpecializedAgentHandoffResult {

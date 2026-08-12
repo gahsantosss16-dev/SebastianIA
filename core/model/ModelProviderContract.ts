@@ -1,4 +1,5 @@
 import type { PendingTaskRecord, RememberedFactRecord } from '../memory/index.js';
+import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
 
 export interface ModelInterpretationRequest {
   readonly text: string;
@@ -50,12 +51,24 @@ export interface ModelInterpretationUseToolDecision {
   readonly toolInput: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * A decision to run a short, structured, multi-step development task
+ * (SPEC-044) instead of a single Tool invocation. The plan itself is already
+ * fully formed by the ModelProvider - the Agent only orchestrates its
+ * bounded execution, never re-derives or extends it.
+ */
+export interface ModelInterpretationDevelopTaskDecision {
+  readonly intent: 'developTask';
+  readonly plan: DevelopmentTaskPlan;
+}
+
 export type ModelInterpretationDecision =
   | ModelInterpretationRememberDecision
   | ModelInterpretationRespondDecision
   | ModelInterpretationUseToolDecision
   | ModelInterpretationAddTaskDecision
-  | ModelInterpretationCompleteTaskDecision;
+  | ModelInterpretationCompleteTaskDecision
+  | ModelInterpretationDevelopTaskDecision;
 
 /**
  * Substitutable boundary for natural-language interpretation. Core never

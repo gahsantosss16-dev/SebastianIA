@@ -470,6 +470,102 @@ test('interpret recognizes "altere o arquivo X substituindo Y por Z" as a useToo
   });
 });
 
+test('interpret recognizes "no arquivo X, substitua Y por Z e execute os testes" as a developTask decision with a full plan', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'developTask',
+    plan: {
+      objective: 'Substituir texto em "exemplo.ts" e executar a validação "validation.test".',
+      steps: [
+        {
+          stepId: 'edit',
+          description: 'Substituir o texto indicado em "exemplo.ts".',
+          toolId: 'fs.replaceText',
+          toolInput: { path: 'exemplo.ts', searchText: 'const x = 1;', replaceText: 'const x = 2;' },
+        },
+        {
+          stepId: 'validate',
+          description: 'Executar a validação "validation.test".',
+          toolId: 'validation.test',
+          toolInput: {},
+        },
+        {
+          stepId: 'status',
+          description: 'Consultar o estado do repositório Git após a alteração.',
+          toolId: 'git.status',
+          toolInput: {},
+        },
+        {
+          stepId: 'diff',
+          description: 'Consultar o diff atual do repositório Git após a alteração.',
+          toolId: 'git.diff',
+          toolInput: {},
+        },
+      ],
+    },
+  });
+});
+
+test('interpret recognizes the developTask marker for "e execute o build" with the build validation toolId', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'No arquivo exemplo.ts, substitua X por Y e execute o build',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'developTask');
+  assert.equal(decision.intent === 'developTask' ? decision.plan.steps[1]?.toolId : undefined, 'validation.build');
+});
+
+test('interpret recognizes the developTask marker for "e execute o typecheck" with the typecheck validation toolId', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'No arquivo exemplo.ts, substitua X por Y e execute o typecheck',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'developTask');
+  assert.equal(decision.intent === 'developTask' ? decision.plan.steps[1]?.toolId : undefined, 'validation.typecheck');
+});
+
+test('interpret falls back to a plain replaceText useTool decision when the developTask "e execute" suffix is absent', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Altere o arquivo exemplo.ts substituindo X por Y',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.equal(decision.intent, 'useTool');
+});
+
+test('interpret does not produce a developTask decision when the developTask marker has no search text', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'No arquivo exemplo.ts, substitua   por Y e execute os testes',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  // With no recognizable edit, the still-present "execute os testes" wording
+  // falls through to the narrower, pre-existing validation marker instead of
+  // silently failing - the plan-building step itself is simply never reached.
+  assert.notEqual(decision.intent, 'developTask');
+});
+
 test('interpret recognizes a marker asking about the repository state as a useTool git.status decision', async () => {
   const provider = new DevelopmentModelProvider();
 

@@ -466,6 +466,147 @@ test(
   },
 );
 
+test('the SPEC-044 developTask vertical slice completes end-to-end: edit, validate, git status and git diff, in one converse invocation', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-developtask-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        { toolId: 'validation.test', executable: process.execPath, args: ['-e', "console.log('tudo certo')"] },
+      ],
+    });
+
+    const result = await core.executeCommand(
+      converseInput(
+        'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.',
+        '2026-08-12T01:00:00.000Z',
+      ),
+    );
+
+    const output = result.output as {
+      readonly message: string;
+      readonly developmentTask: {
+        readonly status: string;
+        readonly filesChanged: readonly string[];
+        readonly steps: ReadonlyArray<{ readonly toolId: string; readonly outcome: string }>;
+      };
+    };
+
+    assert.equal(output.developmentTask.status, 'completed');
+    assert.deepEqual(output.developmentTask.filesChanged, ['exemplo.ts']);
+    assert.deepEqual(
+      output.developmentTask.steps.map((step) => step.toolId),
+      ['fs.replaceText', 'validation.test', 'git.status', 'git.diff'],
+    );
+    assert.ok(output.developmentTask.steps.every((step) => step.outcome === 'ok'));
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+
+    // The bounded finalResult is what gets persisted to Memory too (SPEC-039
+    // write-back reuse) - it must never carry a raw diff or raw stdout.
+    const serialized = JSON.stringify(output);
+    assert.equal(serialized.includes('@@'), false);
+    assert.equal(serialized.includes('diff --git'), false);
+    assert.equal(serialized.includes('tudo certo'), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the SPEC-044 developTask vertical slice reports blocked, without editing or validating, when the target already has uncommitted changes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-developtask-blocked-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1; // já alterado manualmente\n');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        { toolId: 'validation.test', executable: process.execPath, args: ['-e', "console.log('não deveria rodar')"] },
+      ],
+    });
+
+    const result = await core.executeCommand(
+      converseInput(
+        'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.',
+        '2026-08-12T01:00:00.000Z',
+      ),
+    );
+
+    const output = result.output as {
+      readonly developmentTask: {
+        readonly status: string;
+        readonly reason?: string;
+        readonly filesChanged: readonly string[];
+        readonly steps: ReadonlyArray<{ readonly toolId: string }>;
+      };
+    };
+
+    assert.equal(output.developmentTask.status, 'blocked');
+    assert.equal(output.developmentTask.reason, 'fileAlreadyModified');
+    assert.deepEqual(output.developmentTask.filesChanged, []);
+    assert.deepEqual(
+      output.developmentTask.steps.map((step) => step.toolId),
+      ['fs.replaceText'],
+    );
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 1; // já alterado manualmente\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the SPEC-044 developTask vertical slice reports failed, preserving the edit and the Git status/diff, when validation does not pass', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-application-developtask-failed-'));
+  try {
+    initGitRepo(root);
+    writeFileSync(join(root, 'exemplo.ts'), 'const x = 1;\n');
+    commitAll(root, 'initial commit');
+
+    const core = createSebastianApplication({
+      logger,
+      allowedFilesystemRoot: root,
+      authorizedCommands: [
+        { toolId: 'validation.test', executable: process.execPath, args: ['-e', 'process.exit(1)'] },
+      ],
+    });
+
+    const result = await core.executeCommand(
+      converseInput(
+        'No arquivo exemplo.ts, substitua "const x = 1;" por "const x = 2;" e execute os testes.',
+        '2026-08-12T01:00:00.000Z',
+      ),
+    );
+
+    const output = result.output as {
+      readonly developmentTask: {
+        readonly status: string;
+        readonly reason?: string;
+        readonly filesChanged: readonly string[];
+        readonly steps: ReadonlyArray<{ readonly toolId: string; readonly outcome: string }>;
+      };
+    };
+
+    assert.equal(output.developmentTask.status, 'failed');
+    assert.equal(output.developmentTask.reason, 'validationFailed');
+    assert.deepEqual(output.developmentTask.filesChanged, ['exemplo.ts']);
+    // Git status/diff still ran after the failed validation, so the report reflects real, current state.
+    assert.deepEqual(
+      output.developmentTask.steps.map((step) => step.toolId),
+      ['fs.replaceText', 'validation.test', 'git.status', 'git.diff'],
+    );
+    assert.equal(readFileSync(join(root, 'exemplo.ts'), 'utf8'), 'const x = 2;\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });

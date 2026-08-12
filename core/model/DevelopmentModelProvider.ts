@@ -19,6 +19,7 @@ import {
   VALIDATION_BUILD_TOOL_ID,
   VALIDATION_TYPECHECK_TOOL_ID,
 } from '../tool/LocalAuthorizedCommandTool.js';
+import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
 
 const REMEMBER_MARKER = 'lembra que';
 const LIST_DIRECTORY_MARKER = 'arquivos existem';
@@ -34,6 +35,21 @@ const GIT_DIFF_MARKER = 'alterações atuais';
 const RUN_TEST_MARKER = 'execute os testes';
 const RUN_BUILD_MARKER = 'execute o build';
 const RUN_TYPECHECK_MARKER = 'execute o typecheck';
+/**
+ * Recognizes a single, combined development-task request: "no arquivo X,
+ * substitua Y por Z e execute <validação>" - proving the SPEC-044 multi-step
+ * orchestration (edit → validate → git status → git diff → report) end to
+ * end from one deterministic marker. Deliberately narrow, exactly like every
+ * other pattern in this file - a real ModelProvider replaces this entirely
+ * behind the same `developTask` decision shape.
+ */
+const DEVELOP_TASK_PATTERN =
+  /no arquivo\s+(.+?),\s*substitua\s+(.+?)\s+por\s+(.+?)\s+e execute\s+(os testes|o build|o typecheck)\.?\s*$/i;
+const DEVELOP_TASK_VALIDATION_TOOL_IDS: Readonly<Record<string, string>> = {
+  'os testes': VALIDATION_TEST_TOOL_ID,
+  'o build': VALIDATION_BUILD_TOOL_ID,
+  'o typecheck': VALIDATION_TYPECHECK_TOOL_ID,
+};
 const MAX_TASK_CONTENT_LENGTH = 500;
 const MAX_LISTED_PENDING_TASKS = 500;
 const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
@@ -88,6 +104,11 @@ export class DevelopmentModelProvider implements ModelProvider {
     const appendTextFile = this.extractAppendTextFileRequest(request.text);
     if (appendTextFile !== undefined) {
       return { intent: 'useTool', toolId: FILESYSTEM_APPEND_TEXT_FILE_TOOL_ID, toolInput: appendTextFile };
+    }
+
+    const developTaskPlan = this.extractDevelopTaskPlan(request.text);
+    if (developTaskPlan !== undefined) {
+      return { intent: 'developTask', plan: developTaskPlan };
     }
 
     const replaceTextRequest = this.extractReplaceTextRequest(request.text);
@@ -234,6 +255,77 @@ export class DevelopmentModelProvider implements ModelProvider {
     const searchText = rawSearchText.trim();
     const replaceText = rawReplaceText.trim();
     return path === '' || searchText === '' ? undefined : { path, searchText, replaceText };
+  }
+
+  /**
+   * Minimal, deliberately narrow recognition of "no arquivo X, substitua Y
+   * por Z e execute <validação>" proving the SPEC-044 developTask
+   * orchestration end-to-end. The resulting plan is fully structured and
+   * bounded (edit → validate → git status → git diff) - this method only
+   * extracts the free-form fragments and picks the right validation toolId;
+   * every safety decision during execution belongs to the orchestrator and
+   * the underlying Tools, not to this recognition step.
+   */
+  private extractDevelopTaskPlan(text: string): DevelopmentTaskPlan | undefined {
+    const match = text.match(DEVELOP_TASK_PATTERN);
+    const rawPath = match?.[1];
+    const rawSearchText = match?.[2];
+    const rawReplaceText = match?.[3];
+    const rawValidation = match?.[4];
+    if (rawPath === undefined || rawSearchText === undefined || rawReplaceText === undefined || rawValidation === undefined) {
+      return undefined;
+    }
+
+    const path = this.cleanPathFragment(rawPath);
+    const searchText = this.stripSurroundingQuotes(rawSearchText);
+    const replaceText = this.stripSurroundingQuotes(rawReplaceText);
+    const validationToolId = DEVELOP_TASK_VALIDATION_TOOL_IDS[rawValidation.toLowerCase()];
+    if (path === '' || searchText === '' || validationToolId === undefined) {
+      return undefined;
+    }
+
+    return this.buildDevelopTaskPlan(path, searchText, replaceText, validationToolId);
+  }
+
+  private buildDevelopTaskPlan(
+    path: string,
+    searchText: string,
+    replaceText: string,
+    validationToolId: string,
+  ): DevelopmentTaskPlan {
+    return {
+      objective: `Substituir texto em "${path}" e executar a validação "${validationToolId}".`,
+      steps: [
+        {
+          stepId: 'edit',
+          description: `Substituir o texto indicado em "${path}".`,
+          toolId: FILESYSTEM_REPLACE_TEXT_TOOL_ID,
+          toolInput: { path, searchText, replaceText },
+        },
+        {
+          stepId: 'validate',
+          description: `Executar a validação "${validationToolId}".`,
+          toolId: validationToolId,
+          toolInput: {},
+        },
+        {
+          stepId: 'status',
+          description: 'Consultar o estado do repositório Git após a alteração.',
+          toolId: GIT_STATUS_TOOL_ID,
+          toolInput: {},
+        },
+        {
+          stepId: 'diff',
+          description: 'Consultar o diff atual do repositório Git após a alteração.',
+          toolId: GIT_DIFF_TOOL_ID,
+          toolInput: {},
+        },
+      ],
+    };
+  }
+
+  private stripSurroundingQuotes(fragment: string): string {
+    return fragment.trim().replace(/^["'“”]+|["'“”]+$/g, '');
   }
 
   /** Minimal, deliberately narrow marker recognition proving the "add a task" intent end-to-end. */
