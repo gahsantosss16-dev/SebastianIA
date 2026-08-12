@@ -2,14 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DevelopmentModelProvider } from '../../core/model/DevelopmentModelProvider.js';
 import { InvalidModelInterpretationRequestError } from '../../core/model/ModelProviderContractErrors.js';
-import type { PendingTaskRecord, RememberedFactRecord } from '../../core/memory/index.js';
+import type { PendingTaskRecord, RecentExchangeRecord, RememberedFactRecord } from '../../core/memory/index.js';
 
-function fact(content: string): RememberedFactRecord {
-  return { id: 'remember:1', content, recordedAt: '2026-08-11T00:00:00.000Z' };
+function fact(content: string, id = 'remember:1', recordedAt = '2026-08-11T00:00:00.000Z'): RememberedFactRecord {
+  return { id, content, recordedAt };
 }
 
 function task(id: string, content: string): PendingTaskRecord {
   return { id, content, createdAt: '2026-08-11T00:00:00.000Z' };
+}
+
+function exchange(
+  id: string,
+  requestText: string,
+  summary: string,
+  recordedAt: string,
+  kind = 'respond',
+): RecentExchangeRecord {
+  return { id, requestText, summary, kind, recordedAt };
 }
 
 test('interpret extracts remember intent using the "lembra que" marker', async () => {
@@ -48,6 +58,7 @@ test('interpret responds using the most recent remembered fact for a question', 
   assert.deepEqual(decision, {
     intent: 'respond',
     answer: 'Sobre isso, você registrou: "prefiro reuniões de manhã".',
+    recordable: true,
   });
 });
 
@@ -63,6 +74,7 @@ test('interpret responds with a clear message for a question with no remembered 
   assert.deepEqual(decision, {
     intent: 'respond',
     answer: 'Ainda não tenho nenhuma memória registrada sobre isso.',
+    recordable: false,
   });
 });
 
@@ -75,7 +87,7 @@ test('interpret falls back to a generic response for unmatched input', async () 
     requestedAt: '2026-08-11T00:05:00.000Z',
   });
 
-  assert.deepEqual(decision, { intent: 'respond', answer: 'Ainda não sei responder a isso.' });
+  assert.deepEqual(decision, { intent: 'respond', answer: 'Ainda não sei responder a isso.', recordable: false });
 });
 
 test('interpret treats an empty remember marker suffix as unmatched', async () => {
@@ -636,6 +648,173 @@ test('interpret falls back to a generic response when replaceText markers have n
   });
 
   assert.equal(decision.intent, 'respond');
+});
+
+test('interpret selects the fact most relevant to the question, not just the most recently remembered one (SPEC-045)', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'O que você sabe sobre o projeto Sebastian IA?',
+    rememberedFacts: [
+      fact('gosto de café pela manhã', 'f1', '2026-08-10T00:00:00.000Z'),
+      fact('o projeto Sebastian IA está na fase de memória inteligente', 'f2', '2026-08-11T00:00:00.000Z'),
+      fact('prefiro reuniões à tarde', 'f3', '2026-08-09T00:00:00.000Z'),
+    ],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Sobre isso, você registrou: "o projeto Sebastian IA está na fase de memória inteligente".',
+    recordable: true,
+  });
+});
+
+test('interpret resumes a named project using relevant remembered facts as the actual state (SPEC-045)', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Sebastian, vamos continuar meu projeto de ontem',
+    rememberedFacts: [
+      fact('o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 homologada', 'f1', '2026-08-11T00:00:00.000Z'),
+    ],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 homologada".',
+    recordable: true,
+  });
+});
+
+test('interpret reports it has nothing to resume when no memory relates to the named project/task', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Vamos continuar meu projeto de ontem',
+    rememberedFacts: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Ainda não tenho registros sobre esse projeto ou tarefa para retomar; me conte por onde paramos.',
+    recordable: false,
+  });
+});
+
+test('interpret answers a short continuation reference ("então continua") using the most recent exchange, keeping the thread', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Então continua',
+    rememberedFacts: [],
+    recentExchanges: [
+      exchange(
+        'converse:1',
+        'Sebastian, vamos continuar meu projeto de ontem',
+        'Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente".',
+        '2026-08-12T00:00:00.000Z',
+        'respond',
+      ),
+    ],
+    requestedAt: '2026-08-12T00:01:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer:
+      'Continuando de onde paramos: Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente".',
+    recordable: true,
+  });
+});
+
+test('interpret reports no prior context for a bare continuation reference with no recent exchanges at all', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'E agora?',
+    rememberedFacts: [],
+    recentExchanges: [],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Ainda não tenho um contexto anterior para continuar.',
+    recordable: false,
+  });
+});
+
+test('interpret degrades gracefully to the most recent fact for a vague question with no keyword overlap, preserving prior behavior', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'O que você sabe sobre mim?',
+    rememberedFacts: [
+      fact('prefiro reuniões de manhã', 'f1', '2026-08-10T00:00:00.000Z'),
+      fact('gosto de café', 'f2', '2026-08-11T00:00:00.000Z'),
+    ],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Sobre isso, você registrou: "gosto de café".',
+    recordable: true,
+  });
+});
+
+test('interpret still reports no memory for a question when nothing at all was ever remembered', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Qual horário eu prefiro para reuniões?',
+    rememberedFacts: [],
+    requestedAt: '2026-08-11T00:05:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Ainda não tenho nenhuma memória registrada sobre isso.',
+    recordable: false,
+  });
+});
+
+test('interpret rejects a non-array recentExchanges with a typed error', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  await assert.rejects(
+    () =>
+      provider.interpret({
+        text: 'olá',
+        rememberedFacts: [],
+        recentExchanges: 'not-an-array' as never,
+        requestedAt: '2026-08-11T00:00:00.000Z',
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof InvalidModelInterpretationRequestError);
+      return true;
+    },
+  );
+});
+
+test('interpret still recognizes an explicit "altere o arquivo" edit request over the newer contextual layer (no regression)', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Altere o arquivo src/exemplo.ts substituindo X por Y',
+    rememberedFacts: [],
+    recentExchanges: [exchange('converse:1', 'algo não relacionado', 'resposta anterior', '2026-08-11T00:00:00.000Z')],
+    requestedAt: '2026-08-12T00:00:00.000Z',
+  });
+
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'fs.replaceText',
+    toolInput: { path: 'src/exemplo.ts', searchText: 'X', replaceText: 'Y' },
+  });
 });
 
 test('interpret never performs network I/O and resolves purely locally', async () => {

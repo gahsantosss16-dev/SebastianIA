@@ -607,6 +607,106 @@ test('the SPEC-044 developTask vertical slice reports failed, preserving the edi
   }
 });
 
+test('SPEC-045: converse selects the fact relevant to the question instead of just the most recently remembered one', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const writerCore = createSebastianApplication({ logger, dataDir });
+    await writerCore.executeCommand(converseInput('Sebastian, lembra que gosto de café pela manhã', '2026-08-12T00:00:00.000Z'));
+    await writerCore.executeCommand(
+      converseInput(
+        'Sebastian, lembra que o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 foi homologada',
+        '2026-08-12T00:00:01.000Z',
+      ),
+    );
+
+    const readerCore = createSebastianApplication({ logger, dataDir });
+    const result = await readerCore.executeCommand(
+      converseInput('O que você sabe sobre o projeto Sebastian IA?', '2026-08-12T00:00:02.000Z'),
+    );
+
+    assert.deepEqual(result.output, {
+      message:
+        'Sobre isso, você registrou: "o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 foi homologada".',
+    });
+  });
+});
+
+test('SPEC-045: converse auto-recovers memory for a resumption reference across separate Core instances, then a later short continuation keeps the same thread', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const turn1Core = createSebastianApplication({ logger, dataDir });
+    await turn1Core.executeCommand(
+      converseInput(
+        'Sebastian, lembra que o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 foi homologada',
+        '2026-08-12T00:00:00.000Z',
+      ),
+    );
+
+    // Turn 2 is a brand new Core instance (a separate process in real usage) -
+    // the user never calls recall explicitly; resumption must pull the
+    // relevant fact on its own.
+    const turn2Core = createSebastianApplication({ logger, dataDir });
+    const resumption = await turn2Core.executeCommand(
+      converseInput('Sebastian, vamos continuar meu projeto de ontem', '2026-08-12T00:05:00.000Z'),
+    );
+    assert.deepEqual(resumption.output, {
+      message:
+        'Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 foi homologada".',
+    });
+
+    // Turn 3, yet another separate Core instance: a short, generic
+    // continuation with no subject of its own must still resolve against
+    // what turn 2 just answered, proving the thread survives across
+    // processes via persisted recentExchanges, not in-memory state.
+    const turn3Core = createSebastianApplication({ logger, dataDir });
+    const continuation = await turn3Core.executeCommand(converseInput('Então continua', '2026-08-12T00:06:00.000Z'));
+    assert.deepEqual(continuation.output, {
+      message: `Continuando de onde paramos: ${(resumption.output as { readonly message: string }).message}`,
+    });
+  });
+});
+
+test('SPEC-045: a short continuation reference with no prior conversation at all reports it has nothing to continue, instead of guessing', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const core = createSebastianApplication({ logger, dataDir });
+
+    const result = await core.executeCommand(converseInput('Então continua', '2026-08-12T00:00:00.000Z'));
+
+    assert.deepEqual(result.output, { message: 'Ainda não tenho um contexto anterior para continuar.' });
+  });
+});
+
+test('SPEC-045: a "nothing to continue" fallback answer is never itself mistaken for real context by a later, unrelated resumption (homologação fix)', async () => {
+  await withTempDataDir(async (dataDir) => {
+    // Reproduces exactly the sequence found during behavioral homologation:
+    // a bare continuation with nothing to continue from must not leave
+    // behind an exchange that a later, unrelated resumption request could
+    // coincidentally match on a shared word (here, "continuar").
+    const firstCore = createSebastianApplication({ logger, dataDir });
+    const bareContinuation = await firstCore.executeCommand(converseInput('Então continua', '2026-08-12T00:00:00.000Z'));
+    assert.deepEqual(bareContinuation.output, { message: 'Ainda não tenho um contexto anterior para continuar.' });
+
+    const secondCore = createSebastianApplication({ logger, dataDir });
+    const unrelatedResumption = await secondCore.executeCommand(
+      converseInput('Vamos continuar meu projeto de ontem', '2026-08-12T00:01:00.000Z'),
+    );
+
+    assert.deepEqual(unrelatedResumption.output, {
+      message: 'Ainda não tenho registros sobre esse projeto ou tarefa para retomar; me conte por onde paramos.',
+    });
+  });
+});
+
+test('SPEC-045: recentExchanges written back by a converse turn never leak into the response shown to the user', async () => {
+  await withTempDataDir(async (dataDir) => {
+    const core = createSebastianApplication({ logger, dataDir });
+
+    const result = await core.executeCommand(converseInput('Quais são minhas tarefas?', '2026-08-12T00:00:00.000Z'));
+
+    assert.deepEqual(result.output, { message: 'Você não tem nenhuma tarefa pendente.' });
+    assert.equal('conversationTurn' in (result.output as Record<string, unknown>), false);
+    assert.equal('memoryExtras' in (result.output as Record<string, unknown>), false);
+  });
+});
+
 test('converse on a fresh dataDir with no prior facts still resolves to a coherent response', async () => {
   await withTempDataDir(async (dataDir) => {
     const core = createSebastianApplication({ logger, dataDir });

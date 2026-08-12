@@ -414,3 +414,171 @@ test('hydrator does not treat an unrelated "fact"-shaped output as memory withou
     assert.deepEqual(outcome, { status: 'absent' });
   });
 });
+
+function writeExchangeRecord(
+  writer: FileCommandResultMemoryWriter,
+  executionId: string,
+  recordedAt: string,
+  conversationTurn: Readonly<Record<string, unknown>>,
+  extraOutput: Readonly<Record<string, unknown>> = {},
+): void {
+  writer.write({
+    executionId,
+    commandType: 'converse',
+    commandGeneratedAt: recordedAt,
+    resultGeneratedAt: recordedAt,
+    resultStatus: 'succeeded',
+    output: { ...extraOutput, conversationTurn },
+    metadata: {},
+  });
+}
+
+test('hydrator reconstructs a recent exchange from a record carrying memoryExtras.conversationTurn (SPEC-045)', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writeExchangeRecord(
+      writer,
+      'converse:2026-08-12T00:00:00.000Z',
+      '2026-08-12T00:00:00.000Z',
+      { requestText: 'Quais arquivos existem?', summary: 'Arquivos em ".": a.md.', kind: 'useTool' },
+      { message: 'Arquivos em ".": a.md.' },
+    );
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+    const temporary = outcome.context.temporary as { values: { recentExchanges: unknown[] } };
+    assert.deepEqual(temporary.values.recentExchanges, [
+      {
+        id: 'converse:2026-08-12T00:00:00.000Z',
+        requestText: 'Quais arquivos existem?',
+        summary: 'Arquivos em ".": a.md.',
+        kind: 'useTool',
+        recordedAt: '2026-08-12T00:00:00.000Z',
+      },
+    ]);
+  });
+});
+
+test('hydrator does not treat the user-visible output alone as a recent exchange without a conversationTurn field', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'converse:2026-08-12T00:00:00.000Z',
+      commandType: 'converse',
+      commandGeneratedAt: '2026-08-12T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-12T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { message: 'apenas uma resposta comum' },
+      metadata: {},
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+
+    assert.deepEqual(outcome, { status: 'absent' });
+  });
+});
+
+test('hydrator skips a malformed conversationTurn (missing required string fields) instead of crashing', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writeExchangeRecord(writer, 'converse:2026-08-12T00:00:00.000Z', '2026-08-12T00:00:00.000Z', {
+      requestText: 'oi',
+      // summary intentionally missing
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+
+    assert.deepEqual(outcome, { status: 'absent' });
+  });
+});
+
+test('hydrator sorts recent exchanges chronologically regardless of write order', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writeExchangeRecord(writer, 'converse:2', '2026-08-12T00:02:00.000Z', { requestText: 'b', summary: 'resposta b', kind: 'respond' });
+    writeExchangeRecord(writer, 'converse:1', '2026-08-12T00:01:00.000Z', { requestText: 'a', summary: 'resposta a', kind: 'respond' });
+    writeExchangeRecord(writer, 'converse:3', '2026-08-12T00:03:00.000Z', { requestText: 'c', summary: 'resposta c', kind: 'respond' });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+    const temporary = outcome.context.temporary as { values: { recentExchanges: ReadonlyArray<{ requestText: string }> } };
+    assert.deepEqual(
+      temporary.values.recentExchanges.map((exchange) => exchange.requestText),
+      ['a', 'b', 'c'],
+    );
+  });
+});
+
+test('hydrator caps recent exchanges at the fixed window, keeping only the most recent ones', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    for (let index = 0; index < 12; index += 1) {
+      const minute = String(index).padStart(2, '0');
+      writeExchangeRecord(writer, `converse:${index}`, `2026-08-12T00:${minute}:00.000Z`, {
+        requestText: `mensagem ${index}`,
+        summary: `resposta ${index}`,
+        kind: 'respond',
+      });
+    }
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T01:00:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+    const temporary = outcome.context.temporary as { values: { recentExchanges: ReadonlyArray<{ requestText: string }> } };
+    assert.equal(temporary.values.recentExchanges.length, 8);
+    assert.deepEqual(
+      temporary.values.recentExchanges.map((exchange) => exchange.requestText),
+      ['mensagem 4', 'mensagem 5', 'mensagem 6', 'mensagem 7', 'mensagem 8', 'mensagem 9', 'mensagem 10', 'mensagem 11'],
+    );
+  });
+});
+
+test('hydrator reconstructs facts, tasks and recent exchanges together without interfering with each other', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'remember:2026-08-12T00:00:00.000Z',
+      commandType: 'remember',
+      commandGeneratedAt: '2026-08-12T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-12T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { fact: 'prefiro reuniões de manhã' },
+      metadata: {},
+    });
+    writeExchangeRecord(writer, 'converse:2026-08-12T00:01:00.000Z', '2026-08-12T00:01:00.000Z', {
+      requestText: 'oi',
+      summary: 'olá!',
+      kind: 'respond',
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+
+    assert.equal(outcome.status, 'hydrated');
+    if (outcome.status !== 'hydrated') {
+      assert.fail('Expected hydrated status.');
+    }
+    const temporary = outcome.context.temporary as {
+      values: { rememberedFacts: unknown[]; pendingTasks: unknown[]; recentExchanges: unknown[] };
+    };
+    assert.equal(temporary.values.rememberedFacts.length, 1);
+    assert.equal(temporary.values.pendingTasks.length, 0);
+    assert.equal(temporary.values.recentExchanges.length, 1);
+  });
+});

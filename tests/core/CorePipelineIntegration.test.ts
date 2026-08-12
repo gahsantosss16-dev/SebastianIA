@@ -447,6 +447,88 @@ test('Core write-back receives the agent finalResult output, not the original ca
   assert.deepEqual(writtenOutput, { message: 'agent-provided answer' });
 });
 
+test('Core merges the agent memoryExtras into the write-back payload without including it in the returned response (SPEC-045)', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+  let writtenOutput: unknown;
+  const writer: CommandResultMemoryWriter = {
+    write: (input) => {
+      writtenOutput = input.output;
+      return { status: 'recorded', key: 'k', recordedAt: '2026-07-31T01:00:01.000Z' };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: async () => ({
+        status: 'completed',
+        output: {
+          finalResult: { message: 'agent-provided answer' },
+          memoryExtras: { conversationTurn: { requestText: 'oi', summary: 'agent-provided answer', kind: 'respond' } },
+        },
+      }),
+    },
+    commandResultMemoryWriter: writer,
+  });
+  core.initialize();
+  core.start();
+
+  const result = await core.executeCommand(createInput());
+
+  assert.deepEqual(result.output, { message: 'agent-provided answer' });
+  assert.deepEqual(writtenOutput, {
+    message: 'agent-provided answer',
+    conversationTurn: { requestText: 'oi', summary: 'agent-provided answer', kind: 'respond' },
+  });
+});
+
+test('Core ignores an invalid (non-object) memoryExtras instead of rejecting the handoff or corrupting write-back', async () => {
+  const bundle = createBundle();
+  const executor = {
+    execute: () => ({
+      status: 'succeeded' as const,
+      output: { delegated: true },
+      generatedAt: '2026-07-31T01:00:00.000Z',
+    }),
+  };
+  let writtenOutput: unknown;
+  const writer: CommandResultMemoryWriter = {
+    write: (input) => {
+      writtenOutput = input.output;
+      return { status: 'recorded', key: 'k', recordedAt: '2026-07-31T01:00:01.000Z' };
+    },
+  };
+
+  const core = new SebastianCore('Sebastian IA', {}, undefined, {
+    executor,
+    bundle,
+    commandContextHydrator: successfulHydrator,
+    specializedAgent: {
+      handoff: async () => ({
+        status: 'completed',
+        output: { finalResult: { message: 'agent-provided answer' }, memoryExtras: 'not-an-object' },
+      }),
+    },
+    commandResultMemoryWriter: writer,
+  });
+  core.initialize();
+  core.start();
+
+  const result = await core.executeCommand(createInput());
+
+  assert.deepEqual(result.output, { message: 'agent-provided answer' });
+  assert.deepEqual(writtenOutput, { message: 'agent-provided answer' });
+});
+
 test('Core preserves the capability result unchanged when the agent does not provide a finalResult', async () => {
   const core = createCoreWithRealPipeline();
 

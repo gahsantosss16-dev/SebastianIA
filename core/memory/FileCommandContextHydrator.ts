@@ -36,6 +36,9 @@ export const TASK_CREATED_RECORD_KIND = 'sebastian.memory.task.created';
  */
 export const TASK_COMPLETED_RECORD_KIND = 'sebastian.memory.task.completed';
 
+/** How many chronologically-recent exchanges are ever hydrated into context - a small, fixed window, never the full history. */
+export const MAX_HYDRATED_RECENT_EXCHANGES = 8;
+
 /** A single, individually identifiable remembered fact with its own temporal metadata. */
 export interface RememberedFactRecord {
   readonly id: string;
@@ -48,6 +51,22 @@ export interface PendingTaskRecord {
   readonly id: string;
   readonly content: string;
   readonly createdAt: string;
+}
+
+/**
+ * A short, already-bounded record of one past conversational turn - the
+ * user's original request text plus a short summary of what Sebastian did
+ * about it (never the full finalResult, never raw Tool output). This is what
+ * lets a later, separate process resolve a short continuation reference
+ * ("então continua") against what was actually discussed, without requiring
+ * the user to explicitly `recall` anything.
+ */
+export interface RecentExchangeRecord {
+  readonly id: string;
+  readonly requestText: string;
+  readonly summary: string;
+  readonly kind: string;
+  readonly recordedAt: string;
 }
 
 /**
@@ -72,18 +91,73 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
 
     const facts = this.readRememberedFacts(succeededRecords);
     const pendingTasks = this.readPendingTasks(succeededRecords);
+    const recentExchanges = this.readRecentExchanges(succeededRecords);
 
-    if (facts.length === 0 && pendingTasks.length === 0) {
+    if (facts.length === 0 && pendingTasks.length === 0 && recentExchanges.length === 0) {
       return { status: 'absent' };
     }
 
     const context: CommandContextHydrationSnapshot = {
       temporary: {
-        values: { rememberedFacts: facts, pendingTasks },
+        values: { rememberedFacts: facts, pendingTasks, recentExchanges },
       },
     };
 
     return { status: 'hydrated', context };
+  }
+
+  /**
+   * Every succeeded record whose `output.conversationTurn` has the expected
+   * shape becomes a candidate exchange - a record without it (e.g. a rigid
+   * `greeting`/`remember`/`recall` command, or any output predating this
+   * block) is simply not a conversational turn and is skipped, exactly like
+   * the other two record kinds already do. `conversationTurn` reaches the
+   * persisted record's `output` via Core's `memoryExtras` seam (a
+   * write-back-only sibling of `finalResult`, merged in separately - see
+   * `SebastianCore.extractMemoryExtras`/`writeBackCommandResult`), so the
+   * value a user actually sees for that command never carries this field.
+   * Only the most recent MAX_HYDRATED_RECENT_EXCHANGES are ever hydrated -
+   * this is the bound that keeps "recent context" from silently growing into
+   * the entire conversation history.
+   */
+  private readRecentExchanges(
+    succeededRecords: readonly Readonly<Record<string, unknown>>[],
+  ): readonly RecentExchangeRecord[] {
+    const exchanges: RecentExchangeRecord[] = [];
+
+    for (const record of succeededRecords) {
+      const exchange = this.extractRecentExchange(record);
+      if (exchange) {
+        exchanges.push(exchange);
+      }
+    }
+
+    exchanges.sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
+    return exchanges.slice(-MAX_HYDRATED_RECENT_EXCHANGES);
+  }
+
+  private extractRecentExchange(record: Readonly<Record<string, unknown>>): RecentExchangeRecord | undefined {
+    const output = record.output as { readonly conversationTurn?: unknown } | undefined;
+    const turn = output?.conversationTurn as
+      | { readonly requestText?: unknown; readonly summary?: unknown; readonly kind?: unknown }
+      | undefined;
+
+    if (
+      !turn ||
+      typeof turn.requestText !== 'string' ||
+      typeof turn.summary !== 'string' ||
+      typeof turn.kind !== 'string'
+    ) {
+      return undefined;
+    }
+
+    const executionId = typeof record.executionId === 'string' ? record.executionId : undefined;
+    const recordedAt = typeof record.resultGeneratedAt === 'string' ? record.resultGeneratedAt : undefined;
+    if (!executionId || !recordedAt) {
+      return undefined;
+    }
+
+    return { id: executionId, requestText: turn.requestText, summary: turn.summary, kind: turn.kind, recordedAt };
   }
 
   private readRememberedFacts(

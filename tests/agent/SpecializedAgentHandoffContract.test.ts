@@ -6,7 +6,7 @@ import {
   InvalidSpecializedAgentHandoffInputError,
 } from '../../core/agent/index.js';
 import { SpecializedToolInvocationFailureError } from '../../core/tool/index.js';
-import type { ModelProvider } from '../../core/model/ModelProviderContract.js';
+import type { ModelInterpretationDecision, ModelProvider } from '../../core/model/ModelProviderContract.js';
 import type { DevelopmentTaskPlan, DevelopmentTaskResult } from '../../core/development/index.js';
 
 test('specialized agent returns completed for valid handoff input', async () => {
@@ -193,6 +193,7 @@ test('specialized agent consults the ModelProvider for converse and does not inv
     text: 'Sebastian, lembra que prefiro reuniões de manhã',
     rememberedFacts: [],
     pendingTasks: [],
+    recentExchanges: [],
     requestedAt: '2026-08-11T00:00:01.000Z',
   });
   assert.equal(result.status, 'completed');
@@ -609,7 +610,189 @@ test('specialized agent forwards hydrated pendingTasks to the ModelProvider requ
     text: 'Quais são minhas tarefas?',
     rememberedFacts: [],
     pendingTasks,
+    recentExchanges: [],
     requestedAt: '2026-08-11T00:05:01.000Z',
+  });
+});
+
+test('specialized agent attaches a conversationTurn to memoryExtras (never to finalResult) for a respond decision (SPEC-045)', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'respond', answer: 'Sobre isso, você registrou: "prefiro café".' }),
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'O que você sabe?' } } },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'Sobre isso, você registrou: "prefiro café".' });
+  assert.deepEqual(result.output.memoryExtras, {
+    conversationTurn: {
+      requestText: 'O que você sabe?',
+      summary: 'Sobre isso, você registrou: "prefiro café".',
+      kind: 'respond',
+    },
+  });
+});
+
+test('specialized agent does not attach a conversationTurn for remember, addTask or completeTask decisions - their content is already captured as a fact/task', async () => {
+  const scenarios: readonly ModelInterpretationDecision[] = [
+    { intent: 'remember', content: 'prefiro café' },
+    { intent: 'addTask', content: 'comprar leite' },
+    { intent: 'completeTask', taskId: 'converse:2026-08-11T00:00:00.000Z' },
+  ];
+
+  for (const decision of scenarios) {
+    const modelProvider: ModelProvider = { interpret: async () => decision };
+    const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+
+    const result = await agent.handoff({
+      responsibilityId: 'capability.execute.converse',
+      executionId: 'converse:2026-08-12T00:00:00.000Z',
+      commandType: CONVERSE_COMMAND_TYPE,
+      requestedAt: '2026-08-12T00:00:01.000Z',
+      payload: { commandInput: { type: 'converse', input: { text: 'texto original do pedido' } } },
+    });
+
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') {
+      assert.fail('Expected completed status.');
+    }
+    assert.equal('memoryExtras' in result.output, false, `expected no memoryExtras for intent "${decision.intent}"`);
+  }
+});
+
+test('specialized agent attaches a conversationTurn built from the Tool message for a useTool decision', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'useTool', toolId: 'fs.listDirectory', toolInput: { path: '.' } }),
+  };
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => ({ status: 'completed', output: { message: 'Arquivos em ".": a.md.' } }) },
+    modelProvider,
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Quais arquivos existem?' } } },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'Arquivos em ".": a.md.' });
+  assert.deepEqual(result.output.memoryExtras, {
+    conversationTurn: { requestText: 'Quais arquivos existem?', summary: 'Arquivos em ".": a.md.', kind: 'useTool' },
+  });
+});
+
+test('specialized agent never attaches a conversationTurn to a failed handoff (unexpected Tool failure)', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'useTool', toolId: 'fs.readFile', toolInput: { path: 'x.txt' } }),
+  };
+  const failure = new SpecializedToolInvocationFailureError('unexpected I/O failure');
+  const agent = new InMemorySpecializedAgent({ invoke: () => ({ status: 'failed', error: failure }) }, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Leia o arquivo x.txt' } } },
+  });
+
+  assert.equal(result.status, 'failed');
+});
+
+test('specialized agent does not attach a conversationTurn when the ModelProvider marks its respond decision as non-recordable (SPEC-045 homologação fix)', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({
+      intent: 'respond',
+      answer: 'Ainda não tenho um contexto anterior para continuar.',
+      recordable: false,
+    }),
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'Então continua' } } },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'Ainda não tenho um contexto anterior para continuar.' });
+  assert.equal('memoryExtras' in result.output, false);
+});
+
+test('specialized agent attaches a conversationTurn for a respond decision when recordable is omitted (defaults to true)', async () => {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'respond', answer: 'resposta normal' }),
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'pergunta qualquer' } } },
+  });
+
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.equal('memoryExtras' in result.output, true);
+});
+
+test('specialized agent forwards hydrated recentExchanges to the ModelProvider request', async () => {
+  let interpretRequest: unknown;
+  const modelProvider: ModelProvider = {
+    interpret: async (request) => {
+      interpretRequest = request;
+      return { intent: 'respond', answer: 'unused' };
+    },
+  };
+  const agent = new InMemorySpecializedAgent(undefined, modelProvider);
+  const recentExchanges = [{ id: 'e1', requestText: 'oi', summary: 'olá!', kind: 'respond', recordedAt: '2026-08-12T00:00:00.000Z' }];
+
+  await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:05:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:05:01.000Z',
+    payload: {
+      commandInput: {
+        type: 'converse',
+        input: { text: 'Então continua' },
+        temporary: { values: { recentExchanges } },
+      },
+    },
+  });
+
+  assert.deepEqual(interpretRequest, {
+    text: 'Então continua',
+    rememberedFacts: [],
+    pendingTasks: [],
+    recentExchanges,
+    requestedAt: '2026-08-12T00:05:01.000Z',
   });
 });
 

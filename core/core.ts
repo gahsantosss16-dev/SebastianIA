@@ -141,8 +141,12 @@ export class SebastianCore {
     try {
       const hydratedInput = this.hydrateCommandInput(input, dependencies.commandContextHydrator);
       const result = dependencies.executor.execute(hydratedInput, bundle);
-      const effectiveResult = await this.handoffToSpecializedAgent(hydratedInput, result, dependencies.specializedAgent);
-      this.writeBackCommandResult(hydratedInput, effectiveResult, dependencies.commandResultMemoryWriter);
+      const { effectiveResult, memoryExtras } = await this.handoffToSpecializedAgent(
+        hydratedInput,
+        result,
+        dependencies.specializedAgent,
+      );
+      this.writeBackCommandResult(hydratedInput, effectiveResult, memoryExtras, dependencies.commandResultMemoryWriter);
       return effectiveResult;
     } catch (error) {
       if (error instanceof Error) {
@@ -159,7 +163,7 @@ export class SebastianCore {
     input: CommandProcessingInput,
     result: CapabilityResult,
     specializedAgent: SpecializedAgent,
-  ): Promise<CapabilityResult> {
+  ): Promise<{ readonly effectiveResult: CapabilityResult; readonly memoryExtras: Readonly<Record<string, unknown>> | undefined }> {
     const specializedAgentContract = specializedAgent as unknown as { handoff?: unknown };
     if (!specializedAgentContract || typeof specializedAgentContract.handoff !== 'function') {
       throw new CoreSpecializedAgentDependencyUnavailableError(
@@ -185,7 +189,10 @@ export class SebastianCore {
     }
 
     if (handoffResult.status === 'completed') {
-      return this.resolveEffectiveResult(result, handoffResult.output);
+      return {
+        effectiveResult: this.resolveEffectiveResult(result, handoffResult.output),
+        memoryExtras: this.extractMemoryExtras(handoffResult.output),
+      };
     }
 
     if (handoffResult.status === 'failed') {
@@ -223,6 +230,24 @@ export class SebastianCore {
     }
 
     return { ...result, output: finalResult as Readonly<Record<string, unknown>> };
+  }
+
+  /**
+   * A second, independent opt-in seam alongside `finalResult`: when present,
+   * `memoryExtras` is merged into what gets persisted to Memory but never
+   * into the response returned to the caller - the two purposes `finalResult`
+   * used to serve together can now be served separately when an Agent needs
+   * to persist a little more than it shows the user (e.g. SPEC-045's short
+   * conversation-turn record for later continuity). Core still never
+   * interprets what `memoryExtras` contains - that remains entirely the
+   * Agent's concern. An invalid (non-object) `memoryExtras` is silently
+   * ignored rather than rejected, since - unlike `finalResult` - it never
+   * reaches the user and is purely an internal plumbing detail.
+   */
+  private extractMemoryExtras(agentOutput: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> | undefined {
+    const memoryExtras = agentOutput.memoryExtras;
+    const isValid = memoryExtras !== null && memoryExtras !== undefined && typeof memoryExtras === 'object' && !Array.isArray(memoryExtras);
+    return isValid ? (memoryExtras as Readonly<Record<string, unknown>>) : undefined;
   }
 
   private hydrateCommandInput(
@@ -296,6 +321,7 @@ export class SebastianCore {
   private writeBackCommandResult(
     input: CommandProcessingInput,
     result: CapabilityResult,
+    memoryExtras: Readonly<Record<string, unknown>> | undefined,
     writer: CommandResultMemoryWriter,
   ): void {
     const writerContract = writer as unknown as { write?: unknown };
@@ -311,7 +337,7 @@ export class SebastianCore {
       commandGeneratedAt: input.generatedAt,
       resultGeneratedAt: result.generatedAt,
       resultStatus: result.status,
-      output: result.output,
+      output: memoryExtras === undefined ? result.output : { ...result.output, ...memoryExtras },
       metadata: {
         ...(input.conversation?.conversationId === undefined
           ? {}

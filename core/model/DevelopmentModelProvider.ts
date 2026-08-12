@@ -20,6 +20,11 @@ import {
   VALIDATION_TYPECHECK_TOOL_ID,
 } from '../tool/LocalAuthorizedCommandTool.js';
 import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
+import {
+  ConversationContextComposer,
+  type ComposedConversationContext,
+  type RelevantMemoryMatch,
+} from './ConversationContextComposer.js';
 
 const REMEMBER_MARKER = 'lembra que';
 const LIST_DIRECTORY_MARKER = 'arquivos existem';
@@ -56,6 +61,12 @@ const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
 const NO_MEMORY_ANSWER = 'Ainda não tenho nenhuma memória registrada sobre isso.';
 const NO_PENDING_TASKS_ANSWER = 'Você não tem nenhuma tarefa pendente.';
 
+/** An answer paired with whether it is worth recording as recent conversation context - see ModelInterpretationRespondDecision.recordable. */
+interface RecordableAnswer {
+  readonly answer: string;
+  readonly recordable: boolean;
+}
+
 /**
  * Local, deterministic, zero-cost implementation of the ModelProvider
  * contract. It exists to prove the conversational pipeline end-to-end during
@@ -64,6 +75,12 @@ const NO_PENDING_TASKS_ANSWER = 'Você não tem nenhuma tarefa pendente.';
  * the product reaches production.
  */
 export class DevelopmentModelProvider implements ModelProvider {
+  private readonly contextComposer: ConversationContextComposer;
+
+  public constructor(contextComposer: ConversationContextComposer = new ConversationContextComposer()) {
+    this.contextComposer = contextComposer;
+  }
+
   public async interpret(request: ModelInterpretationRequest): Promise<ModelInterpretationDecision> {
     this.validateRequest(request);
 
@@ -156,11 +173,25 @@ export class DevelopmentModelProvider implements ModelProvider {
       };
     }
 
-    if (request.text.includes('?')) {
-      return { intent: 'respond', answer: this.composeAnswerFromMemory(request.rememberedFacts) };
+    const composed = this.contextComposer.compose({
+      text: request.text,
+      rememberedFacts: request.rememberedFacts,
+      recentExchanges: request.recentExchanges ?? [],
+    });
+
+    if (composed.intent === 'resumptionReference') {
+      return { intent: 'respond', ...this.composeResumptionAnswer(composed) };
     }
 
-    return { intent: 'respond', answer: NO_MATCH_ANSWER };
+    if (composed.intent === 'continuationReference') {
+      return { intent: 'respond', ...this.composeContinuationAnswer(composed) };
+    }
+
+    if (composed.intent === 'question') {
+      return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
+    }
+
+    return { intent: 'respond', answer: NO_MATCH_ANSWER, recordable: false };
   }
 
   private extractRememberContent(text: string): string | undefined {
@@ -416,13 +447,81 @@ export class DevelopmentModelProvider implements ModelProvider {
     return withoutQuotes.replace(/[.?!]+$/, '').trim();
   }
 
-  private composeAnswerFromMemory(rememberedFacts: ModelInterpretationRequest['rememberedFacts']): string {
-    const mostRecentFact = rememberedFacts[rememberedFacts.length - 1];
-    if (!mostRecentFact) {
-      return NO_MEMORY_ANSWER;
+  /**
+   * Answers a question using genuinely relevant memory (keyword-overlap
+   * selection from ConversationContextComposer) when any was found -
+   * otherwise degrades gracefully to the most recent remembered fact, which
+   * is what this method did unconditionally before this block. That fallback
+   * keeps a vague, keyword-less question ("O que você sabe sobre mim?")
+   * still answerable instead of refusing outright.
+   */
+  private composeMemoryAnswer(composed: ComposedConversationContext): RecordableAnswer {
+    const [top] = composed.relevantMemories;
+    if (top) {
+      return { answer: this.describeSingleMatch(top), recordable: true };
     }
 
-    return `Sobre isso, você registrou: "${mostRecentFact.content}".`;
+    if (composed.mostRecentFact) {
+      return { answer: `Sobre isso, você registrou: "${composed.mostRecentFact.content}".`, recordable: true };
+    }
+
+    return { answer: NO_MEMORY_ANSWER, recordable: false };
+  }
+
+  /**
+   * "Vamos continuar meu projeto de ontem"-style requests: names a subject
+   * and asks to resume it. Relevant memory (fact or past exchange) about
+   * that subject, when found, is what actually drives the answer - the
+   * point being that Sebastian surfaces the last known state instead of
+   * asking the user to repeat it. Marked non-recordable when nothing
+   * relevant was found, for the same reason as composeMemoryAnswer.
+   */
+  private composeResumptionAnswer(composed: ComposedConversationContext): RecordableAnswer {
+    const [top] = composed.relevantMemories;
+    if (!top) {
+      return {
+        answer: 'Ainda não tenho registros sobre esse projeto ou tarefa para retomar; me conte por onde paramos.',
+        recordable: false,
+      };
+    }
+
+    const answer =
+      top.source === 'fact'
+        ? `Retomando de onde paramos: você registrou "${top.content}".`
+        : `Retomando de onde paramos: "${top.content}".`;
+    return { answer, recordable: true };
+  }
+
+  /**
+   * Short, generic continuation ("então continua", "e agora?") carries no
+   * subject of its own - it is resolved against the single most recent
+   * conversation exchange, whatever it was, so a short follow-up genuinely
+   * continues the previous turn instead of being treated as an isolated,
+   * unrecognized request. Marked non-recordable when there is no prior
+   * exchange at all: a "nothing to continue" answer must not itself become
+   * the thing a later continuation picks up - which would otherwise let the
+   * same coincidental word ("continuar") in the fallback message falsely
+   * match a later, unrelated resumption request.
+   */
+  private composeContinuationAnswer(composed: ComposedConversationContext): RecordableAnswer {
+    if (composed.mostRecentExchange) {
+      return { answer: `Continuando de onde paramos: ${composed.mostRecentExchange.summary}`, recordable: true };
+    }
+
+    return { answer: 'Ainda não tenho um contexto anterior para continuar.', recordable: false };
+  }
+
+  /**
+   * Answers using only the single best-ranked relevant memory - deliberately
+   * not a multi-item summary of everything with any overlap. A single shared
+   * word is enough to rank a fact/exchange as the top candidate, but is not
+   * strong enough signal to also assert several other loosely-related
+   * memories are equally worth surfacing in the same answer.
+   */
+  private describeSingleMatch(match: RelevantMemoryMatch): string {
+    return match.source === 'fact'
+      ? `Sobre isso, você registrou: "${match.content}".`
+      : `Sobre isso, na nossa conversa anterior: "${match.content}".`;
   }
 
   private validateRequest(request: ModelInterpretationRequest): void {
@@ -442,6 +541,12 @@ export class DevelopmentModelProvider implements ModelProvider {
     if (request.pendingTasks !== undefined && !Array.isArray(request.pendingTasks)) {
       throw new InvalidModelInterpretationRequestError(
         'Model interpretation pendingTasks must be an array when provided.',
+      );
+    }
+
+    if (request.recentExchanges !== undefined && !Array.isArray(request.recentExchanges)) {
+      throw new InvalidModelInterpretationRequestError(
+        'Model interpretation recentExchanges must be an array when provided.',
       );
     }
 

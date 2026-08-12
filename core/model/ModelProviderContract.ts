@@ -1,4 +1,4 @@
-import type { PendingTaskRecord, RememberedFactRecord } from '../memory/index.js';
+import type { PendingTaskRecord, RecentExchangeRecord, RememberedFactRecord } from '../memory/index.js';
 import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
 
 export interface ModelInterpretationRequest {
@@ -10,6 +10,12 @@ export interface ModelInterpretationRequest {
    * caller that has no notion of tasks keeps working unchanged.
    */
   readonly pendingTasks?: readonly PendingTaskRecord[];
+  /**
+   * A short, capped window of recent conversation turns, hydrated the same
+   * way as rememberedFacts/pendingTasks. Optional and defaulting to empty so
+   * every pre-existing caller keeps working unchanged.
+   */
+  readonly recentExchanges?: readonly RecentExchangeRecord[];
   readonly requestedAt: string;
 }
 
@@ -21,6 +27,17 @@ export interface ModelInterpretationRememberDecision {
 export interface ModelInterpretationRespondDecision {
   readonly intent: 'respond';
   readonly answer: string;
+  /**
+   * Whether this exchange is worth remembering as recent conversation
+   * context for a later continuation reference. Defaults to `true` when
+   * omitted, so every pre-existing caller keeps working unchanged. A
+   * ModelProvider sets this to `false` for an answer that itself carries no
+   * real information (e.g. "I don't know" / "nothing found") - recording
+   * such an answer as context would let a later short continuation
+   * ("então continua") pick it back up as if it were a real, substantive
+   * topic, instead of correctly reporting it has nothing to continue.
+   */
+  readonly recordable?: boolean;
 }
 
 /** A decision to create a new pending task with the given content. */

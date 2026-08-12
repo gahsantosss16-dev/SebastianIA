@@ -11,9 +11,11 @@ import {
   TASK_CREATED_RECORD_KIND,
   TASK_COMPLETED_RECORD_KIND,
   type PendingTaskRecord,
+  type RecentExchangeRecord,
   type RememberedFactRecord,
 } from '../memory/index.js';
 import type {
+  ModelInterpretationDecision,
   ModelInterpretationDevelopTaskDecision,
   ModelInterpretationUseToolDecision,
   ModelProvider,
@@ -70,14 +72,24 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const text = this.extractConversationText(input);
     const rememberedFacts = this.extractRememberedFacts(input);
     const pendingTasks = this.extractPendingTasks(input);
+    const recentExchanges = this.extractRecentExchanges(input);
 
     const decision = await modelProvider.interpret({
       text,
       rememberedFacts,
       pendingTasks,
+      recentExchanges,
       requestedAt: input.requestedAt,
     });
 
+    const result = this.resolveConversationDecision(input, decision);
+    return this.withConversationTurn(result, text, decision);
+  }
+
+  private resolveConversationDecision(
+    input: SpecializedAgentHandoffInput,
+    decision: ModelInterpretationDecision,
+  ): SpecializedAgentHandoffResult {
     if (decision.intent === 'useTool') {
       return this.handleToolUse(input, decision);
     }
@@ -101,6 +113,75 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       status: 'completed',
       output: { finalResult },
     };
+  }
+
+  /**
+   * Attaches a short, already-bounded record of this turn (the original
+   * request text plus a short summary of what happened) as `memoryExtras` -
+   * a sibling of `finalResult`, never merged into it. Core's `memoryExtras`
+   * seam persists this to Memory (so a later, separate process can hydrate
+   * it back as `recentExchanges`) without ever including it in the response
+   * shown to the user - the existing `finalResult` shape for every decision
+   * kind is completely unaffected. A failed handoff is never persisted by
+   * Core in the first place, so it is returned unchanged.
+   *
+   * Deliberately skipped for `remember`/`addTask`/`completeTask`: those
+   * decisions already have their own dedicated, purpose-built memory
+   * category (facts/tasks) capturing the same content - recording a second,
+   * redundant exchange for them would only duplicate that content and cause
+   * it to double-count during relevance selection, not add any real
+   * continuity value (there is no natural sense of "continuing" a completed
+   * remember/task statement the way there is for a response or an action).
+   * Also skipped whenever a `respond` decision explicitly marks itself
+   * `recordable: false` - an "I don't know"/"nothing found" answer must
+   * never itself become the "recent context" a later continuation mistakes
+   * for real information.
+   */
+  private withConversationTurn(
+    result: SpecializedAgentHandoffResult,
+    requestText: string,
+    decision: ModelInterpretationDecision,
+  ): SpecializedAgentHandoffResult {
+    if (result.status !== 'completed') {
+      return result;
+    }
+
+    if (decision.intent === 'remember' || decision.intent === 'addTask' || decision.intent === 'completeTask') {
+      return result;
+    }
+
+    if (decision.intent === 'respond' && decision.recordable === false) {
+      return result;
+    }
+
+    const finalResult = result.output.finalResult;
+    if (!finalResult || typeof finalResult !== 'object' || Array.isArray(finalResult)) {
+      return result;
+    }
+
+    const conversationTurn = {
+      requestText,
+      summary: this.buildConversationTurnSummary(decision, finalResult as Readonly<Record<string, unknown>>),
+      kind: decision.intent,
+    };
+
+    return {
+      status: 'completed',
+      output: { ...result.output, memoryExtras: { conversationTurn } },
+    };
+  }
+
+  /** Only ever called for `respond`/`useTool`/`developTask` decisions - see withConversationTurn's early return for the other kinds. */
+  private buildConversationTurnSummary(
+    decision: ModelInterpretationDecision,
+    finalResult: Readonly<Record<string, unknown>>,
+  ): string {
+    if (decision.intent === 'respond') {
+      return decision.answer;
+    }
+
+    const message = finalResult.message;
+    return typeof message === 'string' && message.trim() !== '' ? message : 'ação executada';
   }
 
   /**
@@ -239,6 +320,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const pendingTasks = commandInput?.temporary?.values?.pendingTasks;
 
     return Array.isArray(pendingTasks) ? (pendingTasks as readonly PendingTaskRecord[]) : [];
+  }
+
+  private extractRecentExchanges(input: SpecializedAgentHandoffInput): readonly RecentExchangeRecord[] {
+    const commandInput = input.payload.commandInput as
+      | { readonly temporary?: { readonly values?: { readonly recentExchanges?: unknown } } }
+      | undefined;
+    const recentExchanges = commandInput?.temporary?.values?.recentExchanges;
+
+    return Array.isArray(recentExchanges) ? (recentExchanges as readonly RecentExchangeRecord[]) : [];
   }
 
   private validateInput(input: SpecializedAgentHandoffInput): void {

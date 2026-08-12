@@ -967,6 +967,92 @@ test('the development executor block neither breaks nor is affected by greeting,
   });
 });
 
+test('SPEC-045: a real CLI process auto-recovers memory for a resumption reference, and a later, separate process keeps the thread for a short continuation', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    const rememberProcess = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        cliPath,
+        'Sebastian, lembra que o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 foi homologada',
+      ],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(rememberProcess.status, 0);
+
+    // Turn 2 is a real, separate OS process - no recall is called explicitly;
+    // resumption must recover the relevant fact on its own.
+    const resumptionProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'Sebastian, vamos continuar meu projeto de ontem'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+    assert.equal(resumptionProcess.status, 0);
+    const resumptionResult = JSON.parse(resumptionProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(
+      resumptionResult.output.message,
+      'Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 foi homologada".',
+    );
+
+    // Turn 3 is yet another real, separate OS process: a short, generic
+    // continuation with no subject of its own must resolve against what
+    // turn 2 just answered - proof the thread survives across real process
+    // boundaries via persisted memory, not any in-process state.
+    const continuationProcess = spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'Então continua'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(continuationProcess.status, 0);
+    const continuationResult = JSON.parse(continuationProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(continuationResult.output.message, `Continuando de onde paramos: ${resumptionResult.output.message}`);
+
+    assert.equal(typeof rememberProcess.pid, 'number');
+    assert.equal(typeof resumptionProcess.pid, 'number');
+    assert.equal(typeof continuationProcess.pid, 'number');
+    assert.notEqual(rememberProcess.pid, resumptionProcess.pid);
+    assert.notEqual(resumptionProcess.pid, continuationProcess.pid);
+  });
+});
+
+test('SPEC-045: a real CLI process selects the fact relevant to the question instead of just the most recently remembered one', () => {
+  withIsolatedDataDir((dataDir) => {
+    const env = isolatedEnv(dataDir);
+
+    spawnSync(process.execPath, ['--import', 'tsx', cliPath, 'Sebastian, lembra que gosto de café pela manhã'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env,
+    });
+    spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        cliPath,
+        'Sebastian, lembra que o projeto Sebastian IA está na fase de memória inteligente',
+      ],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+
+    const questionProcess = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', cliPath, 'O que você sabe sobre o projeto Sebastian IA?'],
+      { cwd: projectRoot, encoding: 'utf8', env },
+    );
+
+    assert.equal(questionProcess.status, 0);
+    const questionResult = JSON.parse(questionProcess.stdout.trim()) as { output: { message: string } };
+    assert.equal(
+      questionResult.output.message,
+      'Sobre isso, você registrou: "o projeto Sebastian IA está na fase de memória inteligente".',
+    );
+  });
+});
+
 test('greeting, remember and recall remain fully functional through the real CLI after the converse evolution', () => {
   withIsolatedDataDir((dataDir) => {
     const env = isolatedEnv(dataDir);
