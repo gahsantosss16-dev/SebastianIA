@@ -40,6 +40,8 @@ import {
   type CommandResultMemoryWriter,
 } from './memory/index.js';
 import { DevelopmentModelProvider, type ModelProvider } from './model/index.js';
+import { GoalExecutionOrchestrator, MAX_GOAL_EXECUTION_STEPS } from './development/index.js';
+import type { CognitiveModelProvider } from './cognition/index.js';
 
 export interface CorePipelineBootstrapInput {
   readonly providers: readonly CapabilityProvider[];
@@ -64,6 +66,13 @@ export interface CorePipelineBootstrapInput {
    * validations.
    */
   readonly authorizedCommands?: readonly AuthorizedCommandDefinition[];
+  /**
+   * Optional cognitive engine (SPEC-048) the goal-execution cycle may
+   * consult once the deterministic SPEC-046/047 path has exhausted itself.
+   * Undefined by default - the pipeline composes and starts exactly as
+   * before, with zero network dependency, when this is omitted.
+   */
+  readonly cognitiveModelProvider?: CognitiveModelProvider;
 }
 
 interface CorePipelineExecutorLike {
@@ -82,7 +91,15 @@ export interface CorePipelineBootstrapFactories {
     authorizedCommands: readonly AuthorizedCommandDefinition[],
   ) => SpecializedTool;
   readonly buildModelProvider?: () => ModelProvider;
-  readonly buildSpecializedAgent?: (tool: SpecializedTool, modelProvider: ModelProvider) => SpecializedAgent;
+  readonly buildGoalExecutionOrchestrator?: (
+    tool: SpecializedTool,
+    cognitiveModelProvider: CognitiveModelProvider | undefined,
+  ) => GoalExecutionOrchestrator;
+  readonly buildSpecializedAgent?: (
+    tool: SpecializedTool,
+    modelProvider: ModelProvider,
+    goalExecutionOrchestrator: GoalExecutionOrchestrator,
+  ) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
 
@@ -116,8 +133,13 @@ export class CorePipelineBootstrap {
           )),
       buildModelProvider:
         factories.buildModelProvider ?? (() => new DevelopmentModelProvider()),
+      buildGoalExecutionOrchestrator:
+        factories.buildGoalExecutionOrchestrator ??
+        ((tool, cognitiveModelProvider) => new GoalExecutionOrchestrator(tool, MAX_GOAL_EXECUTION_STEPS, cognitiveModelProvider)),
       buildSpecializedAgent:
-        factories.buildSpecializedAgent ?? ((tool, modelProvider) => new InMemorySpecializedAgent(tool, modelProvider)),
+        factories.buildSpecializedAgent ??
+        ((tool, modelProvider, goalExecutionOrchestrator) =>
+          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ??
         ((memoryFilePath) =>
@@ -141,7 +163,8 @@ export class CorePipelineBootstrap {
       input.authorizedCommands ?? [],
     );
     const modelProvider = this.composeModelProvider();
-    const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider);
+    const goalExecutionOrchestrator = this.composeGoalExecutionOrchestrator(specializedTool, input.cognitiveModelProvider);
+    const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider, goalExecutionOrchestrator);
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
     return Object.freeze({
@@ -275,9 +298,28 @@ export class CorePipelineBootstrap {
     }
   }
 
-  private composeSpecializedAgent(tool: SpecializedTool, modelProvider: ModelProvider): SpecializedAgent {
+  private composeGoalExecutionOrchestrator(
+    tool: SpecializedTool,
+    cognitiveModelProvider: CognitiveModelProvider | undefined,
+  ): GoalExecutionOrchestrator {
     try {
-      const specializedAgent = this.factories.buildSpecializedAgent(tool, modelProvider);
+      const goalExecutionOrchestrator = this.factories.buildGoalExecutionOrchestrator(tool, cognitiveModelProvider);
+      if (!goalExecutionOrchestrator || typeof goalExecutionOrchestrator.execute !== 'function') {
+        throw new TypeError('Core goal execution orchestrator must provide execute.');
+      }
+      return goalExecutionOrchestrator;
+    } catch (error) {
+      throw new CorePipelineBootstrapError('Core goal execution orchestrator composition failed.', { cause: error });
+    }
+  }
+
+  private composeSpecializedAgent(
+    tool: SpecializedTool,
+    modelProvider: ModelProvider,
+    goalExecutionOrchestrator: GoalExecutionOrchestrator,
+  ): SpecializedAgent {
+    try {
+      const specializedAgent = this.factories.buildSpecializedAgent(tool, modelProvider, goalExecutionOrchestrator);
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');
       }

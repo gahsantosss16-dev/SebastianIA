@@ -101,4 +101,4 @@ Como a própria suíte de testes deste projeto roda sob `node --test`, um `node 
 
 ## Status
 
-Implementada - aguardando homologação.
+Implementada e homologada.

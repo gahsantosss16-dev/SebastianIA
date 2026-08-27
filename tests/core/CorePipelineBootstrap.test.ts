@@ -191,6 +191,58 @@ test('bootstrap rejects an invalid specialized tool and preserves its validation
   );
 });
 
+test('bootstrap rejects an invalid goal execution orchestrator and preserves its validation cause', () => {
+  const bootstrap = new CorePipelineBootstrap({
+    buildGoalExecutionOrchestrator: () => ({}) as never,
+  });
+
+  assert.throws(
+    () => bootstrap.compose(validInput),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'Core goal execution orchestrator composition failed.');
+      assert.ok((error as { cause?: unknown }).cause instanceof TypeError);
+      return true;
+    },
+  );
+});
+
+test('bootstrap composes and starts with no cognitiveModelProvider configured - SPEC-048 compatibility, zero network dependency by default', () => {
+  const dependencies = composeCorePipelineDependencies(validInput);
+  assert.equal(typeof dependencies.specializedAgent.handoff, 'function');
+});
+
+test('a cognitiveModelProvider passed to bootstrap reaches the goal execution cycle end-to-end through the composed SpecializedAgent (SPEC-048)', async () => {
+  let cognitiveDecideCalls = 0;
+  const cognitiveModelProvider = {
+    async decide() {
+      cognitiveDecideCalls += 1;
+      return { outcome: 'unavailable' as const, reason: 'test double never actually answers' };
+    },
+  };
+
+  const dependencies = composeCorePipelineDependencies({
+    ...validInputWithConverse,
+    authorizedCommands: [
+      { toolId: 'validation.test', executable: process.execPath, args: ['-e', "process.exit(1)"] },
+    ],
+    cognitiveModelProvider,
+  });
+
+  const result = await dependencies.specializedAgent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: 'converse',
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: {
+      commandInput: { type: 'converse', input: { text: 'Sebastian, descubra por que esse teste está falhando e corrija.' } },
+    },
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(cognitiveDecideCalls, 1, 'the configured cognitive provider must have been consulted at least once');
+});
+
 test('bootstrap composition is deterministic for identical configuration', () => {
   const left = composeCorePipelineDependencies(validInput);
   const right = composeCorePipelineDependencies(validInput);

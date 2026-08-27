@@ -621,6 +621,98 @@ test('specialized agent delegates pursueGoal execution to an explicitly injected
   assert.deepEqual(result.output.finalResult, { message: 'stub goal result', goalExecution: stubResult });
 });
 
+test('specialized agent prefers an injected orchestrator\'s executeWithCognition (SPEC-048) over its synchronous execute when both are provided', async () => {
+  const goal: GoalDefinition = { objective: 'x', authorization: 'writeAuthorized', validationToolId: 'validation.test' };
+  const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'pursueGoal', goal }) };
+  const cognitiveResult: GoalExecutionResult = {
+    objective: 'x',
+    authorization: 'writeAuthorized',
+    status: 'completed',
+    steps: [],
+    decisions: [],
+    filesChanged: ['fixed.js'],
+    message: 'cognitive result',
+  };
+  let executeWithCognitionCalls = 0;
+  let executeCalls = 0;
+
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => assert.fail('The Tool should never be invoked directly - only through the orchestrator.') },
+    modelProvider,
+    undefined,
+    {
+      execute: () => {
+        executeCalls += 1;
+        assert.fail('The synchronous execute should not be used when executeWithCognition is available.');
+      },
+      executeWithCognition: async (receivedGoalArg) => {
+        executeWithCognitionCalls += 1;
+        assert.deepEqual(receivedGoalArg, goal);
+        return cognitiveResult;
+      },
+    },
+  );
+
+  const result = await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text: 'descubra e corrija' } } },
+  });
+
+  assert.equal(executeWithCognitionCalls, 1);
+  assert.equal(executeCalls, 0);
+  assert.equal(result.status, 'completed');
+  if (result.status !== 'completed') {
+    assert.fail('Expected completed status.');
+  }
+  assert.deepEqual(result.output.finalResult, { message: 'cognitive result', goalExecution: cognitiveResult });
+});
+
+test('specialized agent forwards remembered facts into the goal execution context as relevantMemory (SPEC-048)', async () => {
+  const goal: GoalDefinition = { objective: 'x', authorization: 'readOnly', validationToolId: 'validation.test' };
+  const modelProvider: ModelProvider = { interpret: async () => ({ intent: 'pursueGoal', goal }) };
+  let receivedContext: { readonly relevantMemory?: readonly { readonly content: string }[] } | undefined;
+  const stubResult: GoalExecutionResult = {
+    objective: 'x',
+    authorization: 'readOnly',
+    status: 'completed',
+    steps: [],
+    decisions: [],
+    filesChanged: [],
+    message: 'stub',
+  };
+
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => assert.fail('unused') },
+    modelProvider,
+    undefined,
+    {
+      execute: (_goal, context) => {
+        receivedContext = context;
+        return stubResult;
+      },
+    },
+  );
+
+  await agent.handoff({
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-12T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-12T00:00:01.000Z',
+    payload: {
+      commandInput: {
+        type: 'converse',
+        input: { text: 'qualquer texto' },
+        temporary: { values: { rememberedFacts: [{ id: 'fact-1', content: 'prefere respostas curtas', recordedAt: '2026-08-11T00:00:00.000Z' }] } },
+      },
+    },
+  });
+
+  assert.deepEqual(receivedContext?.relevantMemory, [{ content: 'prefere respostas curtas' }]);
+});
+
 test('specialized agent turns an addTask decision into a task-created finalResult', async () => {
   const modelProvider: ModelProvider = {
     interpret: async () => ({ intent: 'addTask', content: 'comprar leite' }),

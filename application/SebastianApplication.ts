@@ -12,6 +12,7 @@ import {
   VALIDATION_TYPECHECK_TOOL_ID,
   type AuthorizedCommandDefinition,
 } from '../core/tool/index.js';
+import type { CognitiveModelProvider } from '../core/cognition/index.js';
 import {
   LOCAL_GREETING_CAPABILITY_ID,
   LOCAL_GREETING_COMMAND_TYPE,
@@ -54,6 +55,14 @@ export interface SebastianApplicationOptions {
    * clear it explicitly.
    */
   readonly authorizedCommands?: readonly AuthorizedCommandDefinition[];
+  /**
+   * Optional cognitive engine (SPEC-048) the goal-execution cycle may
+   * consult once the deterministic path has exhausted itself. Omitted by
+   * default - Sebastian initializes and runs exactly as before, with no
+   * network dependency, unless a caller explicitly opts in (e.g. wiring an
+   * `OllamaCognitiveModelProvider`).
+   */
+  readonly cognitiveModelProvider?: CognitiveModelProvider;
 }
 
 /**
@@ -81,6 +90,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
       providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider],
       allowedFilesystemRoot,
       authorizedCommands,
+      ...(options.cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider: options.cognitiveModelProvider }),
       bindings: [
         {
           commandType: LOCAL_GREETING_COMMAND_TYPE,

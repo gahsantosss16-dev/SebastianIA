@@ -41,6 +41,13 @@ interface DevelopmentTaskOrchestratorLike {
 
 interface GoalExecutionOrchestratorLike {
   execute(goal: GoalDefinition, context: GoalExecutionContext): GoalExecutionResult;
+  /**
+   * Optional cognitive entry point (SPEC-048). Feature-detected at the call
+   * site: an orchestrator (real or test double) that does not implement it
+   * simply keeps using the synchronous `execute` path unchanged - existing
+   * fakes that only implement `execute` are entirely unaffected.
+   */
+  executeWithCognition?(goal: GoalDefinition, context: GoalExecutionContext): Promise<GoalExecutionResult>;
 }
 
 export class InMemorySpecializedAgent implements SpecializedAgent {
@@ -94,14 +101,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       requestedAt: input.requestedAt,
     });
 
-    const result = this.resolveConversationDecision(input, decision);
+    const result = await this.resolveConversationDecision(input, decision, rememberedFacts);
     return this.withConversationTurn(result, text, decision);
   }
 
-  private resolveConversationDecision(
+  private async resolveConversationDecision(
     input: SpecializedAgentHandoffInput,
     decision: ModelInterpretationDecision,
-  ): SpecializedAgentHandoffResult {
+    rememberedFacts: readonly RememberedFactRecord[],
+  ): Promise<SpecializedAgentHandoffResult> {
     if (decision.intent === 'useTool') {
       return this.handleToolUse(input, decision);
     }
@@ -111,7 +119,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     }
 
     if (decision.intent === 'pursueGoal') {
-      return this.handlePursueGoal(input, decision);
+      return this.handlePursueGoal(input, decision, rememberedFacts);
     }
 
     let finalResult: Readonly<Record<string, unknown>>;
@@ -275,15 +283,22 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
    * (a fix is only ever reported completed once the orchestrator's own
    * verification step confirms it).
    */
-  private handlePursueGoal(
+  private async handlePursueGoal(
     input: SpecializedAgentHandoffInput,
     decision: ModelInterpretationPursueGoalDecision,
-  ): SpecializedAgentHandoffResult {
-    const result = this.goalExecutionOrchestrator.execute(decision.goal, {
+    rememberedFacts: readonly RememberedFactRecord[],
+  ): Promise<SpecializedAgentHandoffResult> {
+    const context = {
       executionId: input.executionId,
       responsibilityId: input.responsibilityId,
       requestedAt: input.requestedAt,
-    });
+      relevantMemory: rememberedFacts.map((fact) => ({ content: fact.content })),
+    };
+
+    const result =
+      typeof this.goalExecutionOrchestrator.executeWithCognition === 'function'
+        ? await this.goalExecutionOrchestrator.executeWithCognition(decision.goal, context)
+        : this.goalExecutionOrchestrator.execute(decision.goal, context);
 
     return {
       status: 'completed',
