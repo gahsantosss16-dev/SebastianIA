@@ -24,8 +24,14 @@ function response(status: number, body: string): FakeResponse {
   return { ok: status >= 200 && status < 300, status, text: async () => body };
 }
 
-function provider(fetchImpl: FetchHandler, timeoutMs = 8_000): GeminiCognitiveModelProvider {
-  return new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, timeoutMs, fetchImpl });
+function provider(fetchImpl: FetchHandler, timeoutMs = 8_000, respondTimeoutMs?: number): GeminiCognitiveModelProvider {
+  return new GeminiCognitiveModelProvider({
+    apiKey: API_KEY,
+    model: MODEL,
+    timeoutMs,
+    fetchImpl,
+    ...(respondTimeoutMs === undefined ? {} : { respondTimeoutMs }),
+  });
 }
 
 function decisionRequest(): CognitiveDecisionRequest {
@@ -53,6 +59,10 @@ test('SPEC-050: Gemini provider validates credentials, model and timeout without
   );
   assert.throws(
     () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, timeoutMs: 15_000 }),
+    InvalidCognitiveModelProviderInputError,
+  );
+  assert.throws(
+    () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, respondTimeoutMs: 30_000 }),
     InvalidCognitiveModelProviderInputError,
   );
 });
@@ -182,6 +192,7 @@ test('SPEC-050: timeout aborts native fetch and resolves timeout without retry',
           reject(error);
         });
       }),
+    8_000,
     20,
   );
 
@@ -189,6 +200,17 @@ test('SPEC-050: timeout aborts native fetch and resolves timeout without retry',
   assert.deepEqual(result, { outcome: 'timeout' });
   assert.equal(aborted, true);
   assert.equal(calls, 1);
+});
+
+test('a respond call slower than the old shared 8s timeout, but within the dedicated respond timeout, still succeeds', async () => {
+  const cognitive = provider(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 8_200));
+    return response(200, geminiEnvelope({ answer: 'Resposta que chegou logo após 8 segundos.' }));
+  });
+
+  const result = await cognitive.respond?.({ text: 'pergunta', requestedAt: '2026-08-27T00:00:00.000Z' });
+
+  assert.deepEqual(result, { outcome: 'responded', answer: 'Resposta que chegou logo após 8 segundos.' });
 });
 
 test('SPEC-050: malformed envelopes, JSON, schemas and oversized answers are invalidResponse', async () => {
@@ -286,6 +308,7 @@ test('Gemini diagnostics distinguish safe technical outcomes without logging cre
     apiKey: API_KEY,
     model: MODEL,
     timeoutMs: 5,
+    respondTimeoutMs: 5,
     logger,
     fetchImpl: async (_url, init) =>
       new Promise<FakeResponse>((_resolve, reject) => {

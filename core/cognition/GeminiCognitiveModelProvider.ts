@@ -11,6 +11,14 @@ import type { Logger } from '../logger.js';
 
 const GEMINI_API_ORIGIN = 'https://generativelanguage.googleapis.com';
 export const DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS = 8_000;
+/**
+ * `respond` (the free-form conversational answer) has observed production
+ * latencies that exceed `DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS` (used by the
+ * tight, budget-bound `decide` loop) while still completing successfully -
+ * it gets its own, more generous default so a merely-slow conversational
+ * answer is not aborted the same way a stuck operational decision is.
+ */
+export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 20_000;
 export const MAX_GEMINI_RESPONSE_BYTES = 64 * 1024;
 export const MAX_GEMINI_GENERATED_JSON_CHARS = 16 * 1024;
 export const MAX_GEMINI_CONVERSATION_ANSWER_CHARS = 8_000;
@@ -25,6 +33,8 @@ export interface GeminiCognitiveModelProviderOptions {
   readonly apiKey: string;
   readonly model: string;
   readonly timeoutMs?: number;
+  /** Timeout for `respond` only; independent of `timeoutMs` (which continues to bound only `decide`). */
+  readonly respondTimeoutMs?: number;
   readonly fetchImpl?: FetchLike;
   readonly logger?: Logger;
 }
@@ -104,6 +114,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly timeoutMs: number;
+  private readonly respondTimeoutMs: number;
   private readonly fetchImpl: FetchLike;
   private readonly logger: Logger | undefined;
 
@@ -123,10 +134,17 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
         'Gemini cognitive provider timeout must be an integer between 1 and 14999 milliseconds.',
       );
     }
+    const respondTimeoutMs = options.respondTimeoutMs ?? DEFAULT_GEMINI_RESPOND_TIMEOUT_MS;
+    if (!Number.isInteger(respondTimeoutMs) || respondTimeoutMs <= 0 || respondTimeoutMs >= 30_000) {
+      throw new InvalidCognitiveModelProviderInputError(
+        'Gemini cognitive provider respond timeout must be an integer between 1 and 29999 milliseconds.',
+      );
+    }
 
     this.apiKey = options.apiKey;
     this.model = options.model.trim();
     this.timeoutMs = timeoutMs;
+    this.respondTimeoutMs = respondTimeoutMs;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     this.logger = options.logger;
   }
@@ -151,6 +169,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
         ...(request.recentExchanges === undefined ? {} : { recentExchanges: request.recentExchanges }),
       }),
       ANSWER_SCHEMA,
+      this.respondTimeoutMs,
     );
     if (result.outcome !== 'generated') {
       this.logOutcome('respond', result.outcome, result);
@@ -205,6 +224,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       DECISION_SYSTEM_INSTRUCTION,
       JSON.stringify(safeRequest),
       DECISION_SCHEMA,
+      this.timeoutMs,
     );
     if (result.outcome !== 'generated') {
       this.logOutcome('decide', result.outcome, result);
@@ -233,10 +253,11 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     systemInstruction: string,
     userContent: string,
     responseJsonSchema: Readonly<Record<string, unknown>>,
+    timeoutMs: number,
   ): Promise<GeminiStructuredResult> {
     const startedAt = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const endpoint = `${GEMINI_API_ORIGIN}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`;
