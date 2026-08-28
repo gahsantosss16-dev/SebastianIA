@@ -8,7 +8,12 @@ import { InvalidModelInterpretationRequestError } from './ModelProviderContractE
  * subject of its own", and "no special handling needed" before any specific
  * marker-based recognition runs.
  */
-export type ConversationIntentCategory = 'resumptionReference' | 'continuationReference' | 'question' | 'plain';
+export type ConversationIntentCategory =
+  | 'resumptionReference'
+  | 'continuationReference'
+  | 'ellipticalContinuationReference'
+  | 'question'
+  | 'plain';
 
 /** A single piece of memory (a fact or a past exchange) judged relevant to the current message, with the score that ranked it. */
 export interface RelevantMemoryMatch {
@@ -113,8 +118,11 @@ export class ConversationContextComposer {
     if (this.isResumptionReference(lowerText)) {
       return 'resumptionReference';
     }
-    if (this.isContinuationReference(lowerText, hasRecentExchange)) {
+    if (this.isContinuationReference(lowerText)) {
       return 'continuationReference';
+    }
+    if (hasRecentExchange && this.isShortEllipticalFollowUp(lowerText.trim())) {
+      return 'ellipticalContinuationReference';
     }
     if (this.isQuestion(lowerText)) {
       return 'question';
@@ -129,7 +137,7 @@ export class ConversationContextComposer {
     return RESUMPTION_SUBJECTS.some((subject) => lowerText.includes(subject));
   }
 
-  private isContinuationReference(lowerText: string, hasRecentExchange: boolean): boolean {
+  private isContinuationReference(lowerText: string): boolean {
     const trimmed = lowerText.trim();
     if (
       CONTINUATION_MARKERS.some((marker) => lowerText.includes(marker)) ||
@@ -139,11 +147,7 @@ export class ConversationContextComposer {
     ) {
       return true;
     }
-    // A short, elliptical follow-up ("vc pode me ajudar?", "como?", "faz
-    // isso") only makes sense as a continuation when there is something
-    // recent to continue - a short opener in a fresh conversation is never
-    // reclassified this way.
-    return hasRecentExchange && this.isShortEllipticalFollowUp(trimmed);
+    return false;
   }
 
   private isShortEllipticalFollowUp(text: string): boolean {
@@ -215,7 +219,11 @@ export class ConversationContextComposer {
     if (records.length === 0) {
       return undefined;
     }
-    return [...records].sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))[0];
+    // Input order is the append order reconstructed by Memory. On equal
+    // timestamps the later persisted record is therefore the newer one.
+    return records.reduce((latest, candidate) =>
+      candidate.recordedAt >= latest.recordedAt ? candidate : latest,
+    );
   }
 
   private validateInput(input: ConversationContextComposerInput): void {

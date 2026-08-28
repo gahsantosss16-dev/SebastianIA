@@ -71,6 +71,44 @@ test('SPEC-050: structural deterministic fallback calls cognitive respond with o
   }
 });
 
+test('a general unknown question goes directly to general cognition even when operational Tools are available', async () => {
+  let decideCalls = 0;
+  let respondCalls = 0;
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({
+      intent: 'respond', answer: 'Ainda não sei responder a isso.', recordable: false, cognitiveFallbackEligible: true,
+    }),
+  };
+  const cognitiveModelProvider: CognitiveModelProvider = {
+    decide: async () => {
+      decideCalls += 1;
+      return { outcome: 'timeout' };
+    },
+    respond: async () => {
+      respondCalls += 1;
+      return { outcome: 'responded', answer: 'Organize documentos, orçamento, seguro e roteiro da viagem.' };
+    },
+  };
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => ({ status: 'completed', output: { message: 'not expected' } }) },
+    modelProvider,
+    undefined,
+    undefined,
+    cognitiveModelProvider,
+    [{ toolId: 'read.status', description: 'read-only status', requiresAuthorization: false, requiredStringArguments: [] }],
+  );
+
+  const result = await agent.handoff(fallbackHandoff('vou viajar pra europa o q tenho q fazer?'));
+
+  assert.equal(decideCalls, 0, 'ordinary conversation must not be delayed behind the operational planner');
+  assert.equal(respondCalls, 1);
+  assert.equal(result.status, 'completed');
+  if (result.status === 'completed') {
+    const finalResult = result.output.finalResult as { readonly message?: unknown };
+    assert.match(String(finalResult.message), /documentos|viagem/);
+  }
+});
+
 test('cognitive conversation receives the bounded recent context already hydrated by Memory', async () => {
   let request: unknown;
   const agent = cognitiveFallbackAgent(

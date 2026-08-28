@@ -563,6 +563,110 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
   }
 });
 
+test('HTTP regression: unrelated general questions use general cognition directly instead of the limited deterministic fallback', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-http-generalist-'));
+  let decideCalls = 0;
+  const provider: CognitiveModelProvider = {
+    decide: async () => {
+      decideCalls += 1;
+      return { outcome: 'timeout' };
+    },
+    respond: async ({ text }) => ({
+      outcome: 'responded',
+      answer: text.includes('viajar')
+        ? 'Confira documentos, orçamento, seguro, hospedagem e roteiro antes da viagem.'
+        : 'Posso explicar esse assunto geral usando conhecimento e raciocínio.',
+    }),
+  };
+  const application = createOnlineSebastianApplication(undefined, provider, dataDir, {});
+  const running = await startServer(application);
+  try {
+    const travel = await converse(running.baseUrl, 'vou viajar pra europa o q tenho q fazer?');
+    assert.match((await travel.json() as { message: string }).message, /documentos|viagem/);
+    const other = await converse(running.baseUrl, 'Explique como surgem os arco-íris.');
+    assert.match((await other.json() as { message: string }).message, /assunto geral/);
+    assert.equal(decideCalls, 0);
+  } finally {
+    await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('HTTP regression: an elliptical follow-up uses the immediately previous exchange, while explicit topic changes and resumptions remain independent', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-http-primary-context-'));
+  const cognitiveRequests: Array<{ readonly text: string; readonly recentExchanges: readonly { readonly requestText: string; readonly summary: string }[] }> = [];
+  const logCalls: Array<{ readonly message: string; readonly metadata?: Record<string, unknown> }> = [];
+  const logger: Logger = {
+    debug() {}, warn() {}, error() {},
+    info(message, metadata) { logCalls.push(metadata === undefined ? { message } : { message, metadata }); },
+  };
+  const provider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'not expected for ordinary conversation' }),
+    respond: async (request) => {
+      cognitiveRequests.push({ text: request.text, recentExchanges: request.recentExchanges ?? [] });
+      if (request.text.includes('GitHub inicialmente')) {
+        return { outcome: 'responded', answer: 'Posso ajudar com GitHub, repositórios e commits.' };
+      }
+      if (request.text.includes('criar um site')) {
+        return { outcome: 'responded', answer: 'Para criar um site, começamos definindo objetivo, páginas e tecnologia.' };
+      }
+      if (request.text === 'vc pode me ajudar?') {
+        const context = (request.recentExchanges ?? []).map((item) => `${item.requestText}\n${item.summary}`).join('\n');
+        return { outcome: 'responded', answer: context.includes('criar um site') && !context.includes('repositórios e commits')
+          ? 'Claro. Posso ajudar a planejar e construir esse site passo a passo.'
+          : 'Contexto incorreto.' };
+      }
+      if (request.text.includes('Mudando explicitamente')) {
+        return { outcome: 'responded', answer: 'Vamos falar do novo assunto sem carregar o anterior.' };
+      }
+      return { outcome: 'responded', answer: (request.recentExchanges ?? []).some((item) => item.summary.includes('repositórios e commits'))
+          ? 'Retomando GitHub, podemos revisar repositórios e commits.'
+          : 'Retomada sem contexto.' };
+    },
+  };
+  const application = createOnlineSebastianApplication(logger, provider, dataDir, {});
+  let tick = 0;
+  const running = await startServer(application, logger, undefined, () => new Date(Date.UTC(2026, 7, 28, 16, 0, tick++)));
+  try {
+    await converse(running.baseUrl, 'Quero conversar sobre GitHub inicialmente.');
+    const site = await converse(running.baseUrl, 'como eu faço pra criar um site?');
+    assert.match((await site.json() as { message: string }).message, /criar um site/);
+    const persistedAfterSite = readFileSync(join(dataDir, 'memory.json'), 'utf8');
+    assert.match(persistedAfterSite, /criar um site/);
+
+    const followUp = await converse(running.baseUrl, 'vc pode me ajudar?');
+    assert.match((await followUp.json() as { message: string }).message, /esse site/);
+    const followUpRequest = cognitiveRequests.find((request) => request.text === 'vc pode me ajudar?');
+    assert.equal(followUpRequest?.recentExchanges.length, 1);
+    assert.match(followUpRequest?.recentExchanges[0]?.summary ?? '', /criar um site/);
+    assert.doesNotMatch(followUpRequest?.recentExchanges[0]?.summary ?? '', /GitHub|commits/);
+
+    const changed = await converse(running.baseUrl, 'Mudando explicitamente de assunto: quero falar de jardinagem.');
+    assert.match((await changed.json() as { message: string }).message, /novo assunto/);
+    const changeRequest = cognitiveRequests.find((request) => request.text.includes('Mudando explicitamente'));
+    assert.deepEqual(changeRequest?.recentExchanges, []);
+
+    const resumed = await converse(running.baseUrl, 'Vamos continuar o projeto GitHub sobre repositórios e commits.');
+    assert.match((await resumed.json() as { message: string }).message, /Retomando GitHub/);
+    const resumeRequest = cognitiveRequests.find((request) => request.text.startsWith('Vamos continuar'));
+    assert.equal(resumeRequest?.recentExchanges.some((item) => item.summary.includes('repositórios e commits')), true);
+
+    const selections = logCalls.filter((call) => call.message === 'Cognitive conversation context selected.');
+    const followUpSelection = selections.find((call) => call.metadata?.intent === 'ellipticalContinuationReference' && call.metadata?.availableExchangeCount === 2);
+    const selected = followUpSelection?.metadata?.selectedExchanges as Array<Record<string, unknown>> | undefined;
+    assert.equal(selected?.length, 1);
+    assert.equal(selected?.[0]?.sourcePosition, 1);
+    assert.equal(selected?.[0]?.recencyRank, 1);
+    assert.equal(selected?.[0]?.kind, 'respond');
+    assert.equal(selected?.[0]?.contextRole, 'primary');
+    assert.equal(JSON.stringify(selections).includes('criar um site'), false, 'safe instrumentation must never log conversation content');
+    assert.equal(JSON.stringify(selections).includes('GitHub inicialmente'), false);
+  } finally {
+    await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('SPEC-049: hostile HTTP requests cannot create/edit files, execute validations, use Git/diff or auto-correct', async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'sebastian-online-security-'));
   const protectedPath = join(fixture, 'protected.txt');

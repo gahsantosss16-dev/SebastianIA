@@ -93,7 +93,7 @@ button { cursor: pointer; }
 .unlock-error { min-height: 16px; margin: 2px 0 0; color: var(--danger) !important; font-size: 12px; }
 
 /* ---------- Workspace ---------- */
-.workspace { height: 100vh; display: grid; grid-template-columns: 244px 1fr; }
+.workspace { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; display: grid; grid-template-columns: 244px 1fr; }
 
 .sidebar {
   display: flex;
@@ -126,9 +126,9 @@ button { cursor: pointer; }
 .sidebar-status { display: flex; align-items: center; gap: 8px; padding: 8px 6px; color: var(--muted); font-size: 12px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--online); box-shadow: 0 0 8px rgba(95, 191, 136, 0.65); }
 
-.conversation { display: grid; grid-template-rows: 1fr auto; min-width: 0; }
+.conversation { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; }
 
-.messages { display: flex; flex-direction: column; overflow-y: auto; padding: 40px 5vw 16px; scroll-behavior: smooth; }
+.messages { min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 40px 5vw 16px; scroll-behavior: smooth; }
 .message { width: 100%; max-width: 700px; margin: 0 auto 28px; display: grid; gap: 6px; }
 .message.user { justify-items: end; }
 
@@ -243,7 +243,7 @@ textarea::placeholder { color: var(--muted); opacity: .55; }
 .hint { max-width: 700px; margin: 9px auto 0; padding: 0 2px; color: var(--muted); font-size: 11px; text-align: center; }
 
 @media (max-width: 760px) {
-  .workspace { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .workspace { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .sidebar { flex-direction: row; align-items: center; padding: 12px 14px; border-right: 0; border-bottom: 1px solid var(--line); }
   .sidebar-brand { padding: 0; }
   .sidebar-brand-name { display: none; }

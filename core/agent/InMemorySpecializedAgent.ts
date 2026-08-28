@@ -146,12 +146,21 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       input.responsibilityId,
       cognitiveRecentExchanges,
     );
-    const effectiveDecision = await this.applyCognitiveConversationFallback(
+    const conversationalDecision = await this.applyCognitiveConversationFallback(
       operationalDecision,
       text,
       input.requestedAt,
       cognitiveRecentExchanges,
     );
+    // General conversation gets the first, dedicated model turn. If that
+    // provider path is absent/unavailable, retain the existing operational
+    // planner as a fail-soft recovery instead of surfacing the limited local
+    // fallback. A successful conversational answer never pays for `decide`.
+    const effectiveDecision = conversationalDecision === decision && operationalDecision === decision
+      ? await this.applyCognitiveOperationalDecision(
+          decision, text, input.requestedAt, input.executionId, input.responsibilityId, cognitiveRecentExchanges, true,
+        )
+      : conversationalDecision;
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
     return this.withConversationTurn(result, text, effectiveDecision);
   }
@@ -163,9 +172,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     executionId: string,
     responsibilityId: string,
     recentExchanges: readonly RecentExchangeRecord[],
+    forceFallback = false,
   ): Promise<ModelInterpretationDecision> {
     const eligible =
-      (decision.intent === 'respond' && decision.cognitiveFallbackEligible === true) ||
+      forceFallback ||
+      (decision.intent === 'respond' &&
+        decision.cognitiveFallbackEligible === true &&
+        this.cognitiveOperationalOrchestrator?.hasApplicableToolCandidate(text) === true) ||
       (decision.intent === 'useTool' && decision.cognitiveOperationalEligible === true);
     if (!eligible || !this.cognitiveOperationalOrchestrator) {
       return decision;
@@ -548,21 +561,66 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     rememberedFacts: readonly RememberedFactRecord[],
     recentExchanges: readonly RecentExchangeRecord[],
   ): readonly RecentExchangeRecord[] {
-    if (recentExchanges.length === 0) return [];
-    const composed = new ConversationContextComposer().compose({ text, rememberedFacts, recentExchanges });
-    if (composed.intent === 'continuationReference' || composed.intent === 'resumptionReference') {
-      const selectedIds = new Set([
-        ...recentExchanges.slice(-1).map((exchange) => exchange.id),
-        ...composed.relevantMemories.filter((match) => match.source === 'exchange').map((match) => match.id),
-      ]);
-      return recentExchanges.filter((exchange) => selectedIds.has(exchange.id)).slice(-4);
+    if (recentExchanges.length === 0) {
+      this.logConversationContextSelection('plain', recentExchanges, []);
+      return [];
     }
-    const relevantIds = new Set(
-      composed.relevantMemories
+    const composed = new ConversationContextComposer().compose({ text, rememberedFacts, recentExchanges });
+    let selected: readonly RecentExchangeRecord[];
+    if (composed.intent === 'ellipticalContinuationReference') {
+      // An elliptical continuation has no independent subject: the exchange
+      // immediately before it is the complete primary context. Adding older
+      // lexical matches here lets stale capabilities compete with the actual
+      // conversational thread (the production GitHub → site regression).
+      selected = composed.mostRecentExchange ? [composed.mostRecentExchange] : [];
+    } else if (composed.intent === 'continuationReference') {
+      const byId = new Map(recentExchanges.map((exchange) => [exchange.id, exchange]));
+      const relevant = composed.relevantMemories
+        .filter((match) => match.source === 'exchange')
+        .map((match) => byId.get(match.id))
+        .filter((exchange): exchange is RecentExchangeRecord => exchange !== undefined);
+      selected = [...relevant, ...(composed.mostRecentExchange && !relevant.some((item) => item.id === composed.mostRecentExchange?.id)
+        ? [composed.mostRecentExchange]
+        : [])].slice(0, 4);
+    } else if (composed.intent === 'resumptionReference') {
+      // An explicit resumption names the older subject it wants back. Preserve
+      // relevance ranking and do not inject the unrelated latest exchange.
+      const byId = new Map(recentExchanges.map((exchange) => [exchange.id, exchange]));
+      selected = composed.relevantMemories
+        .filter((match) => match.source === 'exchange')
+        .map((match) => byId.get(match.id))
+        .filter((exchange): exchange is RecentExchangeRecord => exchange !== undefined)
+        .slice(0, 4);
+    } else {
+      const byId = new Map(recentExchanges.map((exchange) => [exchange.id, exchange]));
+      selected = composed.relevantMemories
         .filter((match) => match.source === 'exchange' && match.score >= 2)
-        .map((match) => match.id),
-    );
-    return recentExchanges.filter((exchange) => relevantIds.has(exchange.id));
+        .map((match) => byId.get(match.id))
+        .filter((exchange): exchange is RecentExchangeRecord => exchange !== undefined);
+    }
+    this.logConversationContextSelection(composed.intent, recentExchanges, selected);
+    return selected;
+  }
+
+  /** Safe production diagnostic: identifiers and positions only, never conversation content. */
+  private logConversationContextSelection(
+    intent: string,
+    available: readonly RecentExchangeRecord[],
+    selected: readonly RecentExchangeRecord[],
+  ): void {
+    const positions = new Map(available.map((exchange, index) => [exchange.id, index]));
+    this.logger?.info('Cognitive conversation context selected.', {
+      intent,
+      availableExchangeCount: available.length,
+      selectedExchangeCount: selected.length,
+      selectedExchanges: selected.map((exchange, index) => ({
+        id: exchange.id,
+        sourcePosition: positions.get(exchange.id),
+        recencyRank: available.length - (positions.get(exchange.id) ?? available.length),
+        kind: exchange.kind,
+        contextRole: index === 0 ? 'primary' : 'secondary',
+      })),
+    });
   }
 
   private handlePendingOperationResponse(

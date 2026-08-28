@@ -258,8 +258,8 @@ test('a casual request with no GitHub intent never calls a github.* tool, and pr
     const result = await app.executeCommand(input('Como foi seu dia?', 5));
 
     assert.deepEqual(invoked, []);
-    assert.equal(result.output.message, 'Vamos conversar normalmente.');
-    assert.equal(respondCalls, 0, 'a plain conclusion needs no conversational fallback at all');
+    assert.equal(result.output.message, 'não deveria ser usado');
+    assert.equal(respondCalls, 1, 'ordinary conversation uses the general conversational model without an operational planning turn');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

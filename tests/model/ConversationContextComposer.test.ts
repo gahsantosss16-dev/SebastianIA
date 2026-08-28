@@ -53,13 +53,13 @@ test('classifies "e agora?", "como ficou aquilo?" and "onde paramos?" as continu
   }
 });
 
-test('classifies short, referent-dependent follow-ups as continuationReference only when a recent exchange exists', () => {
+test('classifies short, referent-dependent follow-ups as ellipticalContinuationReference only when a recent exchange exists', () => {
   const composer = new ConversationContextComposer();
   const recentExchanges = [exchange('e1', 'como eu faço pra criar um site?', 'Você pode usar HTML e CSS.', '2026-08-28T00:00:00.000Z')];
 
-  for (const text of ['vc pode me ajudar?', 'como?', 'e depois?', 'qual você recomenda?', 'faz isso']) {
+  for (const text of ['vc pode me ajudar?', 'como?', 'qual você recomenda?', 'faz isso']) {
     const withHistory = composer.compose({ text, rememberedFacts: [], recentExchanges });
-    assert.equal(withHistory.intent, 'continuationReference', `expected "${text}" to be continuationReference with recent history`);
+    assert.equal(withHistory.intent, 'ellipticalContinuationReference', `expected "${text}" to be ellipticalContinuationReference with recent history`);
   }
 
   // A short opener in a brand-new conversation is never affected by the new
@@ -67,7 +67,7 @@ test('classifies short, referent-dependent follow-ups as continuationReference o
   // pre-existing "e " marker, but the other four have nothing to continue.
   for (const text of ['vc pode me ajudar?', 'como?', 'qual você recomenda?', 'faz isso']) {
     const withoutHistory = composer.compose({ text, rememberedFacts: [], recentExchanges: [] });
-    assert.notEqual(withoutHistory.intent, 'continuationReference', `expected "${text}" to NOT be continuationReference with no history`);
+    assert.notEqual(withoutHistory.intent, 'ellipticalContinuationReference', `expected "${text}" to NOT be ellipticalContinuationReference with no history`);
   }
 });
 
@@ -78,6 +78,19 @@ test('a short but self-contained statement is never swept into continuationRefer
   const composed = composer.compose({ text: 'Uma solicitação desconhecida.', rememberedFacts: [], recentExchanges });
 
   assert.notEqual(composed.intent, 'continuationReference');
+});
+
+test('the later appended exchange is most recent when persistence timestamps are equal', () => {
+  const composer = new ConversationContextComposer();
+  const recordedAt = '2026-08-28T00:00:00.000Z';
+  const exchanges = [
+    exchange('older', 'Assunto anterior.', 'Resumo anterior.', recordedAt),
+    exchange('latest', 'Assunto imediatamente anterior.', 'Resumo imediatamente anterior.', recordedAt),
+  ];
+
+  const composed = composer.compose({ text: 'vc pode me ajudar?', rememberedFacts: [], recentExchanges: exchanges });
+
+  assert.equal(composed.mostRecentExchange?.id, 'latest');
 });
 
 test('classifies "vamos continuar meu projeto de ontem" as resumptionReference, not continuationReference', () => {

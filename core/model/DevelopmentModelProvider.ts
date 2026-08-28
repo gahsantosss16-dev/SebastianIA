@@ -255,7 +255,7 @@ export class DevelopmentModelProvider implements ModelProvider {
       return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
     }
 
-    if (composed.intent === 'continuationReference') {
+    if (composed.intent === 'continuationReference' || composed.intent === 'ellipticalContinuationReference') {
       return {
         intent: 'respond',
         ...this.composeContinuationAnswer(composed),

@@ -65,6 +65,27 @@ export class CognitiveOperationalOrchestrator {
     private readonly logger?: Logger,
   ) {}
 
+  /**
+   * Cheap catalog gate before spending an operational model turn. Exact
+   * deterministic routes always qualify; otherwise at least one meaningful
+   * objective term must occur in a registered Tool's id/description. This is
+   * capability-driven (the catalog is the source), not a phrase/topic list.
+   */
+  public hasApplicableToolCandidate(objective: string): boolean {
+    if (this.catalog.some((entry) => entry.deterministicIntent?.pattern.test(objective) === true)) return true;
+    const objectiveTerms = this.catalogTerms(objective);
+    if (objectiveTerms.size === 0) return false;
+    return this.catalog.some((entry) => {
+      const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
+      return [...objectiveTerms].some((term) => capabilityTerms.has(term));
+    });
+  }
+
+  private catalogTerms(text: string): ReadonlySet<string> {
+    const ignored = new Set(['para', 'como', 'qual', 'quais', 'esse', 'essa', 'isso', 'uma', 'por', 'com', 'sem']);
+    return new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 4 && !ignored.has(term)));
+  }
+
   public async execute(
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[] },
