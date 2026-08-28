@@ -3,6 +3,7 @@
 import { createLogger } from '../core/logger.js';
 import { createOnlineSebastianApplication } from './OnlineSebastianApplication.js';
 import { createOnlineCognitiveModelProvider } from './OnlineCognitiveProviderConfiguration.js';
+import { resolveSebastianDataDirectory } from '../core/memory/index.js';
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
 
 const logger = createLogger();
@@ -12,7 +13,8 @@ async function startOnlineServer(): Promise<void> {
     const apiToken = resolveOnlineApiToken();
     const port = resolveOnlinePort();
     const cognitiveModelProvider = createOnlineCognitiveModelProvider(process.env, logger);
-    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider);
+    const dataDir = resolveSebastianDataDirectory();
+    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir);
     const httpServer = new SebastianHttpServer({ application, apiToken, logger });
     const started = await httpServer.listen(port);
     logger.info('Sebastian online started.', { port: started.port });
@@ -33,8 +35,11 @@ async function startOnlineServer(): Promise<void> {
 
     process.once('SIGTERM', () => void shutdown('SIGTERM'));
     process.once('SIGINT', () => void shutdown('SIGINT'));
-  } catch {
-    logger.error('Sebastian online failed to start.');
+  } catch (error) {
+    logger.error('Sebastian online failed to start.', {
+      name: error instanceof Error ? error.name : 'UnknownError',
+      message: error instanceof Error ? error.message : 'A non-Error value was thrown.',
+    });
     process.exitCode = 1;
   }
 }

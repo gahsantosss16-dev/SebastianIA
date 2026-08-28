@@ -258,8 +258,18 @@ export class SebastianHttpServer {
       this.writeJson(response, 200, { authenticated: this.hasValidWebSession(request) });
       return;
     }
+    if (request.method === 'DELETE') {
+      if (!this.hasSameOrigin(request)) {
+        this.writeError(response, 403, 'FORBIDDEN', 'Origem não permitida.', requestId);
+        return;
+      }
+      this.webSessionDigest = undefined;
+      this.webSessionExpiresAt = 0;
+      this.writeJson(response, 200, { authenticated: false }, { 'Set-Cookie': this.expiredSessionCookie() });
+      return;
+    }
     if (request.method !== 'POST') {
-      this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET, POST' });
+      this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET, POST, DELETE' });
       return;
     }
     if (!this.hasSameOrigin(request)) {
@@ -368,6 +378,10 @@ export class SebastianHttpServer {
     }
     const candidate = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
     return candidate !== undefined && timingSafeEqual(digestToken(candidate), this.webSessionDigest);
+  }
+
+  private expiredSessionCookie(): string {
+    return `${WEB_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
   }
 
   private writeWebAsset(response: ServerResponse, contentType: string, body: string): void {

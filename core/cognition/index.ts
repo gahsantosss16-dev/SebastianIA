@@ -5,3 +5,4 @@ export * from './CognitiveDecisionValidator.js';
 export * from './CognitiveToolPolicy.js';
 export * from './OllamaCognitiveModelProvider.js';
 export * from './GeminiCognitiveModelProvider.js';
+export * from './CognitiveOperationalOrchestrator.js';

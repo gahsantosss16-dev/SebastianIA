@@ -79,7 +79,29 @@ test('SPEC-050: valid structured Gemini response becomes conversational text and
   assert.equal(body.includes('application/json'), true);
 });
 
-test('SPEC-050: Gemini decision payload excludes memory, files, observations and Tool descriptions', async () => {
+test('Gemini conversation payload includes bounded recent context without granting tools or authority', async () => {
+  let capturedBody = '';
+  const cognitive = provider(async (_url, init) => {
+    capturedBody = init.body as string;
+    return response(200, geminiEnvelope({ answer: 'Um exemplo contextual.' }));
+  });
+
+  await cognitive.respond?.({
+    text: 'Dê um exemplo disso.',
+    requestedAt: '2026-08-27T00:01:00.000Z',
+    recentExchanges: [{
+      requestText: 'Explique recursão.',
+      summary: 'Recursão reduz um problema em instâncias menores.',
+    }],
+  });
+
+  assert.equal(capturedBody.includes('Explique recursão.'), true);
+  assert.equal(capturedBody.includes('instâncias menores'), true);
+  assert.equal(capturedBody.includes('availableTools'), false);
+  assert.equal(capturedBody.includes('authorization'), false);
+});
+
+test('Gemini decision payload exposes only bounded operational context and excludes raw file contents', async () => {
   let capturedBody = '';
   const validDecision = {
     intent: 'conclude',
@@ -99,8 +121,11 @@ test('SPEC-050: Gemini decision payload excludes memory, files, observations and
   const result = await cognitive.decide(decisionRequest());
 
   assert.equal(result.outcome, 'decided');
-  for (const forbidden of ['memória que não pode sair', 'secret.txt', 'conteúdo do arquivo', 'git.status', 'fs.readFile', 'segredo interno']) {
+  for (const forbidden of ['secret.txt', 'conteúdo do arquivo']) {
     assert.equal(capturedBody.includes(forbidden), false, forbidden);
+  }
+  for (const expected of ['memória que não pode sair', 'git.status', 'fs.readFile', 'segredo interno']) {
+    assert.equal(capturedBody.includes(expected), true, expected);
   }
   assert.equal(capturedBody.includes('investigue o problema'), true);
 });

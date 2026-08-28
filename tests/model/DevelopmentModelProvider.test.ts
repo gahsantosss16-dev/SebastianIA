@@ -104,6 +104,13 @@ test('SPEC-050 regression: general questions remain eligible for cognitive conve
     'O que você consegue fazer?',
     'Me explique o que é TypeScript.',
     'Quero conversar sobre arquitetura de software.',
+    // Exact phrasing reported as a production regression: differs from the
+    // "consegue fazer" wording already covered above ("pode fazer" instead),
+    // plus a "como você pode me ajudar?" variant not covered anywhere else.
+    'o que voce pode fazer?',
+    'o que você pode fazer?',
+    'como você pode me ajudar?',
+    'quem é voce?',
   ];
 
   for (const text of messages) {
@@ -637,7 +644,12 @@ test('interpret recognizes a marker asking about the repository state as a useTo
     requestedAt: '2026-08-12T00:00:00.000Z',
   });
 
-  assert.deepEqual(decision, { intent: 'useTool', toolId: 'git.status', toolInput: {} });
+  assert.deepEqual(decision, {
+    intent: 'useTool',
+    toolId: 'git.status',
+    toolInput: {},
+    cognitiveOperationalEligible: true,
+  });
 });
 
 test('interpret recognizes "mostre as alterações atuais" as a useTool git.diff decision', async () => {
@@ -735,6 +747,7 @@ test('interpret resumes a named project using relevant remembered facts as the a
     intent: 'respond',
     answer: 'Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente, SPEC-044 homologada".',
     recordable: true,
+    cognitiveFallbackEligible: true,
   });
 });
 
@@ -777,6 +790,7 @@ test('interpret answers a short continuation reference ("então continua") using
     answer:
       'Continuando de onde paramos: Retomando de onde paramos: você registrou "o projeto Sebastian IA está na fase de memória inteligente".',
     recordable: true,
+    cognitiveFallbackEligible: true,
   });
 });
 

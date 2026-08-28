@@ -1,5 +1,5 @@
 import type { Logger } from '../core/logger.js';
-import { RestrictedOnlineTool } from '../core/tool/index.js';
+import { GIT_STATUS_TOOL_ID, OnlineReadOnlyTool } from '../core/tool/index.js';
 import type { CognitiveModelProvider } from '../core/cognition/index.js';
 import { createSebastianApplication } from './SebastianApplication.js';
 
@@ -13,11 +13,19 @@ import { createSebastianApplication } from './SebastianApplication.js';
 export function createOnlineSebastianApplication(
   logger?: Logger,
   cognitiveModelProvider?: CognitiveModelProvider,
+  dataDir?: string,
 ) {
   return createSebastianApplication({
     ...(logger === undefined ? {} : { logger }),
     authorizedCommands: [],
-    specializedTool: new RestrictedOnlineTool(),
+    specializedTool: new OnlineReadOnlyTool(process.cwd()),
     ...(cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider }),
+    cognitiveOperationalTools: [{
+      toolId: GIT_STATUS_TOOL_ID,
+      description: 'Consulta branch e alterações pendentes do repositório atual, sem modificar nada.',
+      requiresAuthorization: false,
+      requiredStringArguments: [],
+    }],
+    ...(dataDir === undefined ? {} : { dataDir }),
   });
 }

@@ -21,6 +21,7 @@ const VALID_COMPLETION_STATES: ReadonlySet<string> = new Set([
 
 /** Defensive ceiling on the logged justification - never a chain-of-thought transcript, just a short operational line. Overlong values are truncated, not rejected. */
 export const MAX_REASONING_SUMMARY_CHARS = 300;
+export const MAX_COGNITIVE_FINAL_ANSWER_CHARS = 8_000;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
@@ -86,6 +87,7 @@ export function parseCognitiveDecision(raw: unknown): CognitiveDecision | null {
 
   let toolId: string | undefined;
   let toolArguments: Readonly<Record<string, unknown>> | undefined;
+  let finalAnswer: string | undefined;
 
   if (nextAction === 'invokeTool') {
     if (!isNonEmptyString(raw.toolId)) {
@@ -99,6 +101,14 @@ export function parseCognitiveDecision(raw: unknown): CognitiveDecision | null {
     toolArguments = isPlainObject(raw.toolArguments) ? raw.toolArguments : {};
   }
 
+  if (
+    raw.finalAnswer !== undefined &&
+    (!isNonEmptyString(raw.finalAnswer) || raw.finalAnswer.length > MAX_COGNITIVE_FINAL_ANSWER_CHARS)
+  ) {
+    return null;
+  }
+  finalAnswer = isNonEmptyString(raw.finalAnswer) ? raw.finalAnswer : undefined;
+
   const decision: CognitiveDecision = {
     intent: intent as CognitiveIntent,
     goal,
@@ -110,6 +120,7 @@ export function parseCognitiveDecision(raw: unknown): CognitiveDecision | null {
     confidence,
     ...(toolId === undefined ? {} : { toolId }),
     ...(toolArguments === undefined ? {} : { toolArguments }),
+    ...(finalAnswer === undefined ? {} : { finalAnswer }),
   };
 
   return Object.freeze(decision);

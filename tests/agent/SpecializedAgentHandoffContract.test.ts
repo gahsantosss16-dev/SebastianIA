@@ -71,6 +71,43 @@ test('SPEC-050: structural deterministic fallback calls cognitive respond with o
   }
 });
 
+test('cognitive conversation receives the bounded recent context already hydrated by Memory', async () => {
+  let request: unknown;
+  const agent = cognitiveFallbackAgent(
+    { outcome: 'responded', answer: 'Continuando a explicação anterior.' },
+    (value) => {
+      request = value;
+    },
+  );
+  const recentExchanges = [{
+    id: 'turn-1',
+    requestText: 'Explique recursão.',
+    summary: 'Recursão reduz um problema a versões menores dele mesmo.',
+    kind: 'respond',
+    recordedAt: '2026-08-27T00:00:00.000Z',
+  }];
+
+  await agent.handoff({
+    ...fallbackHandoff('Dê um exemplo disso.'),
+    payload: {
+      commandInput: {
+        type: 'converse',
+        input: { text: 'Dê um exemplo disso.' },
+        temporary: { values: { recentExchanges } },
+      },
+    },
+  });
+
+  assert.deepEqual(request, {
+    text: 'Dê um exemplo disso.',
+    requestedAt: '2026-08-27T00:00:01.000Z',
+    recentExchanges: [{
+      requestText: 'Explique recursão.',
+      summary: 'Recursão reduz um problema a versões menores dele mesmo.',
+    }],
+  });
+});
+
 test('SPEC-050: known deterministic response never calls cognitive respond', async () => {
   let calls = 0;
   const modelProvider: ModelProvider = {

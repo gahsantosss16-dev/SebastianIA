@@ -73,6 +73,8 @@ export interface ModelInterpretationUseToolDecision {
   readonly intent: 'useTool';
   readonly toolId: string;
   readonly toolInput: Readonly<Record<string, unknown>>;
+  /** Allows the cognitive operational loop to generalize this safe decision while preserving it as fallback. */
+  readonly cognitiveOperationalEligible?: boolean;
 }
 
 /**

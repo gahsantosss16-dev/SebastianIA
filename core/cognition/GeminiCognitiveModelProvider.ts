@@ -67,6 +67,7 @@ const DECISION_SCHEMA = Object.freeze({
       enum: ['inProgress', 'completed', 'failed', 'insufficientEvidence'],
     },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
+    finalAnswer: { type: 'string' },
   },
   required: [
     'intent',
@@ -81,14 +82,18 @@ const DECISION_SCHEMA = Object.freeze({
 });
 
 const CONVERSATION_SYSTEM_INSTRUCTION =
-  'Você é Sebastian. Responda à mensagem do usuário de forma útil, direta e segura. ' +
-  'Você não possui Tools, filesystem, Git, comandos, memória ou autorização para executar ações. ' +
+  'Você é Sebastian, um assistente generalista. Use seu conhecimento geral e raciocínio para responder, explicar, ' +
+  'comparar, resumir, escrever, revisar e planejar de forma útil, direta e segura. ' +
+  'Quando houver contexto recente, use-o somente para compreender a conversa e referências do usuário. ' +
+  'Você não possui Tools, filesystem, Git, comandos nem autorização para executar ações. ' +
+  'Não invente fatos atuais ou específicos que dependam dessas fontes; explique a limitação quando necessário. ' +
   'Retorne somente um objeto JSON com o campo string "answer".';
 
 const DECISION_SYSTEM_INSTRUCTION =
-  'Você é o motor cognitivo do Sebastian e apenas propõe uma decisão estruturada. ' +
-  'Nenhuma Tool foi disponibilizada nesta integração online; não invente toolId nem alegue ter executado ações. ' +
-  'Prefira requestMoreEvidence ou concludeFailed quando não houver evidência suficiente. ' +
+  'Você é o motor operacional do Sebastian e propõe exatamente uma decisão estruturada por vez. ' +
+  'Use somente toolIds presentes em availableTools. Nunca conceda autorização, invente Tool ou alegue ter executado uma ação. ' +
+  'Para responder diretamente ou finalizar após observar evidência, use concludeCompleted e forneça finalAnswer. ' +
+  'Se uma alteração for necessária mas não estiver autorizada/disponível, explique isso em finalAnswer sem executá-la. ' +
   'Retorne somente o objeto JSON solicitado e uma reasoningSummary curta, nunca raciocínio detalhado.';
 
 /** Native-fetch adapter for the official Gemini generateContent HTTPS API. */
@@ -137,7 +142,11 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
 
     const result = await this.generateStructured(
       CONVERSATION_SYSTEM_INSTRUCTION,
-      JSON.stringify({ text: request.text, requestedAt: request.requestedAt }),
+      JSON.stringify({
+        text: request.text,
+        requestedAt: request.requestedAt,
+        ...(request.recentExchanges === undefined ? {} : { recentExchanges: request.recentExchanges }),
+      }),
       ANSWER_SCHEMA,
     );
     if (result.outcome !== 'generated') {
@@ -177,12 +186,14 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       return { outcome: 'invalidResponse', reason: 'Requisição de decisão cognitiva inválida.' };
     }
 
-    // Deliberately excludes Memory, file excerpts, Tool descriptions and raw
-    // observations from the remote payload. The online profile exposes none
-    // of those capabilities to Gemini.
+    // Raw file contents remain excluded. The application supplies only a
+    // bounded catalog and bounded summaries; neither grants authority.
     const safeRequest = {
       objective: request.objective,
       authorization: request.authorization,
+      relevantMemory: request.relevantMemory,
+      recentObservations: request.recentObservations,
+      availableTools: request.availableTools,
       stepsTaken: request.stepsTaken,
       stepsRemaining: request.stepsRemaining,
       requestedAt: request.requestedAt,

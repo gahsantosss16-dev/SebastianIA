@@ -31,7 +31,11 @@ import {
   type GoalExecutionContext,
   type GoalExecutionResult,
 } from '../development/index.js';
-import type { CognitiveModelProvider } from '../cognition/index.js';
+import {
+  CognitiveOperationalOrchestrator,
+  type CognitiveModelProvider,
+  type OperationalToolPolicyEntry,
+} from '../cognition/index.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
@@ -57,6 +61,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
   private readonly developmentTaskOrchestrator: DevelopmentTaskOrchestratorLike;
   private readonly goalExecutionOrchestrator: GoalExecutionOrchestratorLike;
   private readonly cognitiveModelProvider: CognitiveModelProvider | undefined;
+  private readonly cognitiveOperationalOrchestrator: CognitiveOperationalOrchestrator | undefined;
 
   public constructor(
     specializedTool: SpecializedTool = new InMemorySpecializedTool(),
@@ -64,12 +69,16 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     developmentTaskOrchestrator?: DevelopmentTaskOrchestratorLike,
     goalExecutionOrchestrator?: GoalExecutionOrchestratorLike,
     cognitiveModelProvider?: CognitiveModelProvider,
+    cognitiveOperationalTools?: readonly OperationalToolPolicyEntry[],
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
     this.developmentTaskOrchestrator = developmentTaskOrchestrator ?? new DevelopmentTaskOrchestrator(specializedTool);
     this.goalExecutionOrchestrator = goalExecutionOrchestrator ?? new GoalExecutionOrchestrator(specializedTool);
     this.cognitiveModelProvider = cognitiveModelProvider;
+    this.cognitiveOperationalOrchestrator = cognitiveModelProvider && cognitiveOperationalTools && cognitiveOperationalTools.length > 0
+      ? new CognitiveOperationalOrchestrator(specializedTool, cognitiveModelProvider, cognitiveOperationalTools)
+      : undefined;
   }
 
   public async handoff(input: SpecializedAgentHandoffInput): Promise<SpecializedAgentHandoffResult> {
@@ -105,15 +114,57 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       requestedAt: input.requestedAt,
     });
 
-    const effectiveDecision = await this.applyCognitiveConversationFallback(decision, text, input.requestedAt);
+    const operationalDecision = await this.applyCognitiveOperationalDecision(
+      decision,
+      text,
+      input.requestedAt,
+      input.executionId,
+      input.responsibilityId,
+      recentExchanges,
+    );
+    const effectiveDecision = await this.applyCognitiveConversationFallback(
+      operationalDecision,
+      text,
+      input.requestedAt,
+      recentExchanges,
+    );
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
     return this.withConversationTurn(result, text, effectiveDecision);
+  }
+
+  private async applyCognitiveOperationalDecision(
+    decision: ModelInterpretationDecision,
+    text: string,
+    requestedAt: string,
+    executionId: string,
+    responsibilityId: string,
+    recentExchanges: readonly RecentExchangeRecord[],
+  ): Promise<ModelInterpretationDecision> {
+    const eligible =
+      (decision.intent === 'respond' && decision.cognitiveFallbackEligible === true) ||
+      (decision.intent === 'useTool' && decision.cognitiveOperationalEligible === true);
+    if (!eligible || !this.cognitiveOperationalOrchestrator) {
+      return decision;
+    }
+
+    const result = await this.cognitiveOperationalOrchestrator.execute(text, {
+      executionId,
+      responsibilityId,
+      requestedAt,
+      relevantMemory: recentExchanges.map((exchange) => ({
+        content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
+      })),
+    });
+    return result.outcome === 'answered'
+      ? { intent: 'respond', answer: result.answer, recordable: true }
+      : decision;
   }
 
   private async applyCognitiveConversationFallback(
     decision: ModelInterpretationDecision,
     text: string,
     requestedAt: string,
+    recentExchanges: readonly RecentExchangeRecord[],
   ): Promise<ModelInterpretationDecision> {
     if (
       decision.intent !== 'respond' ||
@@ -124,7 +175,18 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     }
 
     try {
-      const result = await this.cognitiveModelProvider.respond({ text, requestedAt });
+      const result = await this.cognitiveModelProvider.respond({
+        text,
+        requestedAt,
+        ...(recentExchanges.length === 0
+          ? {}
+          : {
+              recentExchanges: recentExchanges.map((exchange) => ({
+                requestText: exchange.requestText,
+                summary: exchange.summary,
+              })),
+            }),
+      });
       if (result.outcome !== 'responded' || typeof result.answer !== 'string' || result.answer.trim() === '') {
         return decision;
       }

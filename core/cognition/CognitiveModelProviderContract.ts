@@ -91,6 +91,8 @@ export interface CognitiveDecision {
   readonly completionState: CognitiveCompletionState;
   /** 0 (no confidence) to 1 (certain). */
   readonly confidence: number;
+  /** User-facing result, accepted only for a concludeCompleted decision. */
+  readonly finalAnswer?: string;
 }
 
 /**
@@ -108,6 +110,14 @@ export type CognitiveDecisionResult =
 export interface CognitiveConversationRequest {
   readonly text: string;
   readonly requestedAt: string;
+  /**
+   * Small, already-bounded conversation window selected by Memory. This is
+   * session context, not general knowledge and never grants authority.
+   */
+  readonly recentExchanges?: readonly {
+    readonly requestText: string;
+    readonly summary: string;
+  }[];
 }
 
 /**

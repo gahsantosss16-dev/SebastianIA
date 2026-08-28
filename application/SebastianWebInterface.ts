@@ -276,12 +276,21 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   const send = document.querySelector('#send-button');
   const messages = document.querySelector('#messages');
   const newConversationButton = document.querySelector('#new-conversation-button');
+  const logoutButton = document.querySelector('#logout-button');
   let pending = false;
 
   const showChat = () => {
     unlock.classList.add('hidden');
     chat.classList.remove('hidden');
     input.focus();
+  };
+
+  const showUnlock = (message = '') => {
+    chat.classList.add('hidden');
+    unlock.classList.remove('hidden');
+    unlockError.textContent = message;
+    tokenInput.value = '';
+    tokenInput.focus();
   };
 
   const buildEmptyState = () => {
@@ -332,6 +341,17 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
 
   if (newConversationButton) {
     newConversationButton.addEventListener('click', resetConversation);
+  }
+
+  if (logoutButton) {
+    logoutButton.addEventListener('click', async () => {
+      if (pending) return;
+      try {
+        await fetch('/api/web/session', { method: 'DELETE', credentials: 'same-origin' });
+      } finally {
+        showUnlock('Sessão encerrada com segurança.');
+      }
+    });
   }
 
   const parseError = async (response, fallback) => {
@@ -413,10 +433,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       thinking.remove();
       if (!response.ok) {
         if (response.status === 401) {
-          chat.classList.add('hidden');
-          unlock.classList.remove('hidden');
-          unlockError.textContent = 'Sua sessão expirou. Informe o acesso novamente.';
-          tokenInput.focus();
+          showUnlock('Sua sessão expirou. Informe o acesso novamente.');
           return;
         }
         appendMessage('sebastian', await parseError(response, 'Não consegui concluir esta resposta. Tente novamente.'), 'error');
@@ -484,6 +501,7 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
           <span class="status-dot" aria-hidden="true"></span>
           <span>Online</span>
         </div>
+        <button class="new-conversation" id="logout-button" type="button">Sair</button>
       </aside>
       <main class="conversation" aria-label="Conversa com Sebastian">
         <div class="messages" id="messages" aria-live="polite">

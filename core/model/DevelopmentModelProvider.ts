@@ -192,7 +192,7 @@ export class DevelopmentModelProvider implements ModelProvider {
     const lowerText = request.text.toLowerCase();
 
     if (lowerText.includes('estado') && lowerText.includes('repositório')) {
-      return { intent: 'useTool', toolId: GIT_STATUS_TOOL_ID, toolInput: {} };
+      return { intent: 'useTool', toolId: GIT_STATUS_TOOL_ID, toolInput: {}, cognitiveOperationalEligible: true };
     }
 
     if (lowerText.includes(GIT_DIFF_MARKER)) {
@@ -235,11 +235,19 @@ export class DevelopmentModelProvider implements ModelProvider {
     }
 
     if (composed.intent === 'resumptionReference') {
-      return { intent: 'respond', ...this.composeResumptionAnswer(composed) };
+      return {
+        intent: 'respond',
+        ...this.composeResumptionAnswer(composed),
+        ...(composed.relevantMemories.length === 0 ? {} : { cognitiveFallbackEligible: true }),
+      };
     }
 
     if (composed.intent === 'continuationReference') {
-      return { intent: 'respond', ...this.composeContinuationAnswer(composed) };
+      return {
+        intent: 'respond',
+        ...this.composeContinuationAnswer(composed),
+        ...(composed.mostRecentExchange === undefined ? {} : { cognitiveFallbackEligible: true }),
+      };
     }
 
     if (composed.intent === 'question' && this.isExplicitMemoryQuestion(request.text)) {

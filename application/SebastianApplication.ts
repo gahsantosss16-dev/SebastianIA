@@ -13,7 +13,7 @@ import {
   type AuthorizedCommandDefinition,
   type SpecializedTool,
 } from '../core/tool/index.js';
-import type { CognitiveModelProvider } from '../core/cognition/index.js';
+import type { CognitiveModelProvider, OperationalToolPolicyEntry } from '../core/cognition/index.js';
 import {
   LOCAL_GREETING_CAPABILITY_ID,
   LOCAL_GREETING_COMMAND_TYPE,
@@ -64,6 +64,7 @@ export interface SebastianApplicationOptions {
    * `OllamaCognitiveModelProvider`).
    */
   readonly cognitiveModelProvider?: CognitiveModelProvider;
+  readonly cognitiveOperationalTools?: readonly OperationalToolPolicyEntry[];
   /**
    * Optional composition-root Tool override. The default remains the complete
    * local dispatcher used by the CLI. The online entrypoint supplies a
@@ -98,6 +99,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
       allowedFilesystemRoot,
       authorizedCommands,
       ...(options.cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider: options.cognitiveModelProvider }),
+      ...(options.cognitiveOperationalTools === undefined ? {} : { cognitiveOperationalTools: options.cognitiveOperationalTools }),
       ...(options.specializedTool === undefined ? {} : { specializedTool: options.specializedTool }),
       bindings: [
         {

@@ -11,6 +11,7 @@ import { createOnlineSebastianApplication } from '../../application/OnlineSebast
 import {
   DEFAULT_ONLINE_PORT,
   MAX_HTTP_BODY_BYTES,
+  WEB_SESSION_TTL_MS,
   resolveOnlineApiToken,
   resolveOnlinePort,
   SebastianHttpServer,
@@ -39,6 +40,7 @@ async function startServer(
   application: TestApplication,
   logger: Logger = silentLogger,
   executionTimeoutMs?: number,
+  now: () => Date = () => new Date('2026-08-27T12:00:00.000Z'),
 ): Promise<RunningTestServer> {
   const http = new SebastianHttpServer({
     application,
@@ -46,7 +48,7 @@ async function startServer(
     logger,
     requestId: () => 'request-test-id',
     sessionToken: () => 'opaque-web-session-test-token',
-    now: () => new Date('2026-08-27T12:00:00.000Z'),
+    now,
     ...(executionTimeoutMs === undefined ? {} : { executionTimeoutMs }),
   });
   const started = await http.listen(0, '127.0.0.1');
@@ -86,7 +88,8 @@ async function createWebSession(baseUrl: string, token = API_TOKEN): Promise<str
   assert.ok(setCookie);
   assert.match(setCookie, /HttpOnly/);
   assert.match(setCookie, /Secure/);
-  assert.match(setCookie, /SameSite=Strict/);
+    assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Max-Age=43200/);
   return setCookie.split(';', 1)[0] ?? '';
 }
 
@@ -146,6 +149,8 @@ test('WEB: GET / serves the responsive Sebastian interface without embedding env
       'SEBASTIAN_API_TOKEN',
       'SEBASTIAN_COGNITIVE_API_KEY',
       'process.env',
+      'localStorage',
+      'sessionStorage',
     ]) {
       assert.equal(html.includes(forbidden), false);
       assert.equal(script.includes(forbidden), false);
@@ -153,6 +158,43 @@ test('WEB: GET / serves the responsive Sebastian interface without embedding env
   } finally {
     if (previousCognitiveKey === undefined) delete process.env.SEBASTIAN_COGNITIVE_API_KEY;
     else process.env.SEBASTIAN_COGNITIVE_API_KEY = previousCognitiveKey;
+    await running.close();
+  }
+});
+
+test('WEB: session survives page reopen, expires after 12 hours and logout invalidates it server-side', async () => {
+  let nowMs = new Date('2026-08-27T12:00:00.000Z').getTime();
+  const running = await startServer(successfulApplication(), silentLogger, undefined, () => new Date(nowMs));
+  try {
+    const invalid = await fetch(`${running.baseUrl}/api/web/session`, {
+      method: 'POST',
+      headers: { Origin: running.baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'credencial-inválida' }),
+    });
+    assert.equal(invalid.status, 401);
+
+    const cookie = await createWebSession(running.baseUrl);
+    const refresh = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
+    assert.deepEqual(await refresh.json(), { authenticated: true });
+
+    const reopened = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
+    assert.deepEqual(await reopened.json(), { authenticated: true });
+
+    const logout = await fetch(`${running.baseUrl}/api/web/session`, {
+      method: 'DELETE',
+      headers: { Origin: running.baseUrl, Cookie: cookie },
+    });
+    assert.equal(logout.status, 200);
+    assert.match(logout.headers.get('set-cookie') ?? '', /Max-Age=0/);
+    const afterLogout = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
+    assert.deepEqual(await afterLogout.json(), { authenticated: false });
+
+    const renewedCookie = await createWebSession(running.baseUrl);
+    nowMs += WEB_SESSION_TTL_MS;
+    const expired = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: renewedCookie } });
+    assert.deepEqual(await expired.json(), { authenticated: false });
+    assert.equal((await webConverse(running.baseUrl, renewedCookie, 'Olá')).status, 401);
+  } finally {
     await running.close();
   }
 });
@@ -441,6 +483,7 @@ test('SPEC-049: the real online application preserves deterministic conversation
 });
 
 test('SPEC-050: real online application uses remote cognition only for unknown text and never forwards HTTP token', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-online-cognitive-context-'));
   const requests: unknown[] = [];
   let toolLikeRequestCount = 0;
   const cognitiveSecret = 'fake-cognitive-secret-that-must-never-be-forwarded';
@@ -454,7 +497,7 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
       return { outcome: 'responded', answer: 'Resposta remota segura.' };
     },
   };
-  const application = createOnlineSebastianApplication(silentLogger, cognitiveModelProvider);
+  const application = createOnlineSebastianApplication(silentLogger, cognitiveModelProvider, dataDir);
   const running = await startServer(application);
   try {
     const known = await converse(running.baseUrl, 'Quais são minhas tarefas?');
@@ -472,9 +515,25 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
       {
         text: 'Explique a diferença entre recursão e iteração.',
         requestedAt: '2026-08-27T12:00:00.000Z',
+        recentExchanges: [{
+          requestText: 'Quais são minhas tarefas?',
+          summary: 'Você não tem nenhuma tarefa pendente.',
+        }],
       },
     ]);
     assert.equal(JSON.stringify(requests).includes(API_TOKEN), false);
+
+    const contextual = await converse(running.baseUrl, 'Agora compare as duas abordagens.');
+    assert.equal(contextual.status, 200);
+    assert.equal((await contextual.json() as { message: string }).message, 'Resposta remota segura.');
+    assert.deepEqual(requests[1], {
+      text: 'Agora compare as duas abordagens.',
+      requestedAt: '2026-08-27T12:00:00.000Z',
+      recentExchanges: [{
+        requestText: 'Explique a diferença entre recursão e iteração.',
+        summary: 'Resposta remota segura.',
+      }],
+    });
 
     const webCookie = await createWebSession(running.baseUrl);
     const productionRegression = await webConverse(
@@ -488,15 +547,19 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
       message: 'Resposta remota segura.',
       requestId: 'request-test-id',
     });
-    assert.deepEqual(requests[1], {
+    assert.deepEqual(requests[2], {
       text: 'Oi Sebastian. Você está online? Me diga quem você é e o que consegue fazer hoje.',
       requestedAt: '2026-08-27T12:00:00.000Z',
+      recentExchanges: [{
+        requestText: 'Agora compare as duas abordagens.',
+        summary: 'Resposta remota segura.',
+      }],
     });
 
     const explicitMemory = await webConverse(running.baseUrl, webCookie, 'O que você sabe sobre mim?');
     assert.equal(explicitMemory.status, 200);
     assert.equal((await explicitMemory.json() as { message: string }).message, 'Ainda não tenho nenhuma memória registrada sobre isso.');
-    assert.equal(requests.length, 2, 'explicit memory query must not reach cognitive conversation');
+    assert.equal(requests.length, 3, 'explicit memory query must not reach cognitive conversation');
     assert.equal(JSON.stringify(requests).includes(cognitiveSecret), false);
 
     const sensitive = await converse(running.baseUrl, 'Crie um arquivo chamado invaded.txt com: conteúdo perigoso.');
@@ -504,6 +567,7 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
     assert.equal(toolLikeRequestCount, 0, 'deterministic Tool intent must never be delegated to conversational cognition');
   } finally {
     await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 

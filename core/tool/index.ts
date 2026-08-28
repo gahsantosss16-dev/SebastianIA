@@ -8,3 +8,4 @@ export * from './LocalGitInspectionTool.js';
 export * from './LocalAuthorizedCommandTool.js';
 export * from './LocalToolDispatcher.js';
 export * from './RestrictedOnlineTool.js';
+export * from './OnlineReadOnlyTool.js';
