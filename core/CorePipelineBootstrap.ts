@@ -42,6 +42,7 @@ import {
 import { DevelopmentModelProvider, type ModelProvider } from './model/index.js';
 import { GoalExecutionOrchestrator, MAX_GOAL_EXECUTION_STEPS } from './development/index.js';
 import type { CognitiveModelProvider, OperationalToolPolicyEntry } from './cognition/index.js';
+import type { Logger } from './logger.js';
 
 export interface CorePipelineBootstrapInput {
   readonly providers: readonly CapabilityProvider[];
@@ -81,6 +82,12 @@ export interface CorePipelineBootstrapInput {
    * has no reference to filesystem, Git or command adapters.
    */
   readonly specializedTool?: SpecializedTool;
+  /**
+   * Optional structural-only diagnostic logger, threaded down to the
+   * cognitive operational loop and the Agent's own fallback-eligibility
+   * bookkeeping - never given prompts, arguments or observation content.
+   */
+  readonly logger?: Logger;
 }
 
 interface CorePipelineExecutorLike {
@@ -109,6 +116,7 @@ export interface CorePipelineBootstrapFactories {
     goalExecutionOrchestrator: GoalExecutionOrchestrator,
     cognitiveModelProvider: CognitiveModelProvider | undefined,
     cognitiveOperationalTools: readonly OperationalToolPolicyEntry[] | undefined,
+    logger: Logger | undefined,
   ) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
@@ -148,8 +156,8 @@ export class CorePipelineBootstrap {
         ((tool, cognitiveModelProvider) => new GoalExecutionOrchestrator(tool, MAX_GOAL_EXECUTION_STEPS, cognitiveModelProvider)),
       buildSpecializedAgent:
         factories.buildSpecializedAgent ??
-        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools) =>
-          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools)),
+        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger) =>
+          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ??
         ((memoryFilePath) =>
@@ -179,6 +187,7 @@ export class CorePipelineBootstrap {
       goalExecutionOrchestrator,
       input.cognitiveModelProvider,
       input.cognitiveOperationalTools,
+      input.logger,
     );
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
@@ -338,6 +347,7 @@ export class CorePipelineBootstrap {
     goalExecutionOrchestrator: GoalExecutionOrchestrator,
     cognitiveModelProvider: CognitiveModelProvider | undefined,
     cognitiveOperationalTools: readonly OperationalToolPolicyEntry[] | undefined,
+    logger: Logger | undefined,
   ): SpecializedAgent {
     try {
       const specializedAgent = this.factories.buildSpecializedAgent(
@@ -346,6 +356,7 @@ export class CorePipelineBootstrap {
         goalExecutionOrchestrator,
         cognitiveModelProvider,
         cognitiveOperationalTools,
+        logger,
       );
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');

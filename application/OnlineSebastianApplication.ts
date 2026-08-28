@@ -37,6 +37,16 @@ const LOCAL_OPERATIONAL_TOOLS: readonly OperationalToolPolicyEntry[] = [
 ];
 
 /**
+ * A message unambiguously about GitHub and about commits specifically (both
+ * words present, any order/casing) - matched deterministically here only to
+ * decide WHICH read-only capability to force-run first; the model still
+ * composes the actual reply from the resulting observation.
+ */
+const GITHUB_COMMIT_INTENT_PATTERN = /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i;
+/** A message that mentions GitHub generally (project/status/access...) without specifically asking about commits. */
+const GITHUB_GENERAL_INTENT_PATTERN = /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i;
+
+/**
  * Investigation tools for GitHub projects previously registered by the
  * application (see `GitHubProjectRegistryConfiguration.ts`). `projectId` is
  * the only way any of these reach a repository - it is resolved against the
@@ -46,14 +56,30 @@ const LOCAL_OPERATIONAL_TOOLS: readonly OperationalToolPolicyEntry[] = [
  * required string arguments, so operation-only knobs like `limit` remain a
  * Tool-level capability, not one the model can set. None of these ever
  * proposes a write, so none declares `requiresAuthorization`.
+ *
+ * `github.getProject` and `github.listCommits` additionally declare a
+ * `deterministicIntent` route (only when exactly one project is registered,
+ * so there is never ambiguity about which one to use): a message
+ * unambiguously about GitHub always causes the orchestrator to gather a real
+ * observation from the configured project BEFORE the model is ever
+ * consulted, so a model's first `concludeCompleted` can never claim missing
+ * GitHub access without that Tool having actually been tried first.
  */
-const GITHUB_OPERATIONAL_TOOLS: readonly OperationalToolPolicyEntry[] = [
-  { toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'] },
-  { toolId: GITHUB_LIST_TREE_TOOL_ID, description: 'Lista arquivos e pastas de um diretório do projeto GitHub autorizado; path vazio lista a raiz.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
-  { toolId: GITHUB_READ_FILE_TOOL_ID, description: 'Lê um arquivo do projeto GitHub autorizado; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
-  { toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'] },
-  { toolId: GITHUB_COMPARE_BRANCH_TOOL_ID, description: 'Compara a branch principal do projeto GitHub autorizado com outra ref; exige ref.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'ref'] },
-];
+function githubOperationalTools(defaultProjectId: string | undefined): readonly OperationalToolPolicyEntry[] {
+  const generalRoute = defaultProjectId === undefined ? {} : {
+    deterministicIntent: { pattern: GITHUB_GENERAL_INTENT_PATTERN, buildArguments: () => ({ projectId: defaultProjectId }) },
+  };
+  const commitRoute = defaultProjectId === undefined ? {} : {
+    deterministicIntent: { pattern: GITHUB_COMMIT_INTENT_PATTERN, buildArguments: () => ({ projectId: defaultProjectId }) },
+  };
+  return [
+    { toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...generalRoute },
+    { toolId: GITHUB_LIST_TREE_TOOL_ID, description: 'Lista arquivos e pastas de um diretório do projeto GitHub autorizado; path vazio lista a raiz.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
+    { toolId: GITHUB_READ_FILE_TOOL_ID, description: 'Lê um arquivo do projeto GitHub autorizado; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
+    { toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...commitRoute },
+    { toolId: GITHUB_COMPARE_BRANCH_TOOL_ID, description: 'Compara a branch principal do projeto GitHub autorizado com outra ref; exige ref.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'ref'] },
+  ];
+}
 
 export function createOnlineSebastianApplication(
   logger?: Logger,
@@ -73,17 +99,24 @@ export function createOnlineSebastianApplication(
   // (below, catalog + Tool omit it entirely) while Gemini, conversation,
   // memory and every local/read-only Tool continue exactly as before.
   let githubTool;
+  let defaultGitHubProjectId: string | undefined;
   try {
     const projectRegistry = createGitHubProjectRegistry(env, logger);
+    const registeredProjects = projectRegistry.listDescriptors();
     // A token without any registered project is not a usable GitHub
     // integration - never expose the Tool/catalog for a registry that has
     // nothing to investigate.
-    githubTool = projectRegistry.listDescriptors().length > 0
+    githubTool = registeredProjects.length > 0
       ? createGitHubReadOnlyTool(env, projectRegistry, logger)
       : undefined;
+    // Only set a deterministic default when exactly one project is
+    // registered - with more than one, guessing which one a bare mention of
+    // "GitHub" refers to would be inventing a target, never done here.
+    defaultGitHubProjectId = registeredProjects.length === 1 ? registeredProjects[0]!.id : undefined;
   } catch {
     logger?.warn('GitHub integration disabled: invalid project registry configuration');
     githubTool = undefined;
+    defaultGitHubProjectId = undefined;
   }
 
   return createSebastianApplication({
@@ -93,7 +126,7 @@ export function createOnlineSebastianApplication(
     ...(cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider }),
     cognitiveOperationalTools: githubTool === undefined
       ? LOCAL_OPERATIONAL_TOOLS
-      : [...LOCAL_OPERATIONAL_TOOLS, ...GITHUB_OPERATIONAL_TOOLS],
+      : [...LOCAL_OPERATIONAL_TOOLS, ...githubOperationalTools(defaultGitHubProjectId)],
     ...(dataDir === undefined ? {} : { dataDir }),
   });
 }

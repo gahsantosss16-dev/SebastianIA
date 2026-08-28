@@ -17,9 +17,17 @@ import {
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
+const DEFAULT_PROJECT_ID = 'sebastiania';
+/** Mirrors the deterministic routing OnlineSebastianApplication wires when exactly one project is registered - see CognitiveOperationalOrchestrator's `deterministicIntent`. */
 const githubCatalog = [
-  { toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'] },
-  { toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'] },
+  {
+    toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
+    deterministicIntent: { pattern: /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i, buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }) },
+  },
+  {
+    toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
+    deterministicIntent: { pattern: /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i, buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }) },
+  },
 ] as const;
 
 function input(text: string, second: number) {
@@ -75,7 +83,7 @@ function commitsFetchImpl() {
   };
 }
 
-function buildApp(provider: CognitiveModelProvider, fetchImpl: ReturnType<typeof commitsFetchImpl>, root: string) {
+function buildApp(provider: CognitiveModelProvider, fetchImpl: ReturnType<typeof commitsFetchImpl>, root: string, effectiveLogger: Logger = logger) {
   const registry = sebastianRegistry();
   const githubTool = new GitHubReadOnlyTool({ token: 'fake-token', registry, fetchImpl });
   const onlineTool = new OnlineReadOnlyTool(root, [], githubTool);
@@ -87,10 +95,18 @@ function buildApp(provider: CognitiveModelProvider, fetchImpl: ReturnType<typeof
     },
   };
   const app = createSebastianApplication({
-    logger, dataDir: root, specializedTool: tool, authorizedCommands: [],
+    logger: effectiveLogger, dataDir: root, specializedTool: tool, authorizedCommands: [],
     cognitiveModelProvider: provider, cognitiveOperationalTools: githubCatalog,
   });
   return { app, invoked };
+}
+
+function capturingLogger(): { readonly logger: Logger; readonly calls: Array<{ readonly level: string; readonly message: string; readonly metadata: unknown }> } {
+  const calls: Array<{ readonly level: string; readonly message: string; readonly metadata: unknown }> = [];
+  const record = (level: string) => (message: string, metadata?: Record<string, unknown>) => {
+    calls.push({ level, message, metadata });
+  };
+  return { calls, logger: { debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') } };
 }
 
 test('an explicit GitHub request for recent commits calls github.listCommits and the final answer cites the real commit', async () => {
@@ -140,7 +156,11 @@ test('the project alias "Sebastian" resolves to the same registered GitHub proje
     };
     const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
 
-    const result = await app.executeCommand(input('quais os commits recentes do Sebastian no GitHub?', 2));
+    // Deliberately omits "GitHub" so the model's own choice of the alias
+    // (not the deterministic default-project route, which needs the word
+    // "github" to fire) is what drives this specific tool call - this test
+    // is about alias resolution, not about deterministic routing.
+    const result = await app.executeCommand(input('quais os commits recentes do Sebastian?', 2));
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
     assert.match(String(result.output.message), /corrige timeout do provider cognitivo/);
@@ -203,8 +223,13 @@ test('a real GitHub Tool error (unregistered project) is reported as an honest o
     };
     const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
 
+    // Deliberately omits "GitHub"/"commits" so the deterministic default-
+    // project route never fires here - this test is specifically about a
+    // real Tool rejection for a project the MODEL itself chose, not about
+    // deterministic routing (which always targets the one registered,
+    // valid project and would otherwise mask this exact scenario).
     const result = await app.executeCommand(
-      input('verifique o projeto ProjetoInexistente no GitHub e me diga os commits recentes', 4),
+      input('verifique o projeto ProjetoInexistente', 4),
     );
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
@@ -271,14 +296,16 @@ test('a successful GitHub observation is used directly by the final answer - the
   }
 });
 
-test('decide proposing a non-actionable step before ever calling a Tool still never surfaces the "no access" fallback claim', async () => {
+test('decide proposing a non-actionable step never surfaces the "no access" fallback claim, and real evidence was already gathered deterministically first', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-github-non-actionable-'));
   try {
     let respondCalls = 0;
     const provider: CognitiveModelProvider = {
       // A structurally valid, successfully-parsed decision (matching production's
       // "decide respondeu com sucesso") whose nextAction the orchestrator does not
-      // treat as actionable - `toolCalls` stays 0 because no Tool was ever reached.
+      // treat as actionable. Deliberately never calls invokeTool itself - the
+      // real evidence in `invoked` below comes entirely from the deterministic
+      // route, which already ran before this decide() was ever consulted.
       decide: async () => ({
         outcome: 'decided',
         decision: {
@@ -303,7 +330,7 @@ test('decide proposing a non-actionable step before ever calling a Tool still ne
       input('verifique o projeto SebastianIA no GitHub e me diga quais foram os commits mais recentes', 7),
     );
 
-    assert.deepEqual(invoked, []);
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID], 'the deterministic route gathers real evidence even though decide() itself never proposes invokeTool');
     assert.equal(respondCalls, 0, 'a demonstrably-working decide() must never hand off to the "no tools" conversational fallback');
     assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
   } finally {
@@ -347,6 +374,91 @@ test('end-to-end: "Sebastian, verifique o projeto SebastianIA no GitHub e me dig
     assert.doesNotMatch(String(result.output.message), /ainda não sei responder/i);
     assert.equal(respondCalls, 0, 'the false-denial conversational fallback must never be reached once the Tool observation is real');
     assert.ok(durationMs < 5_000, 'no timeout: the whole exchange must resolve quickly');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the cognitive loop logs only structural metadata about each step - never the objective, arguments, observation content or final answer', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-instrumentation-'));
+  try {
+    const { logger: captured, calls } = capturingLogger();
+    const provider: CognitiveModelProvider = {
+      decide: async (request) => {
+        if (request.recentObservations.length === 0) {
+          return { outcome: 'decided', decision: decision({
+            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: 'SebastianIA' },
+          }) };
+        }
+        return { outcome: 'decided', decision: decision({
+          finalAnswer: `Os commits recentes do SebastianIA incluem: ${request.recentObservations[0]?.summary}`,
+        }) };
+      },
+    };
+    const { app } = buildApp(provider, commitsFetchImpl(), root, captured);
+
+    await app.executeCommand(
+      input('verifique o projeto SebastianIA no GitHub e me diga quais foram os commits mais recentes', 10),
+    );
+
+    const decisionSteps = calls.filter((call) => call.message === 'Cognitive operational decision step completed.');
+    const finished = calls.filter((call) => call.message === 'Cognitive operational loop finished.');
+    const deterministicRoutes = calls.filter((call) => call.message === 'Cognitive operational deterministic route completed.');
+    assert.ok(decisionSteps.length > 0 || deterministicRoutes.length > 0, 'expected at least one structural step to be logged');
+    assert.ok(finished.length > 0, 'expected the final outcome to be logged');
+
+    for (const call of [...decisionSteps, ...finished, ...deterministicRoutes]) {
+      const metadata = call.metadata as Record<string, unknown>;
+      for (const key of Object.keys(metadata)) {
+        assert.notEqual(key, 'objective');
+        assert.notEqual(key, 'toolArguments');
+        assert.notEqual(key, 'answer');
+        assert.notEqual(key, 'observation');
+        assert.notEqual(key, 'summary');
+      }
+    }
+
+    const serialized = JSON.stringify(calls);
+    assert.equal(serialized.includes('abcdef123456'), false, 'no observation content (commit sha) may be logged');
+    assert.equal(serialized.includes('corrige timeout do provider cognitivo'), false, 'no observation content (commit message) may be logged');
+    assert.equal(serialized.includes('verifique o projeto SebastianIA'), false, 'the objective text may never be logged');
+    assert.equal(serialized.includes('Os commits recentes do SebastianIA incluem'), false, 'the final answer text may never be logged');
+    assert.equal(serialized.includes('fake-token'), false, 'the token may never be logged');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('production evidence: a bare "github?" mention never reaches a model that hallucinates "no internet access" on an empty first turn', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-bare-mention-'));
+  try {
+    let respondCalls = 0;
+    const provider: CognitiveModelProvider = {
+      // Reproduces the exact production failure mode observed: on an empty
+      // first turn (no observations yet), the model concludes immediately
+      // with a false incapacity claim, without ever proposing invokeTool.
+      // The deterministic route must make this branch unreachable for any
+      // GitHub-intent objective, by guaranteeing recentObservations is
+      // already non-empty before decide() is ever called.
+      decide: async (request) => {
+        if (request.recentObservations.length === 0) {
+          return { outcome: 'decided', decision: decision({ finalAnswer: 'Não tenho acesso à internet ou a ferramentas externas.' }) };
+        }
+        return { outcome: 'decided', decision: decision({ finalAnswer: `Aqui está o que encontrei: ${request.recentObservations[0]?.summary}` }) };
+      },
+      respond: async () => {
+        respondCalls += 1;
+        return { outcome: 'responded', answer: 'Não tenho acesso à internet ou a ferramentas externas.' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    const result = await app.executeCommand(input('github?', 9));
+
+    assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID], 'a bare GitHub mention must still gather real evidence before any conclusion is trusted');
+    assert.equal(respondCalls, 0);
+    assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

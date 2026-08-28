@@ -39,6 +39,7 @@ import {
   type CognitiveModelProvider,
   type OperationalToolPolicyEntry,
 } from '../cognition/index.js';
+import type { Logger } from '../logger.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
@@ -77,6 +78,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
   private readonly goalExecutionOrchestrator: GoalExecutionOrchestratorLike;
   private readonly cognitiveModelProvider: CognitiveModelProvider | undefined;
   private readonly cognitiveOperationalOrchestrator: CognitiveOperationalOrchestrator | undefined;
+  private readonly logger: Logger | undefined;
 
   public constructor(
     specializedTool: SpecializedTool = new InMemorySpecializedTool(),
@@ -85,14 +87,16 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     goalExecutionOrchestrator?: GoalExecutionOrchestratorLike,
     cognitiveModelProvider?: CognitiveModelProvider,
     cognitiveOperationalTools?: readonly OperationalToolPolicyEntry[],
+    logger?: Logger,
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
     this.developmentTaskOrchestrator = developmentTaskOrchestrator ?? new DevelopmentTaskOrchestrator(specializedTool);
     this.goalExecutionOrchestrator = goalExecutionOrchestrator ?? new GoalExecutionOrchestrator(specializedTool);
     this.cognitiveModelProvider = cognitiveModelProvider;
+    this.logger = logger;
     this.cognitiveOperationalOrchestrator = cognitiveModelProvider && cognitiveOperationalTools && cognitiveOperationalTools.length > 0
-      ? new CognitiveOperationalOrchestrator(specializedTool, cognitiveModelProvider, cognitiveOperationalTools)
+      ? new CognitiveOperationalOrchestrator(specializedTool, cognitiveModelProvider, cognitiveOperationalTools, undefined, logger)
       : undefined;
   }
 
@@ -207,14 +211,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     requestedAt: string,
     recentExchanges: readonly RecentExchangeRecord[],
   ): Promise<ModelInterpretationDecision> {
-    if (
-      decision.intent !== 'respond' ||
-      decision.cognitiveFallbackEligible !== true ||
-      typeof this.cognitiveModelProvider?.respond !== 'function'
-    ) {
+    const fallbackEligible = decision.intent === 'respond' && decision.cognitiveFallbackEligible === true;
+    this.logger?.info('Cognitive conversational fallback eligibility resolved.', { fallbackEligible });
+    if (!fallbackEligible || typeof this.cognitiveModelProvider?.respond !== 'function') {
       return decision;
     }
 
+    this.logger?.info('Cognitive conversational fallback invoked.', { respondCalled: true });
     try {
       const result = await this.cognitiveModelProvider.respond({
         text,

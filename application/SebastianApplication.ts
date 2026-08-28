@@ -101,6 +101,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
       ...(options.cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider: options.cognitiveModelProvider }),
       ...(options.cognitiveOperationalTools === undefined ? {} : { cognitiveOperationalTools: options.cognitiveOperationalTools }),
       ...(options.specializedTool === undefined ? {} : { specializedTool: options.specializedTool }),
+      ...(options.logger === undefined ? {} : { logger: options.logger }),
       bindings: [
         {
           commandType: LOCAL_GREETING_COMMAND_TYPE,
