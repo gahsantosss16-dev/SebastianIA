@@ -7,6 +7,11 @@ import {
 import { InvalidCommandContextHydrationRequestError } from './CommandContextHydrationContractErrors.js';
 import { COMMAND_RESULTS_NAMESPACE } from './FileCommandResultMemoryWriter.js';
 import { FileMemoryStore } from './FileMemoryStore.js';
+import {
+  OPERATION_EVENT_RECORD_KIND,
+  type PendingOperationRecord,
+  type PendingOperationStatus,
+} from './PendingOperationContract.js';
 
 /** Command type recorded by the memory capability that persists a fact for later recall. */
 export const MEMORY_REMEMBER_COMMAND_TYPE = 'remember';
@@ -92,18 +97,61 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
     const facts = this.readRememberedFacts(succeededRecords);
     const pendingTasks = this.readPendingTasks(succeededRecords);
     const recentExchanges = this.readRecentExchanges(succeededRecords);
+    const pendingOperations = this.readPendingOperations(succeededRecords);
 
-    if (facts.length === 0 && pendingTasks.length === 0 && recentExchanges.length === 0) {
+    if (facts.length === 0 && pendingTasks.length === 0 && recentExchanges.length === 0 && pendingOperations.length === 0) {
       return { status: 'absent' };
     }
 
     const context: CommandContextHydrationSnapshot = {
       temporary: {
-        values: { rememberedFacts: facts, pendingTasks, recentExchanges },
+        values: {
+          rememberedFacts: facts,
+          pendingTasks,
+          recentExchanges,
+          ...(pendingOperations.length === 0 ? {} : { pendingOperations }),
+        },
       },
     };
 
     return { status: 'hydrated', context };
+  }
+
+  private readPendingOperations(
+    succeededRecords: readonly Readonly<Record<string, unknown>>[],
+  ): readonly PendingOperationRecord[] {
+    const latestById = new Map<string, PendingOperationRecord>();
+    for (const record of succeededRecords) {
+      const output = record.output as { readonly operationEvent?: unknown } | undefined;
+      const operation = this.parseOperation(output?.operationEvent);
+      if (operation) latestById.set(operation.id, operation);
+    }
+    return [...latestById.values()]
+      .filter((operation) => operation.status === 'proposed')
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  private parseOperation(value: unknown): PendingOperationRecord | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const raw = value as Partial<PendingOperationRecord>;
+    const statuses: readonly PendingOperationStatus[] = ['proposed', 'authorized', 'executing', 'completed', 'failed', 'cancelled', 'expired'];
+    if (
+      raw.memoryRecordKind !== OPERATION_EVENT_RECORD_KIND ||
+      typeof raw.id !== 'string' || raw.id.trim() === '' ||
+      typeof raw.objectiveId !== 'string' || raw.objectiveId.trim() === '' ||
+      typeof raw.objective !== 'string' || raw.objective.trim() === '' ||
+      typeof raw.proposedAction !== 'string' || raw.proposedAction.trim() === '' ||
+      typeof raw.toolId !== 'string' || raw.toolId.trim() === '' ||
+      !raw.toolArguments || typeof raw.toolArguments !== 'object' || Array.isArray(raw.toolArguments) ||
+      typeof raw.validationToolId !== 'string' || raw.validationToolId.trim() === '' ||
+      typeof raw.risk !== 'string' || raw.risk.trim() === '' ||
+      raw.authorizationRequirement !== 'explicitUserAuthorization' ||
+      !statuses.includes(raw.status as PendingOperationStatus) ||
+      typeof raw.createdAt !== 'string' || !Number.isFinite(Date.parse(raw.createdAt)) ||
+      typeof raw.expiresAt !== 'string' || !Number.isFinite(Date.parse(raw.expiresAt)) ||
+      typeof raw.updatedAt !== 'string' || !Number.isFinite(Date.parse(raw.updatedAt))
+    ) return undefined;
+    return structuredClone(raw) as PendingOperationRecord;
   }
 
   /**

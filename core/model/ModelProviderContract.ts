@@ -1,4 +1,5 @@
 import type { PendingTaskRecord, RecentExchangeRecord, RememberedFactRecord } from '../memory/index.js';
+import type { PendingOperationRecord } from '../memory/index.js';
 import type { DevelopmentTaskPlan } from '../development/DevelopmentTaskContract.js';
 import type { GoalDefinition } from '../development/GoalExecutionContract.js';
 
@@ -45,6 +46,7 @@ export interface ModelInterpretationRespondDecision {
    * by comparing user-facing answer text.
    */
   readonly cognitiveFallbackEligible?: boolean;
+  readonly pendingOperation?: PendingOperationRecord;
 }
 
 /** A decision to create a new pending task with the given content. */

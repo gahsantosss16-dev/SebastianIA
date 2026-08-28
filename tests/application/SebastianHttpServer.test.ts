@@ -515,10 +515,6 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
       {
         text: 'Explique a diferença entre recursão e iteração.',
         requestedAt: '2026-08-27T12:00:00.000Z',
-        recentExchanges: [{
-          requestText: 'Quais são minhas tarefas?',
-          summary: 'Você não tem nenhuma tarefa pendente.',
-        }],
       },
     ]);
     assert.equal(JSON.stringify(requests).includes(API_TOKEN), false);
@@ -550,10 +546,6 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
     assert.deepEqual(requests[2], {
       text: 'Oi Sebastian. Você está online? Me diga quem você é e o que consegue fazer hoje.',
       requestedAt: '2026-08-27T12:00:00.000Z',
-      recentExchanges: [{
-        requestText: 'Agora compare as duas abordagens.',
-        summary: 'Resposta remota segura.',
-      }],
     });
 
     const explicitMemory = await webConverse(running.baseUrl, webCookie, 'O que você sabe sobre mim?');

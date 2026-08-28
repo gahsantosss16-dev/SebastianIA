@@ -11,6 +11,7 @@ import {
   TASK_CREATED_RECORD_KIND,
   TASK_COMPLETED_RECORD_KIND,
   type PendingTaskRecord,
+  type PendingOperationRecord,
   type RecentExchangeRecord,
   type RememberedFactRecord,
 } from '../memory/index.js';
@@ -21,6 +22,7 @@ import type {
   ModelInterpretationUseToolDecision,
   ModelProvider,
 } from '../model/ModelProviderContract.js';
+import { ConversationContextComposer } from '../model/ConversationContextComposer.js';
 import {
   DevelopmentTaskOrchestrator,
   GoalExecutionOrchestrator,
@@ -105,12 +107,17 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const rememberedFacts = this.extractRememberedFacts(input);
     const pendingTasks = this.extractPendingTasks(input);
     const recentExchanges = this.extractRecentExchanges(input);
+    const pendingOperations = this.extractPendingOperations(input);
+    const cognitiveRecentExchanges = this.selectCognitiveRecentExchanges(text, rememberedFacts, recentExchanges);
+
+    const pendingResponse = this.handlePendingOperationResponse(input, text, pendingOperations);
+    if (pendingResponse) return pendingResponse;
 
     const decision = await modelProvider.interpret({
       text,
       rememberedFacts,
       pendingTasks,
-      recentExchanges,
+      recentExchanges: cognitiveRecentExchanges,
       requestedAt: input.requestedAt,
     });
 
@@ -120,13 +127,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       input.requestedAt,
       input.executionId,
       input.responsibilityId,
-      recentExchanges,
+      cognitiveRecentExchanges,
     );
     const effectiveDecision = await this.applyCognitiveConversationFallback(
       operationalDecision,
       text,
       input.requestedAt,
-      recentExchanges,
+      cognitiveRecentExchanges,
     );
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
     return this.withConversationTurn(result, text, effectiveDecision);
@@ -155,9 +162,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
         content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
       })),
     });
-    return result.outcome === 'answered'
-      ? { intent: 'respond', answer: result.answer, recordable: true }
-      : decision;
+    if (result.outcome === 'answered') {
+      return { intent: 'respond', answer: result.answer, recordable: true };
+    }
+    if (result.outcome === 'proposed') {
+      return { intent: 'respond', answer: result.answer, recordable: true, pendingOperation: result.operation };
+    }
+    return decision;
   }
 
   private async applyCognitiveConversationFallback(
@@ -226,7 +237,12 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
 
     return {
       status: 'completed',
-      output: { finalResult },
+      output: {
+        finalResult,
+        ...(decision.intent === 'respond' && decision.pendingOperation
+          ? { memoryExtras: { operationEvent: decision.pendingOperation } }
+          : {}),
+      },
     };
   }
 
@@ -280,9 +296,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       kind: decision.intent,
     };
 
+    const existingMemoryExtras = result.output.memoryExtras;
+    const safeExisting = existingMemoryExtras && typeof existingMemoryExtras === 'object' && !Array.isArray(existingMemoryExtras)
+      ? existingMemoryExtras as Readonly<Record<string, unknown>>
+      : {};
     return {
       status: 'completed',
-      output: { ...result.output, memoryExtras: { conversationTurn } },
+      output: { ...result.output, memoryExtras: { ...safeExisting, conversationTurn } },
     };
   }
 
@@ -476,6 +496,111 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const recentExchanges = commandInput?.temporary?.values?.recentExchanges;
 
     return Array.isArray(recentExchanges) ? (recentExchanges as readonly RecentExchangeRecord[]) : [];
+  }
+
+  private extractPendingOperations(input: SpecializedAgentHandoffInput): readonly PendingOperationRecord[] {
+    const commandInput = input.payload.commandInput as
+      | { readonly temporary?: { readonly values?: { readonly pendingOperations?: unknown } } }
+      | undefined;
+    const pendingOperations = commandInput?.temporary?.values?.pendingOperations;
+    return Array.isArray(pendingOperations) ? pendingOperations as readonly PendingOperationRecord[] : [];
+  }
+
+  private selectCognitiveRecentExchanges(
+    text: string,
+    rememberedFacts: readonly RememberedFactRecord[],
+    recentExchanges: readonly RecentExchangeRecord[],
+  ): readonly RecentExchangeRecord[] {
+    if (recentExchanges.length === 0) return [];
+    const composed = new ConversationContextComposer().compose({ text, rememberedFacts, recentExchanges });
+    if (composed.intent === 'continuationReference' || composed.intent === 'resumptionReference') {
+      const selectedIds = new Set([
+        ...recentExchanges.slice(-1).map((exchange) => exchange.id),
+        ...composed.relevantMemories.filter((match) => match.source === 'exchange').map((match) => match.id),
+      ]);
+      return recentExchanges.filter((exchange) => selectedIds.has(exchange.id)).slice(-4);
+    }
+    const relevantIds = new Set(
+      composed.relevantMemories
+        .filter((match) => match.source === 'exchange' && match.score >= 2)
+        .map((match) => match.id),
+    );
+    return recentExchanges.filter((exchange) => relevantIds.has(exchange.id));
+  }
+
+  private handlePendingOperationResponse(
+    input: SpecializedAgentHandoffInput,
+    text: string,
+    pendingOperations: readonly PendingOperationRecord[],
+  ): SpecializedAgentHandoffResult | undefined {
+    const intent = this.classifyAuthorizationResponse(text);
+    if (intent === 'unrelated' || pendingOperations.length === 0) return undefined;
+    if (pendingOperations.length !== 1) {
+      return this.operationResponse(
+        'Há mais de uma proposta pendente; preciso que você indique qual deseja autorizar ou cancelar.',
+        undefined,
+        text,
+      );
+    }
+
+    const [operation] = pendingOperations;
+    if (!operation) return undefined;
+    if (intent === 'ambiguous') {
+      return this.operationResponse(
+        `Não executei nada. A proposta "${operation.proposedAction}" continua pendente; responda claramente se deseja executá-la ou cancelá-la.`,
+        undefined,
+        text,
+      );
+    }
+    if (intent === 'deny') {
+      return this.operationResponse(
+        'Entendido. A proposta foi cancelada e nenhuma alteração foi executada.',
+        { ...operation, status: 'cancelled', updatedAt: input.requestedAt },
+        text,
+      );
+    }
+    if (!this.cognitiveOperationalOrchestrator) {
+      return this.operationResponse('A operação não está disponível neste ambiente e não foi executada.', undefined, text);
+    }
+
+    const execution = this.cognitiveOperationalOrchestrator.executeAuthorized(operation, {
+      executionId: input.executionId,
+      responsibilityId: input.responsibilityId,
+      requestedAt: input.requestedAt,
+    });
+    return this.operationResponse(execution.answer, execution.operation, text);
+  }
+
+  private classifyAuthorizationResponse(text: string): 'authorize' | 'deny' | 'ambiguous' | 'unrelated' {
+    const normalized = text
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const affirmative = new Set(['sim', 'ok', 'pode', 'faca', 'ok faca', 'sim faca', 'pode fazer', 'pode executar']);
+    if (affirmative.has(normalized)) return 'authorize';
+    if (/^(nao|deixa|deixa pra la|cancela|cancelar)(\b|$)/.test(normalized)) return 'deny';
+    if (/^(talvez|quem sabe|nao sei|acho que)(\b|$)/.test(normalized)) return 'ambiguous';
+    return 'unrelated';
+  }
+
+  private operationResponse(
+    message: string,
+    operationEvent: PendingOperationRecord | undefined,
+    requestText: string,
+  ): SpecializedAgentHandoffResult {
+    return {
+      status: 'completed',
+      output: {
+        finalResult: { message },
+        memoryExtras: {
+          ...(operationEvent === undefined ? {} : { operationEvent }),
+          conversationTurn: { requestText, summary: message, kind: 'operationAuthorization' },
+        },
+      },
+    };
   }
 
   private validateInput(input: SpecializedAgentHandoffInput): void {

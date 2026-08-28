@@ -116,7 +116,11 @@ export class ConversationContextComposer {
   }
 
   private isContinuationReference(lowerText: string): boolean {
-    return CONTINUATION_MARKERS.some((marker) => lowerText.includes(marker));
+    const trimmed = lowerText.trim();
+    return CONTINUATION_MARKERS.some((marker) => lowerText.includes(marker)) ||
+      /^(e\s|entao\s|então\s|nesse caso\b|neste caso\b|sobre isso\b|quanto a isso\b)/.test(trimmed) ||
+      /\b(disso|nisso)\b/.test(trimmed) ||
+      /\b(?:as|os)\s+(?:duas|dois|ambas|ambos)\b/.test(trimmed);
   }
 
   private isQuestion(lowerText: string): boolean {

@@ -130,6 +130,26 @@ test('Gemini decision payload exposes only bounded operational context and exclu
   assert.equal(capturedBody.includes('investigue o problema'), true);
 });
 
+test('cognitive identity is generalist by default and operational capabilities do not restrict casual conversation', async () => {
+  let capturedBody = '';
+  const cognitive = provider(async (_url, init) => {
+    capturedBody = init.body as string;
+    return response(200, geminiEnvelope({
+      intent: 'conclude', goal: 'conversar', reasoningSummary: 'Resposta casual.',
+      nextAction: 'concludeCompleted', requiresAuthorization: false,
+      expectedEvidence: 'Nenhuma ferramenta necessária.', completionState: 'completed',
+      confidence: 0.9, finalAnswer: 'Futebol mexe mesmo com a gente.',
+    }));
+  });
+
+  await cognitive.decide({ ...decisionRequest(), objective: 'Converse comigo sobre um assunto cotidiano.' });
+
+  for (const expected of ['assistente pessoal generalista', 'Converse naturalmente', 'mensagem atual define a intenção']) {
+    assert.equal(capturedBody.includes(expected), true, expected);
+  }
+  assert.equal(capturedBody.includes('assistente de desenvolvimento local'), false);
+});
+
 test('SPEC-050: HTTP failures and network failures resolve unavailable without raw failure leakage', async () => {
   for (const status of [401, 403, 429, 500, 503]) {
     const result = await provider(async () => response(status, 'sensitive remote body')).respond?.({

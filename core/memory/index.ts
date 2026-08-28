@@ -9,5 +9,6 @@ export * from './InMemoryCommandResultMemoryWriter.js';
 export * from './FileMemoryStoreErrors.js';
 export * from './FileMemoryStore.js';
 export * from './FileMemoryStoreLocation.js';
+export * from './PendingOperationContract.js';
 export * from './FileCommandResultMemoryWriter.js';
 export * from './FileCommandContextHydrator.js';

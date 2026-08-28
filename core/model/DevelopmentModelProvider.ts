@@ -71,7 +71,9 @@ const EXPLICIT_MEMORY_QUESTION_MARKERS: readonly string[] = [
   'você registrou',
   'voce registrou',
 ];
-const PERSONAL_MEMORY_QUESTION_PATTERN = /\b(eu prefiro|eu gosto|meu|minha|meus|minhas)\b/i;
+/** Personal-preference recall is a memory intent; ordinary possessives such as "meu lugar" are not. */
+const PERSONAL_PREFERENCE_RECALL_PATTERN =
+  /(?:\b(?:qual|quais|quando|onde|como)\b.*\b(?:eu\s+)?(?:prefiro|gosto)\b)|(?:\b(?:qual|quais)\b.*\b(?:meu|minha|meus|minhas)\b.*\bpreferid[oa]s?\b)/i;
 
 /**
  * SPEC-046 goal recognition: deliberately a handful of marker/pattern
@@ -671,7 +673,7 @@ export class DevelopmentModelProvider implements ModelProvider {
     const lowerText = text.toLowerCase();
     return (
       EXPLICIT_MEMORY_QUESTION_MARKERS.some((marker) => lowerText.includes(marker)) ||
-      PERSONAL_MEMORY_QUESTION_PATTERN.test(text)
+      PERSONAL_PREFERENCE_RECALL_PATTERN.test(text)
     );
   }
 

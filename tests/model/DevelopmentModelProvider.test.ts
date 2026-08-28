@@ -46,11 +46,11 @@ test('interpret is case-insensitive for the remember marker', async () => {
   assert.deepEqual(decision, { intent: 'remember', content: 'eu gosto de café' });
 });
 
-test('interpret responds using the most recent remembered fact for a question', async () => {
+test('interpret responds using the most recent remembered fact for an explicit memory question', async () => {
   const provider = new DevelopmentModelProvider();
 
   const decision = await provider.interpret({
-    text: 'Qual horário eu prefiro para reuniões?',
+    text: 'Você lembra qual horário eu prefiro para reuniões?',
     rememberedFacts: [fact('prefiro reuniões de manhã')],
     requestedAt: '2026-08-11T00:05:00.000Z',
   });
@@ -62,11 +62,11 @@ test('interpret responds using the most recent remembered fact for a question', 
   });
 });
 
-test('interpret responds with a clear message for a question with no remembered facts', async () => {
+test('interpret responds with a clear message for an explicit memory question with no remembered facts', async () => {
   const provider = new DevelopmentModelProvider();
 
   const decision = await provider.interpret({
-    text: 'Qual horário eu prefiro para reuniões?',
+    text: 'Você lembra qual horário eu prefiro para reuniões?',
     rememberedFacts: [],
     requestedAt: '2026-08-11T00:05:00.000Z',
   });
@@ -111,6 +111,9 @@ test('SPEC-050 regression: general questions remain eligible for cognitive conve
     'o que você pode fazer?',
     'como você pode me ajudar?',
     'quem é voce?',
+    'Depois de um deploy, a aplicação começou a falhar. Qual seria seu diagnóstico inicial?',
+    'Sebastian, tô com preguiça de trabalhar hoje kkk mas tenho coisa pra fazer. O que você faria no meu lugar?',
+    'sebastian o time do palmeiras me irrita',
   ];
 
   for (const text of messages) {
@@ -132,7 +135,7 @@ test('SPEC-050 regression: general questions remain eligible for cognitive conve
 test('SPEC-050 regression: explicit memory questions remain deterministic and ineligible for cognitive fallback', async () => {
   const provider = new DevelopmentModelProvider();
 
-  for (const text of ['O que você sabe sobre mim?', 'Você lembra do que eu prefiro?', 'Qual é meu horário preferido?']) {
+  for (const text of ['O que você sabe sobre mim?', 'Você lembra do que eu prefiro?', 'Você lembra qual é meu horário preferido?']) {
     const decision = await provider.interpret({
       text,
       rememberedFacts: [],
@@ -830,7 +833,7 @@ test('interpret degrades gracefully to the most recent fact for a vague question
   });
 });
 
-test('interpret still reports no memory for a question when nothing at all was ever remembered', async () => {
+test('a direct personal-preference recall remains a memory question', async () => {
   const provider = new DevelopmentModelProvider();
 
   const decision = await provider.interpret({

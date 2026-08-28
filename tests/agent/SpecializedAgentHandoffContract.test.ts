@@ -108,6 +108,43 @@ test('cognitive conversation receives the bounded recent context already hydrate
   });
 });
 
+test('current intent prevents unrelated memory hijack while identifiable continuation can recover prior context', async () => {
+  const requests: unknown[] = [];
+  const agent = cognitiveFallbackAgent(
+    { outcome: 'responded', answer: 'Resposta natural do modelo.' },
+    (value) => requests.push(value),
+  );
+  const recentExchanges = [
+    {
+      id: 'loss-data', requestText: 'Como diagnosticar perda de dados após deploy?',
+      summary: 'Priorize logs, persistência e diferenças de configuração do deploy.', kind: 'respond',
+      recordedAt: '2026-08-27T00:00:00.000Z',
+    },
+    {
+      id: 'other', requestText: 'Explique filas.', summary: 'Uma fila organiza itens em ordem.', kind: 'respond',
+      recordedAt: '2026-08-27T00:00:10.000Z',
+    },
+  ];
+  const handoffWith = (text: string) => ({
+    ...fallbackHandoff(text),
+    payload: { commandInput: { type: 'converse', input: { text }, temporary: { values: { recentExchanges } } } },
+  } as const);
+
+  await agent.handoff(handoffWith('Sebastian, tô com preguiça hoje e tenho coisa para fazer. O que você faria no meu lugar?'));
+  await agent.handoff(handoffWith('sebastian um time de futebol me irrita'));
+  await agent.handoff(handoffWith('E sobre aquela perda de dados depois do deploy, o que faria a seguir?'));
+
+  assert.deepEqual(requests[0], {
+    text: 'Sebastian, tô com preguiça hoje e tenho coisa para fazer. O que você faria no meu lugar?',
+    requestedAt: '2026-08-27T00:00:01.000Z',
+  });
+  assert.deepEqual(requests[1], {
+    text: 'sebastian um time de futebol me irrita', requestedAt: '2026-08-27T00:00:01.000Z',
+  });
+  assert.equal(JSON.stringify(requests[2]).includes('perda de dados'), true);
+  assert.equal(JSON.stringify(requests[2]).includes('Uma fila organiza'), true, 'a short recent window remains available for an explicit continuation');
+});
+
 test('SPEC-050: known deterministic response never calls cognitive respond', async () => {
   let calls = 0;
   const modelProvider: ModelProvider = {
