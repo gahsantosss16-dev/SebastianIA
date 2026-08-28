@@ -181,18 +181,21 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     if (result.outcome === 'proposed') {
       return { intent: 'respond', answer: result.answer, recordable: true, pendingOperation: result.operation };
     }
-    // A real Tool was already invoked and observed during this attempt
-    // before the loop failed (e.g. a `decide` timeout right after a
-    // successful `github.listCommits` call). Deliberately does NOT return
-    // `decision` unchanged here: it still carries `cognitiveFallbackEligible:
-    // true`, and letting it fall through to `applyCognitiveConversationFallback`
-    // would re-ask the model with a prompt that explicitly denies having any
-    // Tool - producing a false "I don't have GitHub access" answer even
-    // though a real Tool exists and was just used for this exact request.
-    // When no Tool was ever reached (toolCalls === 0), the original
-    // conversational fallback still applies unchanged - nothing false is
-    // being denied there, since no Tool attempt happened at all.
-    if (decision.intent === 'respond' && result.toolCalls > 0) {
+    // The operational engine demonstrably works for this request whenever
+    // either a real Tool was already invoked (toolCalls > 0) or `decide`
+    // itself produced a structurally valid decision that the orchestrator
+    // then rejected (outcome 'blocked' - e.g. a non-actionable nextAction
+    // proposed before ever naming a Tool). In both cases, letting the
+    // decision fall through to `applyCognitiveConversationFallback` would
+    // re-ask the model with a prompt that explicitly denies having any Tool
+    // - a false claim whenever an operational Tool catalog (e.g. `github.*`)
+    // is genuinely configured for this session, regardless of whether this
+    // particular attempt reached the Tool. Only a fully unreachable engine
+    // (outcome 'unavailable' with zero Tool calls - `decide` itself never
+    // produced anything usable) preserves the original conversational
+    // fallback unchanged, matching "no Tool was ever executed" faithfully.
+    const operationalEngineDemonstrablyReachable = result.outcome !== 'unavailable' || result.toolCalls > 0;
+    if (decision.intent === 'respond' && operationalEngineDemonstrablyReachable) {
       return { intent: 'respond', answer: OPERATIONAL_ATTEMPT_INCOMPLETE_ANSWER, recordable: false };
     }
     return decision;

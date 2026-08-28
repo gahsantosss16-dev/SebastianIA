@@ -215,11 +215,16 @@ test('a real GitHub Tool error (unregistered project) is reported as an honest o
   }
 });
 
-test('a casual request with no GitHub intent never calls a github.* tool', async () => {
+test('a casual request with no GitHub intent never calls a github.* tool, and preserves the normal conversational answer unchanged', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-github-casual-'));
   try {
+    let respondCalls = 0;
     const provider: CognitiveModelProvider = {
       decide: async () => ({ outcome: 'decided', decision: decision({ finalAnswer: 'Vamos conversar normalmente.' }) }),
+      respond: async () => {
+        respondCalls += 1;
+        return { outcome: 'responded', answer: 'não deveria ser usado' };
+      },
     };
     const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
 
@@ -227,6 +232,121 @@ test('a casual request with no GitHub intent never calls a github.* tool', async
 
     assert.deepEqual(invoked, []);
     assert.equal(result.output.message, 'Vamos conversar normalmente.');
+    assert.equal(respondCalls, 0, 'a plain conclusion needs no conversational fallback at all');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a successful GitHub observation is used directly by the final answer - the conversational fallback is never consulted', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-no-fallback-needed-'));
+  try {
+    let respondCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async (request) => {
+        if (request.recentObservations.length === 0) {
+          return { outcome: 'decided', decision: decision({
+            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: 'SebastianIA' },
+          }) };
+        }
+        return { outcome: 'decided', decision: decision({
+          finalAnswer: `Commit mais recente: ${request.recentObservations[0]?.summary}`,
+        }) };
+      },
+      respond: async () => {
+        respondCalls += 1;
+        return { outcome: 'responded', answer: 'não tenho acesso ao GitHub' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    const result = await app.executeCommand(input('me diga os commits recentes do SebastianIA no GitHub', 6));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.match(String(result.output.message), /corrige timeout do provider cognitivo/);
+    assert.equal(respondCalls, 0, 'a real, successful Tool observation must never be second-guessed by the "no tools" fallback');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('decide proposing a non-actionable step before ever calling a Tool still never surfaces the "no access" fallback claim', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-non-actionable-'));
+  try {
+    let respondCalls = 0;
+    const provider: CognitiveModelProvider = {
+      // A structurally valid, successfully-parsed decision (matching production's
+      // "decide respondeu com sucesso") whose nextAction the orchestrator does not
+      // treat as actionable - `toolCalls` stays 0 because no Tool was ever reached.
+      decide: async () => ({
+        outcome: 'decided',
+        decision: {
+          intent: 'investigate',
+          goal: 'investigar o projeto SebastianIA no GitHub',
+          reasoningSummary: 'preciso de mais evidência antes de agir',
+          nextAction: 'requestMoreEvidence',
+          requiresAuthorization: false,
+          expectedEvidence: 'lista de commits recentes',
+          completionState: 'inProgress',
+          confidence: 0.4,
+        },
+      }),
+      respond: async () => {
+        respondCalls += 1;
+        return { outcome: 'responded', answer: 'Não tenho acesso ao GitHub.' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    const result = await app.executeCommand(
+      input('verifique o projeto SebastianIA no GitHub e me diga quais foram os commits mais recentes', 7),
+    );
+
+    assert.deepEqual(invoked, []);
+    assert.equal(respondCalls, 0, 'a demonstrably-working decide() must never hand off to the "no tools" conversational fallback');
+    assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('end-to-end: "Sebastian, verifique o projeto SebastianIA no GitHub e me diga quais foram os commits mais recentes" resolves through github.listCommits with a real answer', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-e2e-'));
+  try {
+    let respondCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async (request) => {
+        if (request.recentObservations.length === 0) {
+          return { outcome: 'decided', decision: decision({
+            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: 'SebastianIA' },
+          }) };
+        }
+        return { outcome: 'decided', decision: decision({
+          finalAnswer: `Os commits mais recentes do SebastianIA: ${request.recentObservations[0]?.summary}`,
+        }) };
+      },
+      respond: async () => {
+        respondCalls += 1;
+        return { outcome: 'responded', answer: 'Não tenho acesso ao GitHub.' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    const startedAt = Date.now();
+    const result = await app.executeCommand(
+      input('Sebastian, verifique o projeto SebastianIA no GitHub e me diga quais foram os commits mais recentes.', 8),
+    );
+    const durationMs = Date.now() - startedAt;
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID], 'github.listCommits must actually run');
+    assert.match(String(result.output.message), /abcdef123456|corrige timeout do provider cognitivo/, 'the final answer must cite the real observed commit');
+    assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
+    assert.doesNotMatch(String(result.output.message), /acesso.{0,20}internet/i);
+    assert.doesNotMatch(String(result.output.message), /ainda não sei responder/i);
+    assert.equal(respondCalls, 0, 'the false-denial conversational fallback must never be reached once the Tool observation is real');
+    assert.ok(durationMs < 5_000, 'no timeout: the whole exchange must resolve quickly');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
