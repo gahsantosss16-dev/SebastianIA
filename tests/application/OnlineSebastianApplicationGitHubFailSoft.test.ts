@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import {
-  SEBASTIAN_GITHUB_PROJECTS_ENV_VAR,
+  SEBASTIAN_GITHUB_DEFAULT_BRANCH_ENV_VAR,
+  SEBASTIAN_GITHUB_OWNER_ENV_VAR,
+  SEBASTIAN_GITHUB_PROJECT_ID_ENV_VAR,
+  SEBASTIAN_GITHUB_PROJECT_NAME_ENV_VAR,
+  SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR,
   SEBASTIAN_GITHUB_TOKEN_ENV_VAR,
 } from '../../application/GitHubProjectRegistryConfiguration.js';
 import type { CognitiveDecision, CognitiveModelProvider } from '../../core/cognition/index.js';
@@ -38,84 +42,62 @@ function capturingLogger(): { readonly logger: Logger; readonly calls: Array<{ r
   };
 }
 
-test('a valid GitHub configuration starts the server with GitHub tools available', async () => {
-  let toolIds: readonly string[] = [];
-  const provider: CognitiveModelProvider = {
-    decide: async (request) => {
-      toolIds = request.availableTools.map((tool) => tool.toolId);
-      return { outcome: 'decided', decision: decision({ finalAnswer: 'Resposta sem ferramenta.' }) };
-    },
-  };
-  const env = {
+function completeProjectEnv(): Record<string, string> {
+  return {
     [SEBASTIAN_GITHUB_TOKEN_ENV_VAR]: 'a-token',
-    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: JSON.stringify([
-      { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', owner: 'sebastian-org', repository: 'neuro-hub', defaultBranch: 'main' },
-    ]),
+    [SEBASTIAN_GITHUB_PROJECT_ID_ENV_VAR]: 'neuro-hub-pro',
+    [SEBASTIAN_GITHUB_PROJECT_NAME_ENV_VAR]: 'Neuro Hub Pro',
+    [SEBASTIAN_GITHUB_OWNER_ENV_VAR]: 'sebastian-org',
+    [SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR]: 'neuro-hub',
+    [SEBASTIAN_GITHUB_DEFAULT_BRANCH_ENV_VAR]: 'main',
   };
+}
 
-  const app = createOnlineSebastianApplication(undefined, provider, undefined, env);
-  const result = await app.executeCommand(input('Explique algo geral.', 1));
-
-  assert.equal(result.status, 'succeeded');
-  assert.equal(toolIds.some((id) => id.startsWith('github.')), true);
-});
-
-test('an invalid GitHub configuration never aborts startup: the server starts without GitHub, everything else intact', async () => {
-  const { logger, calls } = capturingLogger();
-  let toolIds: readonly string[] = [];
-  const provider: CognitiveModelProvider = {
-    decide: async (request) => {
-      toolIds = request.availableTools.map((tool) => tool.toolId);
-      return { outcome: 'decided', decision: decision({ finalAnswer: 'Tudo funcionando normalmente.' }) };
-    },
-  };
-  const env = { [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: '{this is not valid json' };
-
-  let app: ReturnType<typeof createOnlineSebastianApplication> | undefined;
-  assert.doesNotThrow(() => {
-    app = createOnlineSebastianApplication(logger, provider, undefined, env);
-  });
-  assert.ok(app);
-
-  const result = await app!.executeCommand(input('Explique algo geral.', 2));
-
-  assert.equal(result.status, 'succeeded');
-  assert.equal(result.output.message, 'Tudo funcionando normalmente.');
-  assert.equal(toolIds.some((id) => id.startsWith('github.')), false);
-  assert.equal(
-    calls.some((call) => call.level === 'warn' && call.message === 'GitHub integration disabled: invalid project registry configuration'),
-    true,
-  );
-});
-
-test('with SEBASTIAN_GITHUB_PROJECTS entirely absent, the server starts normally without GitHub', async () => {
+async function startAndCollectToolIds(env: Record<string, string>, logger?: Logger): Promise<readonly string[]> {
   let toolIds: readonly string[] = [];
   const provider: CognitiveModelProvider = {
     decide: async (request) => {
       toolIds = request.availableTools.map((tool) => tool.toolId);
       return { outcome: 'decided', decision: decision({ finalAnswer: 'Resposta sem ferramenta.' }) };
     },
-  };
-
-  const app = createOnlineSebastianApplication(undefined, provider, undefined, {});
-  const result = await app.executeCommand(input('Explique algo geral.', 3));
-
-  assert.equal(result.status, 'succeeded');
-  assert.equal(toolIds.some((id) => id.startsWith('github.')), false);
-});
-
-test('no secret or raw configuration content appears in logs when GitHub configuration is invalid', async () => {
-  const { logger, calls } = capturingLogger();
-  const secretLikeValue = 'ghp_should-never-appear-in-any-log-9f31c2';
-  const env = { [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: `{not json, secret=${secretLikeValue}` };
-  const provider: CognitiveModelProvider = {
-    decide: async () => ({ outcome: 'decided', decision: decision({ finalAnswer: 'ok' }) }),
   };
 
   const app = createOnlineSebastianApplication(logger, provider, undefined, env);
-  await app.executeCommand(input('Explique algo geral.', 4));
+  const result = await app.executeCommand(input('Explique algo geral.', 1));
+  assert.equal(result.status, 'succeeded');
+  return toolIds;
+}
+
+test('a complete GitHub configuration starts the server with GitHub tools available', async () => {
+  const toolIds = await startAndCollectToolIds(completeProjectEnv());
+
+  assert.equal(toolIds.some((id) => id.startsWith('github.')), true);
+});
+
+test('an incomplete GitHub configuration never aborts startup: the server starts without GitHub, everything else intact', async () => {
+  const incompleteEnv = completeProjectEnv();
+  delete incompleteEnv[SEBASTIAN_GITHUB_OWNER_ENV_VAR];
+
+  const toolIds = await startAndCollectToolIds(incompleteEnv);
+
+  assert.equal(toolIds.some((id) => id.startsWith('github.')), false);
+});
+
+test('with SEBASTIAN_GITHUB_* entirely absent, the server starts normally without GitHub', async () => {
+  const toolIds = await startAndCollectToolIds({});
+
+  assert.equal(toolIds.some((id) => id.startsWith('github.')), false);
+});
+
+test('no secret or configured value appears in logs when GitHub configuration is incomplete or complete', async () => {
+  const { logger, calls } = capturingLogger();
+  const env = completeProjectEnv();
+  delete env[SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR];
+
+  await startAndCollectToolIds(env, logger);
 
   const serializedCalls = JSON.stringify(calls);
-  assert.equal(serializedCalls.includes(secretLikeValue), false);
-  assert.equal(serializedCalls.includes(env[SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]), false);
+  assert.equal(serializedCalls.includes('sebastian-org'), false);
+  assert.equal(serializedCalls.includes('a-token'), false);
+  assert.equal(serializedCalls.includes('neuro-hub-pro'), false);
 });

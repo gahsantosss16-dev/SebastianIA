@@ -6,7 +6,11 @@ import { join } from 'node:path';
 import { createSebastianApplication } from '../../application/SebastianApplication.js';
 import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import {
-  SEBASTIAN_GITHUB_PROJECTS_ENV_VAR,
+  SEBASTIAN_GITHUB_DEFAULT_BRANCH_ENV_VAR,
+  SEBASTIAN_GITHUB_OWNER_ENV_VAR,
+  SEBASTIAN_GITHUB_PROJECT_ID_ENV_VAR,
+  SEBASTIAN_GITHUB_PROJECT_NAME_ENV_VAR,
+  SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR,
   SEBASTIAN_GITHUB_TOKEN_ENV_VAR,
 } from '../../application/GitHubProjectRegistryConfiguration.js';
 import type { CognitiveDecision, CognitiveDecisionRequest, CognitiveModelProvider } from '../../core/cognition/index.js';
@@ -203,10 +207,6 @@ test('a decision naming a GitHub toolId outside the approved catalog is rejected
 });
 
 test('the online composition exposes GitHub read-only tools only when configured, and never a write/shell/deploy toolId', async () => {
-  const projectsJson = JSON.stringify([
-    { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro Hub'], owner: 'sebastian-org', repository: 'neuro-hub', defaultBranch: 'main' },
-  ]);
-
   let toolIdsWithGitHub: readonly string[] = [];
   const providerWithGitHub: CognitiveModelProvider = {
     decide: async (request) => {
@@ -216,7 +216,11 @@ test('the online composition exposes GitHub read-only tools only when configured
   };
   const appWithGitHub = createOnlineSebastianApplication(logger, providerWithGitHub, undefined, {
     [SEBASTIAN_GITHUB_TOKEN_ENV_VAR]: 'a-token',
-    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: projectsJson,
+    [SEBASTIAN_GITHUB_PROJECT_ID_ENV_VAR]: 'neuro-hub-pro',
+    [SEBASTIAN_GITHUB_PROJECT_NAME_ENV_VAR]: 'Neuro Hub Pro',
+    [SEBASTIAN_GITHUB_OWNER_ENV_VAR]: 'sebastian-org',
+    [SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR]: 'neuro-hub',
+    [SEBASTIAN_GITHUB_DEFAULT_BRANCH_ENV_VAR]: 'main',
   });
   await appWithGitHub.executeCommand(input('Explique algo geral.', 60));
 
