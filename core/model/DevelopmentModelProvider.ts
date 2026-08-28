@@ -244,16 +244,23 @@ export class DevelopmentModelProvider implements ModelProvider {
       };
     }
 
+    // Checked before continuationReference: an explicit memory question
+    // ("o que você sabe sobre X", "você lembra...") is a specific, deliberate
+    // marker match - a stronger signal than the generic short-follow-up
+    // heuristic behind continuationReference, which a short memory question
+    // ("O que você sabe sobre mim?") can also satisfy once there is recent
+    // conversation history. No longer gated on composed.intent === 'question'
+    // for the same reason - the marker match itself is already the real gate.
+    if (this.isExplicitMemoryQuestion(request.text)) {
+      return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
+    }
+
     if (composed.intent === 'continuationReference') {
       return {
         intent: 'respond',
         ...this.composeContinuationAnswer(composed),
         ...(composed.mostRecentExchange === undefined ? {} : { cognitiveFallbackEligible: true }),
       };
-    }
-
-    if (composed.intent === 'question' && this.isExplicitMemoryQuestion(request.text)) {
-      return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
     }
 
     return {

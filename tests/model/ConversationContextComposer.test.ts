@@ -53,6 +53,33 @@ test('classifies "e agora?", "como ficou aquilo?" and "onde paramos?" as continu
   }
 });
 
+test('classifies short, referent-dependent follow-ups as continuationReference only when a recent exchange exists', () => {
+  const composer = new ConversationContextComposer();
+  const recentExchanges = [exchange('e1', 'como eu faço pra criar um site?', 'Você pode usar HTML e CSS.', '2026-08-28T00:00:00.000Z')];
+
+  for (const text of ['vc pode me ajudar?', 'como?', 'e depois?', 'qual você recomenda?', 'faz isso']) {
+    const withHistory = composer.compose({ text, rememberedFacts: [], recentExchanges });
+    assert.equal(withHistory.intent, 'continuationReference', `expected "${text}" to be continuationReference with recent history`);
+  }
+
+  // A short opener in a brand-new conversation is never affected by the new
+  // rule - "e depois?" is already continuationReference on its own via the
+  // pre-existing "e " marker, but the other four have nothing to continue.
+  for (const text of ['vc pode me ajudar?', 'como?', 'qual você recomenda?', 'faz isso']) {
+    const withoutHistory = composer.compose({ text, rememberedFacts: [], recentExchanges: [] });
+    assert.notEqual(withoutHistory.intent, 'continuationReference', `expected "${text}" to NOT be continuationReference with no history`);
+  }
+});
+
+test('a short but self-contained statement is never swept into continuationReference by token count alone', () => {
+  const composer = new ConversationContextComposer();
+  const recentExchanges = [exchange('e1', 'como eu faço pra criar um site?', 'Você pode usar HTML e CSS.', '2026-08-28T00:00:00.000Z')];
+
+  const composed = composer.compose({ text: 'Uma solicitação desconhecida.', rememberedFacts: [], recentExchanges });
+
+  assert.notEqual(composed.intent, 'continuationReference');
+});
+
 test('classifies "vamos continuar meu projeto de ontem" as resumptionReference, not continuationReference', () => {
   const composer = new ConversationContextComposer();
 

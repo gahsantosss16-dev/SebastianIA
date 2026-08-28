@@ -67,6 +67,20 @@ const STOPWORDS: ReadonlySet<string> = new Set([
 
 const MAX_RELEVANT_MEMORIES = 3;
 const MIN_TOKEN_LENGTH = 3;
+/**
+ * A message this short rarely names its own subject when it is also phrased
+ * as a question or built around a bare demonstrative - it is almost always
+ * leaning on whatever was just discussed ("vc pode me ajudar?", "como?", "e
+ * depois?", "qual você recomenda?", "faz isso"). A short but self-contained
+ * statement ("uma solicitação desconhecida") is deliberately NOT swept in by
+ * token count alone - see `isShortEllipticalFollowUp`, which additionally
+ * requires a question or a demonstrative pronoun. Only consulted when a
+ * recent exchange actually exists - see `isContinuationReference` - so a
+ * short opener in a brand-new conversation is never affected.
+ */
+const MAX_ELLIPTICAL_FOLLOW_UP_TOKENS = 2;
+/** Bare demonstrative pronouns a short fragment ("faz isso") leans on to point back at something just discussed, without naming it again. */
+const DEMONSTRATIVE_PRONOUNS: readonly string[] = ['isso', 'aquilo', 'esse', 'essa', 'aquele', 'aquela'];
 
 /**
  * Builds the small, explicit piece of "understanding" the ModelProvider acts
@@ -88,18 +102,18 @@ export class ConversationContextComposer {
 
     return {
       text: input.text,
-      intent: this.classifyIntent(lowerText),
+      intent: this.classifyIntent(lowerText, input.recentExchanges.length > 0),
       relevantMemories: this.selectRelevantMemories(input.text, input.rememberedFacts, input.recentExchanges),
       ...(mostRecentFact === undefined ? {} : { mostRecentFact }),
       ...(mostRecentExchange === undefined ? {} : { mostRecentExchange }),
     };
   }
 
-  private classifyIntent(lowerText: string): ConversationIntentCategory {
+  private classifyIntent(lowerText: string, hasRecentExchange: boolean): ConversationIntentCategory {
     if (this.isResumptionReference(lowerText)) {
       return 'resumptionReference';
     }
-    if (this.isContinuationReference(lowerText)) {
+    if (this.isContinuationReference(lowerText, hasRecentExchange)) {
       return 'continuationReference';
     }
     if (this.isQuestion(lowerText)) {
@@ -115,12 +129,29 @@ export class ConversationContextComposer {
     return RESUMPTION_SUBJECTS.some((subject) => lowerText.includes(subject));
   }
 
-  private isContinuationReference(lowerText: string): boolean {
+  private isContinuationReference(lowerText: string, hasRecentExchange: boolean): boolean {
     const trimmed = lowerText.trim();
-    return CONTINUATION_MARKERS.some((marker) => lowerText.includes(marker)) ||
+    if (
+      CONTINUATION_MARKERS.some((marker) => lowerText.includes(marker)) ||
       /^(e\s|entao\s|então\s|nesse caso\b|neste caso\b|sobre isso\b|quanto a isso\b)/.test(trimmed) ||
       /\b(disso|nisso)\b/.test(trimmed) ||
-      /\b(?:as|os)\s+(?:duas|dois|ambas|ambos)\b/.test(trimmed);
+      /\b(?:as|os)\s+(?:duas|dois|ambas|ambos)\b/.test(trimmed)
+    ) {
+      return true;
+    }
+    // A short, elliptical follow-up ("vc pode me ajudar?", "como?", "faz
+    // isso") only makes sense as a continuation when there is something
+    // recent to continue - a short opener in a fresh conversation is never
+    // reclassified this way.
+    return hasRecentExchange && this.isShortEllipticalFollowUp(trimmed);
+  }
+
+  private isShortEllipticalFollowUp(text: string): boolean {
+    const tokenCount = this.significantTokens(text).size;
+    if (tokenCount === 0 || tokenCount > MAX_ELLIPTICAL_FOLLOW_UP_TOKENS) {
+      return false;
+    }
+    return this.isQuestion(text) || DEMONSTRATIVE_PRONOUNS.some((pronoun) => new RegExp(`\\b${pronoun}\\b`).test(text));
   }
 
   private isQuestion(lowerText: string): boolean {
