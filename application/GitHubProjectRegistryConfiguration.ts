@@ -36,9 +36,16 @@ export function createGitHubProjectRegistry(env: NodeJS.ProcessEnv = process.env
     return new ProjectRegistry({ readOnly: true, entries: [] });
   }
 
+  // Strips only a leading UTF-8 BOM and outer whitespace - both invisible,
+  // non-semantic artifacts some hosting panels add when persisting an env
+  // var. Never repairs malformed JSON, typographic quotes, or an extra
+  // layer of wrapping quotes: anything else still fails fast below.
+  const BYTE_ORDER_MARK = String.fromCharCode(0xfeff);
+  const normalized = (raw.startsWith(BYTE_ORDER_MARK) ? raw.slice(BYTE_ORDER_MARK.length) : raw).trim();
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as unknown;
+    parsed = JSON.parse(normalized) as unknown;
   } catch {
     throw new Error('GitHub project registry configuration is not valid JSON.');
   }

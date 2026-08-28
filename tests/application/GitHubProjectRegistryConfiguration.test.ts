@@ -45,6 +45,38 @@ test('invalid JSON in SEBASTIAN_GITHUB_PROJECTS fails startup loudly instead of 
   assert.throws(() => createGitHubProjectRegistry({ [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: '{not json' }));
 });
 
+test('a leading UTF-8 BOM (as some hosting panels add when persisting the env var) does not block parsing', () => {
+  const byteOrderMark = String.fromCharCode(0xfeff);
+  const env = {
+    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: byteOrderMark + JSON.stringify([
+      { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro Hub'], owner: 'sebastian-org', repository: 'neuro-hub', defaultBranch: 'main' },
+    ]),
+  };
+
+  const registry = createGitHubProjectRegistry(env);
+
+  assert.equal(registry.resolve('Neuro Hub')?.id, 'neuro-hub-pro');
+});
+
+test('outer whitespace around an otherwise valid SEBASTIAN_GITHUB_PROJECTS value does not block parsing', () => {
+  const env = {
+    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: `  \n${JSON.stringify([
+      { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro Hub'], owner: 'sebastian-org', repository: 'neuro-hub', defaultBranch: 'main' },
+    ])}\n  `,
+  };
+
+  const registry = createGitHubProjectRegistry(env);
+
+  assert.equal(registry.resolve('Neuro Hub')?.id, 'neuro-hub-pro');
+});
+
+test('a value that is genuinely invalid JSON is still rejected even after BOM/whitespace normalization', () => {
+  const byteOrderMark = String.fromCharCode(0xfeff);
+
+  assert.throws(() => createGitHubProjectRegistry({ [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: `${byteOrderMark}  {not json  ` }));
+  assert.throws(() => createGitHubProjectRegistry({ [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: "'[{\"id\":\"x\"}]'" }), 'an extra layer of wrapping quotes must not be auto-unwrapped');
+});
+
 test('a non-array SEBASTIAN_GITHUB_PROJECTS value is rejected', () => {
   assert.throws(() => createGitHubProjectRegistry({ [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: JSON.stringify({ id: 'x' }) }));
 });
@@ -52,6 +84,15 @@ test('a non-array SEBASTIAN_GITHUB_PROJECTS value is rejected', () => {
 test('an entry missing a required field is rejected', () => {
   const env = {
     [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: JSON.stringify([{ id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro' }]),
+  };
+
+  assert.throws(() => createGitHubProjectRegistry(env));
+});
+
+test('field-shape validation still applies unchanged after BOM/whitespace normalization', () => {
+  const byteOrderMark = String.fromCharCode(0xfeff);
+  const env = {
+    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: `${byteOrderMark}  ${JSON.stringify([{ id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro' }])}  `,
   };
 
   assert.throws(() => createGitHubProjectRegistry(env));
