@@ -3,6 +3,7 @@ import {
   GeminiCognitiveModelProvider,
   type CognitiveModelProvider,
 } from '../core/cognition/index.js';
+import type { Logger } from '../core/logger.js';
 
 export const SEBASTIAN_COGNITIVE_PROVIDER_ENV_VAR = 'SEBASTIAN_COGNITIVE_PROVIDER';
 export const SEBASTIAN_COGNITIVE_API_KEY_ENV_VAR = 'SEBASTIAN_COGNITIVE_API_KEY';
@@ -11,6 +12,7 @@ export const SEBASTIAN_COGNITIVE_TIMEOUT_MS_ENV_VAR = 'SEBASTIAN_COGNITIVE_TIMEO
 
 export function createOnlineCognitiveModelProvider(
   env: NodeJS.ProcessEnv = process.env,
+  logger?: Logger,
 ): CognitiveModelProvider | undefined {
   const provider = env[SEBASTIAN_COGNITIVE_PROVIDER_ENV_VAR]?.trim().toLowerCase();
   const hasAnyCognitiveConfiguration = [
@@ -21,9 +23,17 @@ export function createOnlineCognitiveModelProvider(
   ].some((name) => env[name] !== undefined);
 
   if (!hasAnyCognitiveConfiguration) {
+    logger?.info('Online cognitive provider configuration resolved.', {
+      provider: 'none',
+      outcome: 'notConfigured',
+    });
     return undefined;
   }
   if (provider === 'disabled' || provider === 'none') {
+    logger?.info('Online cognitive provider configuration resolved.', {
+      provider: 'none',
+      outcome: 'disabled',
+    });
     return undefined;
   }
   if (provider !== 'gemini') {
@@ -37,7 +47,18 @@ export function createOnlineCognitiveModelProvider(
   }
 
   const timeoutMs = parseTimeout(env[SEBASTIAN_COGNITIVE_TIMEOUT_MS_ENV_VAR]);
-  return new GeminiCognitiveModelProvider({ apiKey, model, timeoutMs });
+  logger?.info('Online cognitive provider configuration resolved.', {
+    provider: 'gemini',
+    model: model.trim(),
+    timeoutMs,
+    outcome: 'configured',
+  });
+  return new GeminiCognitiveModelProvider({
+    apiKey,
+    model,
+    timeoutMs,
+    ...(logger === undefined ? {} : { logger }),
+  });
 }
 
 function parseTimeout(value: string | undefined): number {

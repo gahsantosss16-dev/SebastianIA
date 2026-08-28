@@ -6,6 +6,7 @@ import {
 } from '../../core/cognition/GeminiCognitiveModelProvider.js';
 import { InvalidCognitiveModelProviderInputError } from '../../core/cognition/CognitiveModelProviderErrors.js';
 import type { CognitiveDecisionRequest } from '../../core/cognition/CognitiveModelProviderContract.js';
+import type { Logger } from '../../core/logger.js';
 
 const API_KEY = 'gemini-test-key-never-real';
 const MODEL = 'gemini-2.5-flash-lite';
@@ -163,4 +164,99 @@ test('SPEC-050: malformed envelopes, JSON, schemas and oversized answers are inv
     });
     assert.equal(result?.outcome, 'invalidResponse');
   }
+});
+
+test('Gemini diagnostics distinguish safe technical outcomes without logging credentials, prompts or bodies', async () => {
+  const entries: Array<{ level: string; message: string; metadata?: Record<string, unknown> }> = [];
+  const logger: Logger = {
+    debug: () => undefined,
+    info: (message, metadata) => entries.push({ level: 'info', message, ...(metadata === undefined ? {} : { metadata }) }),
+    warn: (message, metadata) => entries.push({ level: 'warn', message, ...(metadata === undefined ? {} : { metadata }) }),
+    error: () => undefined,
+  };
+  const expectedCategories = new Map<number, string>([
+    [400, 'badRequest'],
+    [401, 'authentication'],
+    [403, 'permission'],
+    [404, 'modelNotFound'],
+    [429, 'rateLimit'],
+    [500, 'serverError'],
+  ]);
+  const secretPrompt = 'prompt privado que não pode aparecer';
+
+  for (const [status, errorCategory] of expectedCategories) {
+    const cognitive = new GeminiCognitiveModelProvider({
+      apiKey: API_KEY,
+      model: MODEL,
+      logger,
+      fetchImpl: async () => response(status, `raw remote body ${API_KEY} ${secretPrompt}`),
+    });
+    await cognitive.respond?.({ text: secretPrompt, requestedAt: '2026-08-27T00:00:00.000Z' });
+    const entry = entries.at(-1);
+    assert.equal(entry?.level, 'warn');
+    assert.deepEqual(entry?.metadata, {
+      provider: 'gemini',
+      model: MODEL,
+      operation: 'respond',
+      outcome: 'unavailable',
+      durationMs: entry?.metadata?.durationMs,
+      httpStatus: status,
+      errorCategory,
+    });
+  }
+
+  const success = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY,
+    model: MODEL,
+    logger,
+    fetchImpl: async () => response(200, geminiEnvelope({ answer: 'Resposta segura.' })),
+  });
+  await success.respond?.({ text: secretPrompt, requestedAt: '2026-08-27T00:00:00.000Z' });
+  assert.equal(entries.at(-1)?.metadata?.outcome, 'responded');
+  assert.equal(entries.at(-1)?.metadata?.httpStatus, 200);
+
+  const invalid = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY,
+    model: MODEL,
+    logger,
+    fetchImpl: async () => response(200, geminiEnvelope('not-json')),
+  });
+  await invalid.respond?.({ text: secretPrompt, requestedAt: '2026-08-27T00:00:00.000Z' });
+  assert.equal(entries.at(-1)?.metadata?.outcome, 'invalidResponse');
+  assert.equal(entries.at(-1)?.metadata?.errorCategory, 'invalidStructuredJson');
+
+  const network = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY,
+    model: MODEL,
+    logger,
+    fetchImpl: async () => {
+      throw new Error(`private network failure ${API_KEY}`);
+    },
+  });
+  await network.respond?.({ text: secretPrompt, requestedAt: '2026-08-27T00:00:00.000Z' });
+  assert.equal(entries.at(-1)?.metadata?.outcome, 'unavailable');
+  assert.equal(entries.at(-1)?.metadata?.errorCategory, 'networkError');
+
+  const timeout = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY,
+    model: MODEL,
+    timeoutMs: 5,
+    logger,
+    fetchImpl: async (_url, init) =>
+      new Promise<FakeResponse>((_resolve, reject) => {
+        (init.signal as AbortSignal).addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      }),
+  });
+  await timeout.respond?.({ text: secretPrompt, requestedAt: '2026-08-27T00:00:00.000Z' });
+  assert.equal(entries.at(-1)?.metadata?.outcome, 'timeout');
+  assert.equal(entries.at(-1)?.metadata?.errorCategory, 'timeout');
+
+  const serialized = JSON.stringify(entries);
+  assert.equal(serialized.includes(API_KEY), false);
+  assert.equal(serialized.includes(secretPrompt), false);
+  assert.equal(serialized.includes('raw remote body'), false);
 });

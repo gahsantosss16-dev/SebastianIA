@@ -7,6 +7,7 @@ import type {
   CognitiveDecisionResult,
   CognitiveModelProvider,
 } from './CognitiveModelProviderContract.js';
+import type { Logger } from '../logger.js';
 
 const GEMINI_API_ORIGIN = 'https://generativelanguage.googleapis.com';
 export const DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS = 8_000;
@@ -25,7 +26,20 @@ export interface GeminiCognitiveModelProviderOptions {
   readonly model: string;
   readonly timeoutMs?: number;
   readonly fetchImpl?: FetchLike;
+  readonly logger?: Logger;
 }
+
+interface GeminiTechnicalDiagnostic {
+  readonly durationMs: number;
+  readonly httpStatus?: number;
+  readonly errorCategory?: string;
+}
+
+type GeminiStructuredResult =
+  | ({ readonly outcome: 'generated'; readonly content: string } & GeminiTechnicalDiagnostic)
+  | ({ readonly outcome: 'unavailable'; readonly reason: string } & GeminiTechnicalDiagnostic)
+  | ({ readonly outcome: 'timeout' } & GeminiTechnicalDiagnostic)
+  | ({ readonly outcome: 'invalidResponse'; readonly reason: string } & GeminiTechnicalDiagnostic);
 
 const ANSWER_SCHEMA = Object.freeze({
   type: 'object',
@@ -83,6 +97,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
   private readonly model: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike;
+  private readonly logger: Logger | undefined;
 
   public constructor(options: GeminiCognitiveModelProviderOptions) {
     if (!options || typeof options !== 'object') {
@@ -105,6 +120,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     this.model = options.model.trim();
     this.timeoutMs = timeoutMs;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
+    this.logger = options.logger;
   }
 
   public async respond(request: CognitiveConversationRequest): Promise<CognitiveConversationResult> {
@@ -125,16 +141,21 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       ANSWER_SCHEMA,
     );
     if (result.outcome !== 'generated') {
-      return result;
+      this.logOutcome('respond', result.outcome, result);
+      return result.outcome === 'timeout'
+        ? { outcome: 'timeout' }
+        : { outcome: result.outcome, reason: result.reason };
     }
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(result.content) as unknown;
     } catch {
+      this.logOutcome('respond', 'invalidResponse', result, 'invalidStructuredJson');
       return { outcome: 'invalidResponse', reason: 'Resposta conversacional não é JSON válido.' };
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.logOutcome('respond', 'invalidResponse', result, 'schemaMismatch');
       return { outcome: 'invalidResponse', reason: 'Resposta conversacional não corresponde ao schema.' };
     }
     const answer = (parsed as { readonly answer?: unknown }).answer;
@@ -144,8 +165,10 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       answer.length > MAX_GEMINI_CONVERSATION_ANSWER_CHARS ||
       Object.keys(parsed).some((key) => key !== 'answer')
     ) {
+      this.logOutcome('respond', 'invalidResponse', result, 'schemaMismatch');
       return { outcome: 'invalidResponse', reason: 'Resposta conversacional não corresponde ao schema.' };
     }
+    this.logOutcome('respond', 'responded', result);
     return { outcome: 'responded', answer: answer.trim() };
   }
 
@@ -170,31 +193,34 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       DECISION_SCHEMA,
     );
     if (result.outcome !== 'generated') {
-      return result;
+      this.logOutcome('decide', result.outcome, result);
+      return result.outcome === 'timeout'
+        ? { outcome: 'timeout' }
+        : { outcome: result.outcome, reason: result.reason };
     }
 
     let raw: unknown;
     try {
       raw = JSON.parse(result.content) as unknown;
     } catch {
+      this.logOutcome('decide', 'invalidResponse', result, 'invalidStructuredJson');
       return { outcome: 'invalidResponse', reason: 'Resposta cognitiva não é JSON válido.' };
     }
     const decision = parseCognitiveDecision(raw);
-    return decision
-      ? { outcome: 'decided', decision }
-      : { outcome: 'invalidResponse', reason: 'Resposta cognitiva não corresponde ao schema.' };
+    if (!decision) {
+      this.logOutcome('decide', 'invalidResponse', result, 'schemaMismatch');
+      return { outcome: 'invalidResponse', reason: 'Resposta cognitiva não corresponde ao schema.' };
+    }
+    this.logOutcome('decide', 'responded', result);
+    return { outcome: 'decided', decision };
   }
 
   private async generateStructured(
     systemInstruction: string,
     userContent: string,
     responseJsonSchema: Readonly<Record<string, unknown>>,
-  ): Promise<
-    | { readonly outcome: 'generated'; readonly content: string }
-    | { readonly outcome: 'unavailable'; readonly reason: string }
-    | { readonly outcome: 'timeout' }
-    | { readonly outcome: 'invalidResponse'; readonly reason: string }
-  > {
+  ): Promise<GeminiStructuredResult> {
+    const startedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -220,19 +246,31 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       });
 
       if (!response.ok) {
-        return { outcome: 'unavailable', reason: `Gemini indisponível (HTTP ${response.status}).` };
+        return {
+          outcome: 'unavailable',
+          reason: `Gemini indisponível (HTTP ${response.status}).`,
+          ...this.diagnostic(startedAt, response.status, categorizeHttpStatus(response.status)),
+        };
       }
 
       const rawBody = await response.text();
       if (Buffer.byteLength(rawBody, 'utf8') > MAX_GEMINI_RESPONSE_BYTES) {
-        return { outcome: 'invalidResponse', reason: 'Resposta do Gemini excedeu o limite permitido.' };
+        return {
+          outcome: 'invalidResponse',
+          reason: 'Resposta do Gemini excedeu o limite permitido.',
+          ...this.diagnostic(startedAt, response.status, 'responseTooLarge'),
+        };
       }
 
       let body: unknown;
       try {
         body = JSON.parse(rawBody) as unknown;
       } catch {
-        return { outcome: 'invalidResponse', reason: 'Envelope do Gemini não é JSON válido.' };
+        return {
+          outcome: 'invalidResponse',
+          reason: 'Envelope do Gemini não é JSON válido.',
+          ...this.diagnostic(startedAt, response.status, 'invalidEnvelopeJson'),
+        };
       }
       const content = extractGeminiText(body);
       if (
@@ -240,18 +278,75 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
         content.trim() === '' ||
         content.length > MAX_GEMINI_GENERATED_JSON_CHARS
       ) {
-        return { outcome: 'invalidResponse', reason: 'Gemini não retornou conteúdo estruturado válido.' };
+        return {
+          outcome: 'invalidResponse',
+          reason: 'Gemini não retornou conteúdo estruturado válido.',
+          ...this.diagnostic(startedAt, response.status, 'missingStructuredContent'),
+        };
       }
-      return { outcome: 'generated', content: content.trim() };
+      return { outcome: 'generated', content: content.trim(), ...this.diagnostic(startedAt, response.status) };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        return { outcome: 'timeout' };
+        return { outcome: 'timeout', ...this.diagnostic(startedAt, undefined, 'timeout') };
       }
-      return { outcome: 'unavailable', reason: 'Não foi possível contatar o Gemini.' };
+      return {
+        outcome: 'unavailable',
+        reason: 'Não foi possível contatar o Gemini.',
+        ...this.diagnostic(startedAt, undefined, 'networkError'),
+      };
     } finally {
       clearTimeout(timer);
     }
   }
+
+  private diagnostic(
+    startedAt: number,
+    httpStatus?: number,
+    errorCategory?: string,
+  ): GeminiTechnicalDiagnostic {
+    return {
+      durationMs: Math.max(0, Date.now() - startedAt),
+      ...(httpStatus === undefined ? {} : { httpStatus }),
+      ...(errorCategory === undefined ? {} : { errorCategory }),
+    };
+  }
+
+  private logOutcome(
+    operation: 'respond' | 'decide',
+    outcome: 'responded' | 'unavailable' | 'timeout' | 'invalidResponse',
+    diagnostic: GeminiTechnicalDiagnostic,
+    errorCategory = diagnostic.errorCategory,
+  ): void {
+    if (!this.logger) {
+      return;
+    }
+    const metadata: Record<string, unknown> = {
+      provider: 'gemini',
+      model: this.model,
+      operation,
+      outcome,
+      durationMs: diagnostic.durationMs,
+      ...(diagnostic.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }),
+      ...(errorCategory === undefined ? {} : { errorCategory }),
+    };
+    const message = 'Remote cognitive request completed.';
+    if (outcome === 'responded') {
+      this.logger.info(message, metadata);
+      return;
+    }
+    this.logger.warn(message, metadata);
+  }
+}
+
+function categorizeHttpStatus(status: number): string {
+  if (status === 400) return 'badRequest';
+  if (status === 401) return 'authentication';
+  if (status === 403) return 'permission';
+  if (status === 404) return 'modelNotFound';
+  if (status === 429) return 'rateLimit';
+  if (status >= 500) return 'serverError';
+  if (status >= 400) return 'clientError';
+  return 'httpError';
 }
 
 function extractGeminiText(body: unknown): string | undefined {
