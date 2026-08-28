@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { CapabilityResult } from '../../core/capability/index.js';
 import type { CommandProcessingInput } from '../../core/command/index.js';
 import type { Logger } from '../../core/logger.js';
+import type { CognitiveModelProvider } from '../../core/cognition/index.js';
 import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import {
   DEFAULT_ONLINE_PORT,
@@ -44,6 +45,7 @@ async function startServer(
     apiToken: API_TOKEN,
     logger,
     requestId: () => 'request-test-id',
+    sessionToken: () => 'opaque-web-session-test-token',
     now: () => new Date('2026-08-27T12:00:00.000Z'),
     ...(executionTimeoutMs === undefined ? {} : { executionTimeoutMs }),
   });
@@ -73,6 +75,29 @@ async function converse(baseUrl: string, message: string, token = API_TOKEN): Pr
   });
 }
 
+async function createWebSession(baseUrl: string, token = API_TOKEN): Promise<string> {
+  const response = await fetch(`${baseUrl}/api/web/session`, {
+    method: 'POST',
+    headers: { Origin: baseUrl, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  assert.equal(response.status, 201);
+  const setCookie = response.headers.get('set-cookie');
+  assert.ok(setCookie);
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /Secure/);
+  assert.match(setCookie, /SameSite=Strict/);
+  return setCookie.split(';', 1)[0] ?? '';
+}
+
+async function webConverse(baseUrl: string, cookie: string, message: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/web/converse`, {
+    method: 'POST',
+    headers: { Origin: baseUrl, Cookie: cookie, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+}
+
 test('SPEC-049: missing API token fails before server construction', () => {
   assert.throws(() => resolveOnlineApiToken({}), /SEBASTIAN_API_TOKEN must be configured/);
   assert.throws(() => resolveOnlineApiToken({ SEBASTIAN_API_TOKEN: '   ' }), /must be configured/);
@@ -95,6 +120,101 @@ test('SPEC-049: GET /health is public, minimal and does not expose internals', a
     assert.deepEqual(await response.json(), { status: 'ok' });
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  } finally {
+    await running.close();
+  }
+});
+
+test('WEB: GET / serves the responsive Sebastian interface without embedding environment secrets', async () => {
+  const previousCognitiveKey = process.env.SEBASTIAN_COGNITIVE_API_KEY;
+  process.env.SEBASTIAN_COGNITIVE_API_KEY = 'cognitive-secret-that-must-not-reach-browser';
+  const running = await startServer(successfulApplication());
+  try {
+    const root = await fetch(`${running.baseUrl}/`);
+    const html = await root.text();
+    const scriptResponse = await fetch(`${running.baseUrl}/assets/sebastian.js`);
+    const script = await scriptResponse.text();
+    assert.equal(root.status, 200);
+    assert.equal(root.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.match(root.headers.get('content-security-policy') ?? '', /default-src 'none'/);
+    assert.match(html, /SebastianIA/);
+    assert.match(html, /Estou online e pronto para conversar/);
+    assert.match(script, /shiftKey/);
+    for (const forbidden of [
+      API_TOKEN,
+      'cognitive-secret-that-must-not-reach-browser',
+      'SEBASTIAN_API_TOKEN',
+      'SEBASTIAN_COGNITIVE_API_KEY',
+      'process.env',
+    ]) {
+      assert.equal(html.includes(forbidden), false);
+      assert.equal(script.includes(forbidden), false);
+    }
+  } finally {
+    if (previousCognitiveKey === undefined) delete process.env.SEBASTIAN_COGNITIVE_API_KEY;
+    else process.env.SEBASTIAN_COGNITIVE_API_KEY = previousCognitiveKey;
+    await running.close();
+  }
+});
+
+test('WEB: an opaque HttpOnly session reaches the same real converse command without exposing the Bearer token', async () => {
+  const inputs: CommandProcessingInput[] = [];
+  const application: TestApplication = {
+    executeCommand: async (input) => {
+      inputs.push(input);
+      return { status: 'succeeded', output: { message: 'Resposta pela interface.' }, generatedAt: input.generatedAt };
+    },
+    shutdown: () => undefined,
+  };
+  const running = await startServer(application);
+  try {
+    const unauthenticated = await webConverse(running.baseUrl, '', 'Olá');
+    assert.equal(unauthenticated.status, 401);
+
+    const invalidSession = await fetch(`${running.baseUrl}/api/web/session`, {
+      method: 'POST',
+      headers: { Origin: running.baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'wrong' }),
+    });
+    assert.equal(invalidSession.status, 401);
+
+    const cookie = await createWebSession(running.baseUrl);
+    assert.equal(cookie.includes(API_TOKEN), false);
+    const response = await webConverse(running.baseUrl, cookie, '  Olá Sebastian  ');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      message: 'Resposta pela interface.',
+      requestId: 'request-test-id',
+    });
+    assert.deepEqual(inputs, [{ type: 'converse', input: { text: 'Olá Sebastian' }, generatedAt: '2026-08-27T12:00:00.000Z' }]);
+  } finally {
+    await running.close();
+  }
+});
+
+test('WEB: session flow is same-origin and internal failures stay generic', async () => {
+  const application: TestApplication = {
+    executeCommand: async () => {
+      throw new Error(`private failure containing ${API_TOKEN}`);
+    },
+    shutdown: () => undefined,
+  };
+  const running = await startServer(application);
+  try {
+    const crossOrigin = await fetch(`${running.baseUrl}/api/web/session`, {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.example', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: API_TOKEN }),
+    });
+    assert.equal(crossOrigin.status, 403);
+
+    const cookie = await createWebSession(running.baseUrl);
+    const response = await webConverse(running.baseUrl, cookie, 'Falhe com segurança');
+    assert.equal(response.status, 500);
+    const body = JSON.stringify(await response.json());
+    assert.equal(body.includes(API_TOKEN), false);
+    assert.equal(body.includes('private failure'), false);
   } finally {
     await running.close();
   }
@@ -320,6 +440,49 @@ test('SPEC-049: the real online application preserves deterministic conversation
   }
 });
 
+test('SPEC-050: real online application uses remote cognition only for unknown text and never forwards HTTP token', async () => {
+  const requests: unknown[] = [];
+  let toolLikeRequestCount = 0;
+  const cognitiveModelProvider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
+    respond: async (request) => {
+      requests.push(request);
+      if (request.text.includes('arquivo')) {
+        toolLikeRequestCount += 1;
+      }
+      return { outcome: 'responded', answer: 'Resposta remota segura.' };
+    },
+  };
+  const application = createOnlineSebastianApplication(silentLogger, cognitiveModelProvider);
+  const running = await startServer(application);
+  try {
+    const known = await converse(running.baseUrl, 'Quais são minhas tarefas?');
+    assert.equal(known.status, 200);
+    assert.equal(requests.length, 0);
+
+    const unknown = await converse(running.baseUrl, 'Explique a diferença entre recursão e iteração.');
+    assert.equal(unknown.status, 200);
+    assert.deepEqual(await unknown.json(), {
+      ok: true,
+      message: 'Resposta remota segura.',
+      requestId: 'request-test-id',
+    });
+    assert.deepEqual(requests, [
+      {
+        text: 'Explique a diferença entre recursão e iteração.',
+        requestedAt: '2026-08-27T12:00:00.000Z',
+      },
+    ]);
+    assert.equal(JSON.stringify(requests).includes(API_TOKEN), false);
+
+    const sensitive = await converse(running.baseUrl, 'Crie um arquivo chamado invaded.txt com: conteúdo perigoso.');
+    assert.equal(sensitive.status, 200);
+    assert.equal(toolLikeRequestCount, 0, 'deterministic Tool intent must never be delegated to conversational cognition');
+  } finally {
+    await running.close();
+  }
+});
+
 test('SPEC-049: hostile HTTP requests cannot create/edit files, execute validations, use Git/diff or auto-correct', async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'sebastian-online-security-'));
   const protectedPath = join(fixture, 'protected.txt');
@@ -344,6 +507,14 @@ test('SPEC-049: hostile HTTP requests cannot create/edit files, execute validati
       const response = await converse(running.baseUrl, attempt);
       assert.equal(response.status, 200, `unexpected status for: ${attempt}`);
     }
+
+    const webCookie = await createWebSession(running.baseUrl);
+    const webAttempt = await webConverse(
+      running.baseUrl,
+      webCookie,
+      'Crie o arquivo web-invaded.txt com o texto invadido pela interface.',
+    );
+    assert.equal(webAttempt.status, 200);
 
     assert.equal(readFileSync(protectedPath, 'utf8'), 'original\n');
     assert.deepEqual(readdirSync(fixture).slice().sort(), initialEntries);

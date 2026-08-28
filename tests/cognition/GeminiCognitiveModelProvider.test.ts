@@ -1,0 +1,166 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  GeminiCognitiveModelProvider,
+  MAX_GEMINI_CONVERSATION_ANSWER_CHARS,
+} from '../../core/cognition/GeminiCognitiveModelProvider.js';
+import { InvalidCognitiveModelProviderInputError } from '../../core/cognition/CognitiveModelProviderErrors.js';
+import type { CognitiveDecisionRequest } from '../../core/cognition/CognitiveModelProviderContract.js';
+
+const API_KEY = 'gemini-test-key-never-real';
+const MODEL = 'gemini-2.5-flash-lite';
+
+type FakeResponse = { readonly ok: boolean; readonly status: number; text(): Promise<string> };
+type FetchHandler = (url: string, init: Readonly<Record<string, unknown>>) => Promise<FakeResponse>;
+
+function geminiEnvelope(generated: unknown): string {
+  return JSON.stringify({
+    candidates: [{ content: { parts: [{ text: typeof generated === 'string' ? generated : JSON.stringify(generated) }] } }],
+  });
+}
+
+function response(status: number, body: string): FakeResponse {
+  return { ok: status >= 200 && status < 300, status, text: async () => body };
+}
+
+function provider(fetchImpl: FetchHandler, timeoutMs = 8_000): GeminiCognitiveModelProvider {
+  return new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, timeoutMs, fetchImpl });
+}
+
+function decisionRequest(): CognitiveDecisionRequest {
+  return {
+    objective: 'investigue o problema',
+    authorization: 'readOnly',
+    relevantMemory: [{ content: 'memória que não pode sair' }],
+    recentObservations: [{ stepId: '1', toolId: 'git.status', outcome: 'ok', summary: 'segredo interno' }],
+    filesRead: [{ path: 'secret.txt', content: 'conteúdo do arquivo' }],
+    availableTools: [{ toolId: 'fs.readFile', description: 'ler', requiresAuthorization: false }],
+    stepsTaken: 1,
+    stepsRemaining: 10,
+    requestedAt: '2026-08-27T00:00:00.000Z',
+  };
+}
+
+test('SPEC-050: Gemini provider validates credentials, model and timeout without exposing values', () => {
+  assert.throws(
+    () => new GeminiCognitiveModelProvider({ apiKey: '', model: MODEL }),
+    InvalidCognitiveModelProviderInputError,
+  );
+  assert.throws(
+    () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: '' }),
+    InvalidCognitiveModelProviderInputError,
+  );
+  assert.throws(
+    () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, timeoutMs: 15_000 }),
+    InvalidCognitiveModelProviderInputError,
+  );
+});
+
+test('SPEC-050: valid structured Gemini response becomes conversational text and key stays only in header', async () => {
+  let capturedUrl = '';
+  let capturedInit: Readonly<Record<string, unknown>> = {};
+  const cognitive = provider(async (url, init) => {
+    capturedUrl = url;
+    capturedInit = init;
+    return response(200, geminiEnvelope({ answer: 'Uma resposta cognitiva útil.' }));
+  });
+
+  const result = await cognitive.respond?.({ text: 'Explique recursão.', requestedAt: '2026-08-27T00:00:00.000Z' });
+
+  assert.deepEqual(result, { outcome: 'responded', answer: 'Uma resposta cognitiva útil.' });
+  assert.equal(capturedUrl, `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`);
+  const headers = capturedInit.headers as Record<string, string>;
+  assert.equal(headers['x-goog-api-key'], API_KEY);
+  const body = capturedInit.body as string;
+  assert.equal(body.includes(API_KEY), false);
+  assert.equal(body.includes('Explique recursão.'), true);
+  assert.equal(body.includes('responseJsonSchema'), true);
+  assert.equal(body.includes('application/json'), true);
+});
+
+test('SPEC-050: Gemini decision payload excludes memory, files, observations and Tool descriptions', async () => {
+  let capturedBody = '';
+  const validDecision = {
+    intent: 'conclude',
+    goal: 'investigue o problema',
+    reasoningSummary: 'Não há evidência remota suficiente.',
+    nextAction: 'concludeFailed',
+    requiresAuthorization: false,
+    expectedEvidence: 'Evidência local adicional.',
+    completionState: 'insufficientEvidence',
+    confidence: 0.8,
+  };
+  const cognitive = provider(async (_url, init) => {
+    capturedBody = init.body as string;
+    return response(200, geminiEnvelope(validDecision));
+  });
+
+  const result = await cognitive.decide(decisionRequest());
+
+  assert.equal(result.outcome, 'decided');
+  for (const forbidden of ['memória que não pode sair', 'secret.txt', 'conteúdo do arquivo', 'git.status', 'fs.readFile', 'segredo interno']) {
+    assert.equal(capturedBody.includes(forbidden), false, forbidden);
+  }
+  assert.equal(capturedBody.includes('investigue o problema'), true);
+});
+
+test('SPEC-050: HTTP failures and network failures resolve unavailable without raw failure leakage', async () => {
+  for (const status of [401, 403, 429, 500, 503]) {
+    const result = await provider(async () => response(status, 'sensitive remote body')).respond?.({
+      text: 'pergunta',
+      requestedAt: '2026-08-27T00:00:00.000Z',
+    });
+    assert.equal(result?.outcome, 'unavailable');
+    assert.equal(JSON.stringify(result).includes('sensitive remote body'), false);
+    assert.equal(JSON.stringify(result).includes(API_KEY), false);
+  }
+
+  const network = await provider(async () => {
+    throw new Error(`DNS failure with ${API_KEY}`);
+  }).respond?.({ text: 'pergunta', requestedAt: '2026-08-27T00:00:00.000Z' });
+  assert.deepEqual(network, { outcome: 'unavailable', reason: 'Não foi possível contatar o Gemini.' });
+});
+
+test('SPEC-050: timeout aborts native fetch and resolves timeout without retry', async () => {
+  let calls = 0;
+  let aborted = false;
+  const cognitive = provider(
+    async (_url, init) =>
+      new Promise<FakeResponse>((_resolve, reject) => {
+        calls += 1;
+        const signal = init.signal as AbortSignal;
+        signal.addEventListener('abort', () => {
+          aborted = true;
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      }),
+    20,
+  );
+
+  const result = await cognitive.respond?.({ text: 'pergunta', requestedAt: '2026-08-27T00:00:00.000Z' });
+  assert.deepEqual(result, { outcome: 'timeout' });
+  assert.equal(aborted, true);
+  assert.equal(calls, 1);
+});
+
+test('SPEC-050: malformed envelopes, JSON, schemas and oversized answers are invalidResponse', async () => {
+  const bodies = [
+    'not-json',
+    JSON.stringify({}),
+    geminiEnvelope('not-json'),
+    geminiEnvelope({}),
+    geminiEnvelope({ answer: '' }),
+    geminiEnvelope({ answer: 'ok', toolId: 'fs.readFile' }),
+    geminiEnvelope({ answer: 'x'.repeat(MAX_GEMINI_CONVERSATION_ANSWER_CHARS + 1) }),
+  ];
+
+  for (const body of bodies) {
+    const result = await provider(async () => response(200, body)).respond?.({
+      text: 'pergunta',
+      requestedAt: '2026-08-27T00:00:00.000Z',
+    });
+    assert.equal(result?.outcome, 'invalidResponse');
+  }
+});

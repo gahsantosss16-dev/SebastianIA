@@ -235,7 +235,12 @@ export class DevelopmentModelProvider implements ModelProvider {
       return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
     }
 
-    return { intent: 'respond', answer: NO_MATCH_ANSWER, recordable: false };
+    return {
+      intent: 'respond',
+      answer: NO_MATCH_ANSWER,
+      recordable: false,
+      cognitiveFallbackEligible: true,
+    };
   }
 
   private extractRememberContent(text: string): string | undefined {

@@ -31,6 +31,7 @@ import {
   type GoalExecutionContext,
   type GoalExecutionResult,
 } from '../development/index.js';
+import type { CognitiveModelProvider } from '../cognition/index.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
@@ -55,17 +56,20 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
   private readonly modelProvider: ModelProvider | undefined;
   private readonly developmentTaskOrchestrator: DevelopmentTaskOrchestratorLike;
   private readonly goalExecutionOrchestrator: GoalExecutionOrchestratorLike;
+  private readonly cognitiveModelProvider: CognitiveModelProvider | undefined;
 
   public constructor(
     specializedTool: SpecializedTool = new InMemorySpecializedTool(),
     modelProvider?: ModelProvider,
     developmentTaskOrchestrator?: DevelopmentTaskOrchestratorLike,
     goalExecutionOrchestrator?: GoalExecutionOrchestratorLike,
+    cognitiveModelProvider?: CognitiveModelProvider,
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
     this.developmentTaskOrchestrator = developmentTaskOrchestrator ?? new DevelopmentTaskOrchestrator(specializedTool);
     this.goalExecutionOrchestrator = goalExecutionOrchestrator ?? new GoalExecutionOrchestrator(specializedTool);
+    this.cognitiveModelProvider = cognitiveModelProvider;
   }
 
   public async handoff(input: SpecializedAgentHandoffInput): Promise<SpecializedAgentHandoffResult> {
@@ -101,8 +105,33 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       requestedAt: input.requestedAt,
     });
 
-    const result = await this.resolveConversationDecision(input, decision, rememberedFacts);
-    return this.withConversationTurn(result, text, decision);
+    const effectiveDecision = await this.applyCognitiveConversationFallback(decision, text, input.requestedAt);
+    const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
+    return this.withConversationTurn(result, text, effectiveDecision);
+  }
+
+  private async applyCognitiveConversationFallback(
+    decision: ModelInterpretationDecision,
+    text: string,
+    requestedAt: string,
+  ): Promise<ModelInterpretationDecision> {
+    if (
+      decision.intent !== 'respond' ||
+      decision.cognitiveFallbackEligible !== true ||
+      typeof this.cognitiveModelProvider?.respond !== 'function'
+    ) {
+      return decision;
+    }
+
+    try {
+      const result = await this.cognitiveModelProvider.respond({ text, requestedAt });
+      if (result.outcome !== 'responded' || typeof result.answer !== 'string' || result.answer.trim() === '') {
+        return decision;
+      }
+      return { intent: 'respond', answer: result.answer.trim(), recordable: true };
+    } catch {
+      return decision;
+    }
   }
 
   private async resolveConversationDecision(

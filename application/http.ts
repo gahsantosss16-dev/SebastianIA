@@ -2,6 +2,7 @@
 
 import { createLogger } from '../core/logger.js';
 import { createOnlineSebastianApplication } from './OnlineSebastianApplication.js';
+import { createOnlineCognitiveModelProvider } from './OnlineCognitiveProviderConfiguration.js';
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
 
 const logger = createLogger();
@@ -10,7 +11,8 @@ async function startOnlineServer(): Promise<void> {
   try {
     const apiToken = resolveOnlineApiToken();
     const port = resolveOnlinePort();
-    const application = createOnlineSebastianApplication(logger);
+    const cognitiveModelProvider = createOnlineCognitiveModelProvider();
+    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider);
     const httpServer = new SebastianHttpServer({ application, apiToken, logger });
     const started = await httpServer.listen(port);
     logger.info('Sebastian online started.', { port: started.port });

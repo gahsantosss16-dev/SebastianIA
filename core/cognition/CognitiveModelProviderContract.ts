@@ -104,6 +104,22 @@ export type CognitiveDecisionResult =
   | { readonly outcome: 'timeout' }
   | { readonly outcome: 'invalidResponse'; readonly reason: string };
 
+/** Minimal, tool-free input for conversational cognition. */
+export interface CognitiveConversationRequest {
+  readonly text: string;
+  readonly requestedAt: string;
+}
+
+/**
+ * A conversational provider can only return text or a closed failure state.
+ * It cannot propose a Tool, authorization, goal or command through this seam.
+ */
+export type CognitiveConversationResult =
+  | { readonly outcome: 'responded'; readonly answer: string }
+  | { readonly outcome: 'unavailable'; readonly reason: string }
+  | { readonly outcome: 'timeout' }
+  | { readonly outcome: 'invalidResponse'; readonly reason: string };
+
 /**
  * Substitutable boundary for the general cognitive engine (SPEC-048) -
  * mirrors `ModelProvider`'s role as a seam Core/Tool/GoalExecutionOrchestrator
@@ -115,4 +131,6 @@ export type CognitiveDecisionResult =
  */
 export interface CognitiveModelProvider {
   decide(request: CognitiveDecisionRequest): Promise<CognitiveDecisionResult>;
+  /** Optional and retrocompatible: only used for an explicitly marked deterministic conversational fallback. */
+  respond?(request: CognitiveConversationRequest): Promise<CognitiveConversationResult>;
 }

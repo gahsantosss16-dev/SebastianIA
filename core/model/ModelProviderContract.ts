@@ -39,6 +39,12 @@ export interface ModelInterpretationRespondDecision {
    * topic, instead of correctly reporting it has nothing to continue.
    */
   readonly recordable?: boolean;
+  /**
+   * Structural opt-in for remote conversational cognition. Only the
+   * deterministic provider may set it; the Agent never infers eligibility
+   * by comparing user-facing answer text.
+   */
+  readonly cognitiveFallbackEligible?: boolean;
 }
 
 /** A decision to create a new pending task with the given content. */

@@ -8,6 +8,113 @@ import {
 import { SpecializedToolInvocationFailureError } from '../../core/tool/index.js';
 import type { ModelInterpretationDecision, ModelProvider } from '../../core/model/ModelProviderContract.js';
 import type { DevelopmentTaskPlan, DevelopmentTaskResult, GoalDefinition, GoalExecutionResult } from '../../core/development/index.js';
+import type { CognitiveModelProvider, CognitiveConversationResult } from '../../core/cognition/index.js';
+
+function cognitiveFallbackAgent(
+  result: CognitiveConversationResult | Error,
+  onRespond: (request: unknown) => void = () => undefined,
+): InMemorySpecializedAgent {
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({
+      intent: 'respond',
+      answer: 'Ainda não sei responder a isso.',
+      recordable: false,
+      cognitiveFallbackEligible: true,
+    }),
+  };
+  const cognitiveModelProvider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
+    respond: async (request) => {
+      onRespond(request);
+      if (result instanceof Error) {
+        throw result;
+      }
+      return result;
+    },
+  };
+  return new InMemorySpecializedAgent(
+    { invoke: () => ({ status: 'completed', output: { message: 'should not run' } }) },
+    modelProvider,
+    undefined,
+    undefined,
+    cognitiveModelProvider,
+  );
+}
+
+function fallbackHandoff(text = 'Explique uma ideia nova') {
+  return {
+    responsibilityId: 'capability.execute.converse',
+    executionId: 'converse:2026-08-27T00:00:00.000Z',
+    commandType: CONVERSE_COMMAND_TYPE,
+    requestedAt: '2026-08-27T00:00:01.000Z',
+    payload: { commandInput: { type: 'converse', input: { text } } },
+  } as const;
+}
+
+test('SPEC-050: structural deterministic fallback calls cognitive respond with only text and requestedAt', async () => {
+  let request: unknown;
+  const agent = cognitiveFallbackAgent(
+    { outcome: 'responded', answer: 'Recursão é uma função aplicando-se a um problema menor.' },
+    (value) => {
+      request = value;
+    },
+  );
+
+  const result = await agent.handoff(fallbackHandoff('Explique recursão'));
+
+  assert.deepEqual(request, { text: 'Explique recursão', requestedAt: '2026-08-27T00:00:01.000Z' });
+  assert.equal(result.status, 'completed');
+  if (result.status === 'completed') {
+    assert.deepEqual(result.output.finalResult, {
+      message: 'Recursão é uma função aplicando-se a um problema menor.',
+    });
+  }
+});
+
+test('SPEC-050: known deterministic response never calls cognitive respond', async () => {
+  let calls = 0;
+  const modelProvider: ModelProvider = {
+    interpret: async () => ({ intent: 'respond', answer: 'Resposta determinística.' }),
+  };
+  const cognitiveModelProvider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
+    respond: async () => {
+      calls += 1;
+      return { outcome: 'responded', answer: 'não deve aparecer' };
+    },
+  };
+  const agent = new InMemorySpecializedAgent(
+    { invoke: () => ({ status: 'completed', output: {} }) },
+    modelProvider,
+    undefined,
+    undefined,
+    cognitiveModelProvider,
+  );
+
+  const result = await agent.handoff(fallbackHandoff());
+  assert.equal(calls, 0);
+  assert.equal(result.status, 'completed');
+  if (result.status === 'completed') {
+    assert.deepEqual(result.output.finalResult, { message: 'Resposta determinística.' });
+  }
+});
+
+test('SPEC-050: every cognitive failure preserves the exact deterministic fallback', async () => {
+  const failures: Array<CognitiveConversationResult | Error> = [
+    { outcome: 'timeout' },
+    { outcome: 'unavailable', reason: '429' },
+    { outcome: 'invalidResponse', reason: 'schema' },
+    new Error('provider rejected'),
+  ];
+
+  for (const failure of failures) {
+    const result = await cognitiveFallbackAgent(failure).handoff(fallbackHandoff());
+    assert.equal(result.status, 'completed');
+    if (result.status === 'completed') {
+      assert.deepEqual(result.output.finalResult, { message: 'Ainda não sei responder a isso.' });
+    }
+  }
+});
 
 test('specialized agent returns completed for valid handoff input', async () => {
   let invokeCount = 0;

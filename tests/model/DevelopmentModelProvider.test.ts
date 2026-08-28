@@ -87,7 +87,12 @@ test('interpret falls back to a generic response for unmatched input', async () 
     requestedAt: '2026-08-11T00:05:00.000Z',
   });
 
-  assert.deepEqual(decision, { intent: 'respond', answer: 'Ainda não sei responder a isso.', recordable: false });
+  assert.deepEqual(decision, {
+    intent: 'respond',
+    answer: 'Ainda não sei responder a isso.',
+    recordable: false,
+    cognitiveFallbackEligible: true,
+  });
 });
 
 test('interpret treats an empty remember marker suffix as unmatched', async () => {

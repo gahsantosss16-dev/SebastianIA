@@ -4,3 +4,4 @@ export * from './CognitiveExecutionBudget.js';
 export * from './CognitiveDecisionValidator.js';
 export * from './CognitiveToolPolicy.js';
 export * from './OllamaCognitiveModelProvider.js';
+export * from './GeminiCognitiveModelProvider.js';

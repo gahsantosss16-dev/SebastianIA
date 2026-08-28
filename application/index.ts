@@ -5,4 +5,5 @@ export * from './SebastianApplication.js';
 export * from './LocalCommandInvocation.js';
 export * from './LocalCommandInvocationErrors.js';
 export * from './OnlineSebastianApplication.js';
+export * from './OnlineCognitiveProviderConfiguration.js';
 export * from './SebastianHttpServer.js';

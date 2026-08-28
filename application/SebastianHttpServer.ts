@@ -1,10 +1,11 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { Logger } from '../core/logger.js';
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
+import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
 
 export const SEBASTIAN_API_TOKEN_ENV_VAR = 'SEBASTIAN_API_TOKEN';
 export const DEFAULT_ONLINE_PORT = 3000;
@@ -12,6 +13,8 @@ export const MAX_HTTP_BODY_BYTES = 16 * 1024;
 export const MAX_CONVERSE_MESSAGE_CHARS = 4_000;
 export const HTTP_BODY_TIMEOUT_MS = 10_000;
 export const HTTP_EXECUTION_TIMEOUT_MS = 15_000;
+export const WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
+const WEB_SESSION_COOKIE = 'sebastian_session';
 
 interface OnlineCommandExecutor {
   executeCommand(input: CommandProcessingInput): Promise<CapabilityResult>;
@@ -24,6 +27,7 @@ export interface SebastianHttpServerOptions {
   readonly logger?: Logger;
   readonly now?: () => Date;
   readonly requestId?: () => string;
+  readonly sessionToken?: () => string;
   readonly executionTimeoutMs?: number;
 }
 
@@ -58,11 +62,14 @@ export class SebastianHttpServer {
   private readonly logger: Logger;
   private readonly now: () => Date;
   private readonly createRequestId: () => string;
+  private readonly createSessionToken: () => string;
   private readonly executionTimeoutMs: number;
   private readonly server: Server;
   private converseInFlight = false;
   private shuttingDown = false;
   private applicationShutDown = false;
+  private webSessionDigest: Buffer | undefined;
+  private webSessionExpiresAt = 0;
 
   public constructor(options: SebastianHttpServerOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -86,6 +93,7 @@ export class SebastianHttpServer {
     this.logger = options.logger ?? silentLogger;
     this.now = options.now ?? (() => new Date());
     this.createRequestId = options.requestId ?? randomUUID;
+    this.createSessionToken = options.sessionToken ?? (() => randomBytes(32).toString('base64url'));
     this.executionTimeoutMs = executionTimeoutMs;
     this.server = createServer((request, response) => {
       void this.handle(request, response);
@@ -158,6 +166,29 @@ export class SebastianHttpServer {
 
     try {
       const url = new URL(request.url ?? '/', 'http://localhost');
+      if (url.pathname === '/') {
+        if (request.method !== 'GET') {
+          this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET' });
+          return;
+        }
+        this.writeWebAsset(response, 'text/html; charset=utf-8', SEBASTIAN_WEB_HTML);
+        return;
+      }
+
+      if (url.pathname === '/assets/sebastian.css' || url.pathname === '/assets/sebastian.js') {
+        if (request.method !== 'GET') {
+          this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET' });
+          return;
+        }
+        const isStylesheet = url.pathname.endsWith('.css');
+        this.writeWebAsset(
+          response,
+          isStylesheet ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
+          isStylesheet ? SEBASTIAN_WEB_STYLES : SEBASTIAN_WEB_SCRIPT,
+        );
+        return;
+      }
+
       if (url.pathname === '/health') {
         if (request.method !== 'GET') {
           this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, {
@@ -166,6 +197,24 @@ export class SebastianHttpServer {
           return;
         }
         this.writeJson(response, 200, { status: 'ok' });
+        return;
+      }
+
+      if (url.pathname === '/api/web/session') {
+        await this.handleWebSession(request, response, requestId);
+        return;
+      }
+
+      if (url.pathname === '/api/web/converse') {
+        if (request.method !== 'POST') {
+          this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'POST' });
+          return;
+        }
+        if (!this.hasSameOrigin(request) || !this.hasValidWebSession(request)) {
+          this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
+          return;
+        }
+        await this.handleConverse(request, response, requestId);
         return;
       }
 
@@ -185,51 +234,7 @@ export class SebastianHttpServer {
         });
         return;
       }
-      if (!isJsonContentType(request.headers['content-type'])) {
-        this.writeError(response, 415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type deve ser application/json.', requestId);
-        return;
-      }
-      if (this.converseInFlight) {
-        this.writeError(response, 503, 'SERVICE_BUSY', 'Serviço ocupado. Tente novamente.', requestId, {
-          'Retry-After': '1',
-        });
-        return;
-      }
-
-      this.converseInFlight = true;
-      let executionStarted = false;
-      try {
-        const body = await readJsonBody(request);
-        const message = extractMessage(body);
-        const execution = this.application.executeCommand({
-          type: LOCAL_CONVERSE_COMMAND_TYPE,
-          input: { text: message },
-          generatedAt: this.now().toISOString(),
-        });
-        executionStarted = true;
-        void execution.then(
-          () => {
-            this.converseInFlight = false;
-          },
-          () => {
-            this.converseInFlight = false;
-          },
-        );
-        const result = await withTimeout(
-          execution,
-          this.executionTimeoutMs,
-        );
-        const publicMessage = extractPublicMessage(result);
-        this.writeJson(response, 200, { ok: true, message: publicMessage, requestId });
-      } finally {
-        // A timed-out execution may still be settling because Promise.race
-        // cannot cancel arbitrary application work. Keep the gate closed until
-        // that real operation settles; only pre-execution parse failures can
-        // release it here.
-        if (!executionStarted) {
-          this.converseInFlight = false;
-        }
-      }
+      await this.handleConverse(request, response, requestId);
     } catch (error) {
       if (response.headersSent || response.destroyed) {
         return;
@@ -244,6 +249,91 @@ export class SebastianHttpServer {
     }
   }
 
+  private async handleWebSession(
+    request: IncomingMessage,
+    response: ServerResponse,
+    requestId: string,
+  ): Promise<void> {
+    if (request.method === 'GET') {
+      this.writeJson(response, 200, { authenticated: this.hasValidWebSession(request) });
+      return;
+    }
+    if (request.method !== 'POST') {
+      this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET, POST' });
+      return;
+    }
+    if (!this.hasSameOrigin(request)) {
+      this.writeError(response, 403, 'FORBIDDEN', 'Origem não permitida.', requestId);
+      return;
+    }
+    if (!isJsonContentType(request.headers['content-type'])) {
+      this.writeError(response, 415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type deve ser application/json.', requestId);
+      return;
+    }
+    const body = await readJsonBody(request);
+    const candidate = extractSessionCredential(body);
+    if (!this.isValidToken(candidate)) {
+      this.writeError(response, 401, 'UNAUTHORIZED', 'Chave de acesso inválida.', requestId);
+      return;
+    }
+
+    const sessionToken = this.createSessionToken();
+    this.webSessionDigest = digestToken(sessionToken);
+    this.webSessionExpiresAt = this.now().getTime() + WEB_SESSION_TTL_MS;
+    this.writeJson(response, 201, { authenticated: true }, {
+      'Set-Cookie': `${WEB_SESSION_COOKIE}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(WEB_SESSION_TTL_MS / 1_000)}`,
+    });
+  }
+
+  private async handleConverse(
+    request: IncomingMessage,
+    response: ServerResponse,
+    requestId: string,
+  ): Promise<void> {
+    if (!isJsonContentType(request.headers['content-type'])) {
+      this.writeError(response, 415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type deve ser application/json.', requestId);
+      return;
+    }
+    if (this.converseInFlight) {
+      this.writeError(response, 503, 'SERVICE_BUSY', 'Serviço ocupado. Tente novamente.', requestId, {
+        'Retry-After': '1',
+      });
+      return;
+    }
+
+    this.converseInFlight = true;
+    let executionStarted = false;
+    try {
+      const body = await readJsonBody(request);
+      const message = extractMessage(body);
+      const execution = this.application.executeCommand({
+        type: LOCAL_CONVERSE_COMMAND_TYPE,
+        input: { text: message },
+        generatedAt: this.now().toISOString(),
+      });
+      executionStarted = true;
+      void execution.then(
+        () => {
+          this.converseInFlight = false;
+        },
+        () => {
+          this.converseInFlight = false;
+        },
+      );
+      const result = await withTimeout(execution, this.executionTimeoutMs);
+      const publicMessage = extractPublicMessage(result);
+      this.writeJson(response, 200, { ok: true, message: publicMessage, requestId });
+    } finally {
+      // A timed-out execution may still be settling because Promise.race
+      // cannot cancel arbitrary application work. Keep the gate closed until
+      // that real operation settles; only pre-execution parse failures can
+      // release it here.
+      if (!executionStarted) {
+        this.converseInFlight = false;
+      }
+    }
+  }
+
   private isAuthorized(authorization: string | undefined): boolean {
     if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) {
       return false;
@@ -252,7 +342,45 @@ export class SebastianHttpServer {
     if (candidate === '') {
       return false;
     }
+    return this.isValidToken(candidate);
+  }
+
+  private isValidToken(candidate: string): boolean {
     return timingSafeEqual(digestToken(candidate), this.expectedTokenDigest);
+  }
+
+  private hasSameOrigin(request: IncomingMessage): boolean {
+    const origin = request.headers.origin;
+    const host = request.headers.host;
+    if (typeof origin !== 'string' || typeof host !== 'string') {
+      return false;
+    }
+    try {
+      return new URL(origin).host === host;
+    } catch {
+      return false;
+    }
+  }
+
+  private hasValidWebSession(request: IncomingMessage): boolean {
+    if (this.webSessionDigest === undefined || this.now().getTime() >= this.webSessionExpiresAt) {
+      return false;
+    }
+    const candidate = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
+    return candidate !== undefined && timingSafeEqual(digestToken(candidate), this.webSessionDigest);
+  }
+
+  private writeWebAsset(response: ServerResponse, contentType: string, body: string): void {
+    response.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+    });
+    response.end(body);
   }
 
   private writeError(
@@ -329,6 +457,32 @@ function extractMessage(body: unknown): string {
     throw new HttpRequestError(400, 'INVALID_REQUEST', 'Mensagem excede o limite permitido.');
   }
   return message.trim();
+}
+
+function extractSessionCredential(body: unknown): string {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new HttpRequestError(400, 'INVALID_REQUEST', 'Requisição inválida.');
+  }
+  const token = (body as { readonly token?: unknown }).token;
+  if (typeof token !== 'string' || token === '' || token.length > MAX_HTTP_BODY_BYTES) {
+    throw new HttpRequestError(400, 'INVALID_REQUEST', 'Chave de acesso inválida.');
+  }
+  return token;
+}
+
+function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
+  if (typeof cookieHeader !== 'string') {
+    return undefined;
+  }
+  for (const entry of cookieHeader.split(';')) {
+    const separator = entry.indexOf('=');
+    if (separator < 0 || entry.slice(0, separator).trim() !== name) {
+      continue;
+    }
+    const value = entry.slice(separator + 1).trim();
+    return value === '' ? undefined : value;
+  }
+  return undefined;
 }
 
 function extractPublicMessage(result: CapabilityResult): string {

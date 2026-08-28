@@ -106,6 +106,7 @@ export interface CorePipelineBootstrapFactories {
     tool: SpecializedTool,
     modelProvider: ModelProvider,
     goalExecutionOrchestrator: GoalExecutionOrchestrator,
+    cognitiveModelProvider: CognitiveModelProvider | undefined,
   ) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
@@ -145,8 +146,8 @@ export class CorePipelineBootstrap {
         ((tool, cognitiveModelProvider) => new GoalExecutionOrchestrator(tool, MAX_GOAL_EXECUTION_STEPS, cognitiveModelProvider)),
       buildSpecializedAgent:
         factories.buildSpecializedAgent ??
-        ((tool, modelProvider, goalExecutionOrchestrator) =>
-          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator)),
+        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider) =>
+          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ??
         ((memoryFilePath) =>
@@ -170,7 +171,12 @@ export class CorePipelineBootstrap {
       this.composeSpecializedTool(input.allowedFilesystemRoot ?? process.cwd(), input.authorizedCommands ?? []);
     const modelProvider = this.composeModelProvider();
     const goalExecutionOrchestrator = this.composeGoalExecutionOrchestrator(specializedTool, input.cognitiveModelProvider);
-    const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider, goalExecutionOrchestrator);
+    const specializedAgent = this.composeSpecializedAgent(
+      specializedTool,
+      modelProvider,
+      goalExecutionOrchestrator,
+      input.cognitiveModelProvider,
+    );
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
     return Object.freeze({
@@ -327,9 +333,15 @@ export class CorePipelineBootstrap {
     tool: SpecializedTool,
     modelProvider: ModelProvider,
     goalExecutionOrchestrator: GoalExecutionOrchestrator,
+    cognitiveModelProvider: CognitiveModelProvider | undefined,
   ): SpecializedAgent {
     try {
-      const specializedAgent = this.factories.buildSpecializedAgent(tool, modelProvider, goalExecutionOrchestrator);
+      const specializedAgent = this.factories.buildSpecializedAgent(
+        tool,
+        modelProvider,
+        goalExecutionOrchestrator,
+        cognitiveModelProvider,
+      );
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');
       }
