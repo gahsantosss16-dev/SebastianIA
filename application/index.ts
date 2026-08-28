@@ -6,4 +6,5 @@ export * from './LocalCommandInvocation.js';
 export * from './LocalCommandInvocationErrors.js';
 export * from './OnlineSebastianApplication.js';
 export * from './OnlineCognitiveProviderConfiguration.js';
+export * from './GitHubProjectRegistryConfiguration.js';
 export * from './SebastianHttpServer.js';

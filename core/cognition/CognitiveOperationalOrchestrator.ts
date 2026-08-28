@@ -1,4 +1,4 @@
-import type { SpecializedTool } from '../tool/index.js';
+import { requireSynchronousToolInvocationResult, type SpecializedTool } from '../tool/index.js';
 import {
   OPERATION_EVENT_RECORD_KIND,
   PENDING_OPERATION_TTL_MS,
@@ -89,7 +89,7 @@ export class CognitiveOperationalOrchestrator {
             `Risco: ${operation.risk}. Posso executar e validar essa alteração?`,
         };
       }
-      const invocation = this.tool.invoke({
+      const invocation = await this.tool.invoke({
         toolId: policy.toolId,
         executionId: context.executionId,
         responsibilityId: context.responsibilityId,
@@ -129,24 +129,28 @@ export class CognitiveOperationalOrchestrator {
       return { answer: 'O escopo armazenado da proposta é inválido e não foi executado.', operation: this.transition(operation, 'failed', context.requestedAt) };
     }
 
-    const action = this.tool.invoke({
-      toolId: operation.toolId,
-      executionId: context.executionId,
-      responsibilityId: context.responsibilityId,
-      requestedAt: context.requestedAt,
-      payload: operation.toolArguments,
-    });
+    const action = requireSynchronousToolInvocationResult(
+      this.tool.invoke({
+        toolId: operation.toolId,
+        executionId: context.executionId,
+        responsibilityId: context.responsibilityId,
+        requestedAt: context.requestedAt,
+        payload: operation.toolArguments,
+      }),
+    );
     if (action.status !== 'completed' || action.output.outcome !== 'ok') {
       return { answer: 'A alteração autorizada falhou e não foi considerada resolvida.', operation: this.transition(operation, 'failed', context.requestedAt) };
     }
 
-    const validation = this.tool.invoke({
-      toolId: operation.validationToolId,
-      executionId: context.executionId,
-      responsibilityId: context.responsibilityId,
-      requestedAt: context.requestedAt,
-      payload: {},
-    });
+    const validation = requireSynchronousToolInvocationResult(
+      this.tool.invoke({
+        toolId: operation.validationToolId,
+        executionId: context.executionId,
+        responsibilityId: context.responsibilityId,
+        requestedAt: context.requestedAt,
+        payload: {},
+      }),
+    );
     const output = validation.status === 'completed' ? validation.output : undefined;
     const validated = output?.outcome === 'ok' &&
       (output.succeeded === undefined || output.succeeded === true) &&

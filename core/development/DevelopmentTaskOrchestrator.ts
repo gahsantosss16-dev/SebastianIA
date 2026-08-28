@@ -2,6 +2,7 @@ import type {
   SpecializedTool,
   SpecializedToolInvocationResult,
 } from '../tool/SpecializedToolInvocationContract.js';
+import { requireSynchronousToolInvocationResult } from '../tool/SynchronousToolInvocationGuard.js';
 import { FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../tool/LocalFilesystemInspectionTool.js';
 import { GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID } from '../tool/LocalGitInspectionTool.js';
 import { InvalidDevelopmentTaskPlanError } from './DevelopmentTaskErrors.js';
@@ -132,13 +133,15 @@ export class DevelopmentTaskOrchestrator {
       };
     }
 
-    const toolResult = this.specializedTool.invoke({
-      toolId: step.toolId,
-      executionId: context.executionId,
-      responsibilityId: context.responsibilityId,
-      requestedAt: context.requestedAt,
-      payload: step.toolInput,
-    });
+    const toolResult = requireSynchronousToolInvocationResult(
+      this.specializedTool.invoke({
+        toolId: step.toolId,
+        executionId: context.executionId,
+        responsibilityId: context.responsibilityId,
+        requestedAt: context.requestedAt,
+        payload: step.toolInput,
+      }),
+    );
 
     if (!this.isSuccessfulInvocation(toolResult)) {
       return {

@@ -1,5 +1,6 @@
 export * from './SpecializedToolInvocationContract.js';
 export * from './SpecializedToolInvocationErrors.js';
+export * from './SynchronousToolInvocationGuard.js';
 export * from './InMemorySpecializedTool.js';
 export * from './LocalFilesystemPathGuard.js';
 export * from './LocalFilesystemInspectionTool.js';
@@ -9,3 +10,4 @@ export * from './LocalAuthorizedCommandTool.js';
 export * from './LocalToolDispatcher.js';
 export * from './RestrictedOnlineTool.js';
 export * from './OnlineReadOnlyTool.js';
+export * from './GitHubReadOnlyTool.js';

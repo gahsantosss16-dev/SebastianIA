@@ -5,14 +5,27 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSebastianApplication } from '../../application/SebastianApplication.js';
+import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import type { CognitiveDecision, CognitiveDecisionRequest, CognitiveModelProvider } from '../../core/cognition/index.js';
 import type { Logger } from '../../core/logger.js';
-import { GIT_STATUS_TOOL_ID, OnlineReadOnlyTool, type SpecializedToolInvocationInput } from '../../core/tool/index.js';
+import {
+  FILESYSTEM_READ_FILE_TOOL_ID,
+  GIT_DIFF_TOOL_ID,
+  GIT_STATUS_TOOL_ID,
+  OnlineReadOnlyTool,
+  PROJECT_SEARCH_TEXT_TOOL_ID,
+  type SpecializedToolInvocationInput,
+} from '../../core/tool/index.js';
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 const operationalCatalog = [{
   toolId: GIT_STATUS_TOOL_ID,
   description: 'Consulta branch e alterações pendentes sem modificar o repositório.',
+  requiresAuthorization: false,
+  requiredStringArguments: [],
+}, {
+  toolId: GIT_DIFF_TOOL_ID,
+  description: 'Consulta o diff sem modificar o repositório.',
   requiresAuthorization: false,
   requiredStringArguments: [],
 }] as const;
@@ -73,6 +86,12 @@ test('operational cognition handles direct answers, contextual read-only investi
             toolId: 'tool.inventada', toolArguments: {},
           }) };
         }
+        if ((request.objective.includes('diferenças atuais') || request.objective.includes('foi alterado')) && request.recentObservations.length === 0) {
+          return { outcome: 'decided', decision: decision({
+            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+            toolId: GIT_DIFF_TOOL_ID, toolArguments: {},
+          }) };
+        }
         if (request.recentObservations.length === 0) {
           return { outcome: 'decided', decision: decision({
             intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
@@ -105,14 +124,18 @@ test('operational cognition handles direct answers, contextual read-only investi
     assert.equal(general.output.message, 'TCP prioriza entrega confiável; UDP prioriza baixa latência.');
     assert.deepEqual(invoked, [], 'direct answer must not invoke a Tool');
 
+    const diff = await app.executeCommand(input('Veja o que foi alterado.', 7));
+    assert.match(String(diff.output.message), /alterado/);
+    assert.equal(invoked.some((toolId) => toolId === GIT_DIFF_TOOL_ID), true);
+
     const investigation = await app.executeCommand(input('Verifique o estado do repositório.', 2));
     assert.match(String(investigation.output.message), /tracked\.txt/);
-    assert.deepEqual(invoked, [GIT_STATUS_TOOL_ID]);
+    assert.equal(invoked.at(-1), GIT_STATUS_TOOL_ID);
     assert.equal(requests.at(-1)?.recentObservations[0]?.toolId, GIT_STATUS_TOOL_ID);
 
     const continuation = await app.executeCommand(input('E tem alguma alteração não commitada?', 3));
     assert.match(String(continuation.output.message), /tracked\.txt/);
-    assert.equal(requests.find((request) => request.objective.startsWith('E tem'))?.relevantMemory.some((item) => item.content.includes('repositório')), true);
+    assert.equal(requests.find((request) => request.objective.startsWith('E tem'))?.relevantMemory.some((item) => item.content.includes('tracked.txt')), true);
 
     const before = join(root, 'tracked.txt');
     const correction = await app.executeCommand(input('Corrija isso.', 4));
@@ -236,4 +259,79 @@ test('authorized operation is persisted, requires an unambiguous reply, executes
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('read-only planner autonomously chains search, file read and diagnosis while unsafe choices fail closed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-readonly-investigation-'));
+  try {
+    execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+    writeFileSync(join(root, 'worker.ts'), 'export function deliver() { return queueName; }\n', 'utf8');
+    writeFileSync(join(root, '.env'), 'QUEUE_NAME=private-value\n', 'utf8');
+    const catalog = [
+      { toolId: GIT_STATUS_TOOL_ID, description: 'status', requiresAuthorization: false, requiredStringArguments: [] },
+      { toolId: GIT_DIFF_TOOL_ID, description: 'diff', requiresAuthorization: false, requiredStringArguments: [] },
+      { toolId: PROJECT_SEARCH_TEXT_TOOL_ID, description: 'search', requiresAuthorization: false, requiredStringArguments: ['query'] },
+      { toolId: FILESYSTEM_READ_FILE_TOOL_ID, description: 'read', requiresAuthorization: false, requiredStringArguments: ['path'] },
+    ] as const;
+    const requests: CognitiveDecisionRequest[] = [];
+    const invoked: string[] = [];
+    const provider: CognitiveModelProvider = {
+      decide: async (request) => {
+        requests.push(request);
+        if (request.objective.includes('casual')) return { outcome: 'decided', decision: decision({ finalAnswer: 'Vamos conversar normalmente.' }) };
+        if (request.objective.includes('segredo')) {
+          if (request.recentObservations.length === 0) return { outcome: 'decided', decision: decision({ intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress', toolId: FILESYSTEM_READ_FILE_TOOL_ID, toolArguments: { path: '.env' } }) };
+          return { outcome: 'decided', decision: decision({ finalAnswer: 'A leitura foi bloqueada pela política de segurança.' }) };
+        }
+        if (request.recentObservations.length === 0) return { outcome: 'decided', decision: decision({ intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress', toolId: PROJECT_SEARCH_TEXT_TOOL_ID, toolArguments: { query: 'deliver' } }) };
+        if (request.recentObservations.length === 1) return { outcome: 'decided', decision: decision({ intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress', toolId: FILESYSTEM_READ_FILE_TOOL_ID, toolArguments: { path: 'worker.ts' } }) };
+        return { outcome: 'decided', decision: decision({ finalAnswer: 'Diagnóstico: worker.ts usa queueName sem definição local.' }) };
+      },
+    };
+    const realTool = new OnlineReadOnlyTool(root);
+    const tool = { invoke(invocation: SpecializedToolInvocationInput) { invoked.push(invocation.toolId); return realTool.invoke(invocation); } };
+    const app = createSebastianApplication({ logger, dataDir: root, specializedTool: tool, authorizedCommands: [], cognitiveModelProvider: provider, cognitiveOperationalTools: catalog });
+
+    const diagnosis = await app.executeCommand(input('Localize e diagnostique por que a entrega está falhando.', 40));
+    assert.equal(diagnosis.output.message, 'Diagnóstico: worker.ts usa queueName sem definição local.');
+    assert.deepEqual(invoked, [PROJECT_SEARCH_TEXT_TOOL_ID, FILESYSTEM_READ_FILE_TOOL_ID]);
+    assert.match(requests[1]?.recentObservations[0]?.summary ?? '', /worker\.ts/);
+    assert.match(requests[2]?.recentObservations[1]?.summary ?? '', /queueName/);
+
+    invoked.length = 0;
+    const casual = await app.executeCommand(input('Uma pergunta casual sem investigação.', 41));
+    assert.equal(casual.output.message, 'Vamos conversar normalmente.');
+    assert.deepEqual(invoked, []);
+
+    const secret = await app.executeCommand(input('Tente consultar um segredo.', 42));
+    assert.match(String(secret.output.message), /bloqueada/);
+    assert.equal(requests.at(-1)?.recentObservations[0]?.outcome, 'rejected');
+    assert.equal(JSON.stringify(requests).includes('private-value'), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('real online composition exposes only the approved investigation catalog to cognition', async () => {
+  let toolIds: readonly string[] = [];
+  const provider: CognitiveModelProvider = {
+    decide: async (request) => {
+      toolIds = request.availableTools.map((tool) => tool.toolId);
+      return { outcome: 'decided', decision: decision({ finalAnswer: 'Resposta sem ferramenta.' }) };
+    },
+  };
+  const app = createOnlineSebastianApplication(logger, provider);
+  const result = await app.executeCommand(input('Explique um conceito geral sem investigar.', 50));
+
+  assert.equal(result.output.message, 'Resposta sem ferramenta.');
+  assert.deepEqual(toolIds, [
+    GIT_STATUS_TOOL_ID,
+    GIT_DIFF_TOOL_ID,
+    PROJECT_SEARCH_TEXT_TOOL_ID,
+    FILESYSTEM_READ_FILE_TOOL_ID,
+    'validation.typecheck',
+    'validation.build',
+    'validation.test',
+  ]);
+  assert.equal(toolIds.some((toolId) => /write|replace|shell|deploy/i.test(toolId)), false);
 });

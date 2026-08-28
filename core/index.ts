@@ -29,4 +29,5 @@ export * from './conversation/index.js';
 export * from './context/index.js';
 export * from './command/index.js';
 export * from './capability/index.js';
+export * from './project/index.js';
 export * from '../application/index.js';

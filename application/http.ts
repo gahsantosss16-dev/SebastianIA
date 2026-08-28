@@ -14,7 +14,7 @@ async function startOnlineServer(): Promise<void> {
     const port = resolveOnlinePort();
     const cognitiveModelProvider = createOnlineCognitiveModelProvider(process.env, logger);
     const dataDir = resolveSebastianDataDirectory();
-    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir);
+    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env);
     const httpServer = new SebastianHttpServer({ application, apiToken, logger });
     const started = await httpServer.listen(port);
     logger.info('Sebastian online started.', { port: started.port });

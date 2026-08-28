@@ -1,4 +1,5 @@
 import type { SpecializedTool, SpecializedToolInvocationResult } from '../tool/SpecializedToolInvocationContract.js';
+import { requireSynchronousToolInvocationResult } from '../tool/SynchronousToolInvocationGuard.js';
 import { FILESYSTEM_READ_FILE_TOOL_ID, FILESYSTEM_REPLACE_TEXT_TOOL_ID } from '../tool/LocalFilesystemInspectionTool.js';
 import { GIT_STATUS_TOOL_ID, GIT_DIFF_TOOL_ID } from '../tool/LocalGitInspectionTool.js';
 import { InvalidGoalExecutionInputError } from './GoalExecutionErrors.js';
@@ -902,13 +903,15 @@ class GoalExecutionRun {
     }
 
     this.stepCounter += 1;
-    const toolResult: SpecializedToolInvocationResult = this.specializedTool.invoke({
-      toolId,
-      executionId: this.context.executionId,
-      responsibilityId: this.context.responsibilityId,
-      requestedAt: this.context.requestedAt,
-      payload: toolInput,
-    });
+    const toolResult: SpecializedToolInvocationResult = requireSynchronousToolInvocationResult(
+      this.specializedTool.invoke({
+        toolId,
+        executionId: this.context.executionId,
+        responsibilityId: this.context.responsibilityId,
+        requestedAt: this.context.requestedAt,
+        payload: toolInput,
+      }),
+    );
 
     if (!this.isSuccessfulInvocation(toolResult)) {
       this.steps.push({

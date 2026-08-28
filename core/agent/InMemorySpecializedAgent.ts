@@ -6,6 +6,7 @@ import {
 import { InvalidSpecializedAgentHandoffInputError } from './SpecializedAgentHandoffErrors.js';
 import { InMemorySpecializedTool } from '../tool/InMemorySpecializedTool.js';
 import type { SpecializedTool } from '../tool/SpecializedToolInvocationContract.js';
+import { requireSynchronousToolInvocationResult } from '../tool/SynchronousToolInvocationGuard.js';
 import {
   MEMORY_FACT_RECORD_KIND,
   TASK_CREATED_RECORD_KIND,
@@ -331,13 +332,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     input: SpecializedAgentHandoffInput,
     decision: ModelInterpretationUseToolDecision,
   ): SpecializedAgentHandoffResult {
-    const toolResult = this.specializedTool.invoke({
-      toolId: decision.toolId,
-      executionId: input.executionId,
-      responsibilityId: input.responsibilityId,
-      requestedAt: input.requestedAt,
-      payload: decision.toolInput,
-    });
+    const toolResult = requireSynchronousToolInvocationResult(
+      this.specializedTool.invoke({
+        toolId: decision.toolId,
+        executionId: input.executionId,
+        responsibilityId: input.responsibilityId,
+        requestedAt: input.requestedAt,
+        payload: decision.toolInput,
+      }),
+    );
 
     if (!toolResult || typeof toolResult !== 'object' || Array.isArray(toolResult)) {
       throw new InvalidSpecializedAgentHandoffInputError('Specialized tool invocation returned an invalid output.');
@@ -423,13 +426,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       throw new InvalidSpecializedAgentHandoffInputError('Specialized tool dependency must provide invoke.');
     }
 
-    const toolResult = this.specializedTool.invoke({
-      toolId: `tool.${input.commandType}`,
-      executionId: input.executionId,
-      responsibilityId: input.responsibilityId,
-      requestedAt: input.requestedAt,
-      payload: structuredClone(input.payload) as Readonly<Record<string, unknown>>,
-    });
+    const toolResult = requireSynchronousToolInvocationResult(
+      this.specializedTool.invoke({
+        toolId: `tool.${input.commandType}`,
+        executionId: input.executionId,
+        responsibilityId: input.responsibilityId,
+        requestedAt: input.requestedAt,
+        payload: structuredClone(input.payload) as Readonly<Record<string, unknown>>,
+      }),
+    );
 
     if (!toolResult || typeof toolResult !== 'object' || Array.isArray(toolResult)) {
       throw new InvalidSpecializedAgentHandoffInputError('Specialized tool invocation returned an invalid output.');

@@ -4,6 +4,7 @@ import type {
   SpecializedToolInvocationResult,
 } from './SpecializedToolInvocationContract.js';
 import { InvalidSpecializedToolInvocationInputError } from './SpecializedToolInvocationErrors.js';
+import { requireSynchronousToolInvocationResult } from './SynchronousToolInvocationGuard.js';
 import {
   FILESYSTEM_LIST_DIRECTORY_TOOL_ID,
   FILESYSTEM_READ_FILE_TOOL_ID,
@@ -86,6 +87,6 @@ export class LocalToolDispatcher implements SpecializedTool {
       return this.authorizedCommandTool.invoke(input);
     }
 
-    return this.fallbackTool.invoke(input);
+    return requireSynchronousToolInvocationResult(this.fallbackTool.invoke(input));
   }
 }
