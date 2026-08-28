@@ -68,8 +68,18 @@ export function createOnlineSebastianApplication(
     { toolId: VALIDATION_TEST_TOOL_ID, executable: process.execPath, args: ['--run', 'test'], timeoutMs: 12_000 },
   ];
 
-  const projectRegistry = createGitHubProjectRegistry(env, logger);
-  const githubTool = createGitHubReadOnlyTool(env, projectRegistry, logger);
+  // Fail-soft by design: an absent or invalid SEBASTIAN_GITHUB_PROJECTS must
+  // never abort startup. GitHub investigation simply stays unavailable
+  // (below, catalog + Tool omit it entirely) while Gemini, conversation,
+  // memory and every local/read-only Tool continue exactly as before.
+  let githubTool;
+  try {
+    const projectRegistry = createGitHubProjectRegistry(env, logger);
+    githubTool = createGitHubReadOnlyTool(env, projectRegistry, logger);
+  } catch {
+    logger?.warn('GitHub integration disabled: invalid project registry configuration');
+    githubTool = undefined;
+  }
 
   return createSebastianApplication({
     ...(logger === undefined ? {} : { logger }),
