@@ -38,6 +38,14 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
   readonly deterministicIntent?: {
     readonly pattern: RegExp;
     readonly buildArguments: (objective: string) => Readonly<Record<string, string>>;
+    /**
+     * A deterministic route may already satisfy the user's full read-only
+     * intent. In that case its successful observation is sufficient to
+     * compose the final answer and the operational planner must not be
+     * consulted again (which could only repeat or contradict the completed
+     * capability). Rejected/failed Tool outcomes never use this shortcut.
+     */
+    readonly answerFromSuccessfulObservation?: (observation: CognitiveObservationRecord) => string;
   };
 }
 
@@ -64,7 +72,11 @@ export class CognitiveOperationalOrchestrator {
     const observations: CognitiveObservationRecord[] = [];
     let toolCalls = 0;
 
-    toolCalls += await this.applyDeterministicIntentRoute(objective, context, observations);
+    const deterministic = await this.applyDeterministicIntentRoute(objective, context, observations);
+    toolCalls += deterministic.toolCalls;
+    if (deterministic.answer !== undefined) {
+      return this.finish({ outcome: 'answered', answer: deterministic.answer, toolCalls });
+    }
 
     for (let attempt = 0; attempt < this.maxDecisions; attempt += 1) {
       let result;
@@ -162,14 +174,14 @@ export class CognitiveOperationalOrchestrator {
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string },
     observations: CognitiveObservationRecord[],
-  ): Promise<number> {
+  ): Promise<{ readonly toolCalls: number; readonly answer?: string }> {
     const route = this.catalog.find((entry) => entry.deterministicIntent?.pattern.test(objective));
     if (!route?.deterministicIntent) {
-      return 0;
+      return { toolCalls: 0 };
     }
     const args = route.deterministicIntent.buildArguments(objective);
     if (!this.argumentsMatchPolicy(route, args)) {
-      return 0;
+      return { toolCalls: 0 };
     }
 
     const invocation = await this.tool.invoke({
@@ -185,7 +197,7 @@ export class CognitiveOperationalOrchestrator {
         toolInvoked: true,
         toolOutcome: 'failed',
       });
-      return 1;
+      return { toolCalls: 1 };
     }
     const message = typeof invocation.output.message === 'string'
       ? invocation.output.message.slice(0, MAX_OBSERVATION_CHARS)
@@ -202,7 +214,10 @@ export class CognitiveOperationalOrchestrator {
       toolInvoked: true,
       toolOutcome,
     });
-    return 1;
+    const answer = toolOutcome === 'ok'
+      ? route.deterministicIntent.answerFromSuccessfulObservation?.(observations[observations.length - 1]!)
+      : undefined;
+    return { toolCalls: 1, ...(answer === undefined ? {} : { answer }) };
   }
 
   public executeAuthorized(

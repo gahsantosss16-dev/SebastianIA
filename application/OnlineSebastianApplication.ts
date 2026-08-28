@@ -70,7 +70,12 @@ function githubOperationalTools(defaultProjectId: string | undefined): readonly 
     deterministicIntent: { pattern: GITHUB_GENERAL_INTENT_PATTERN, buildArguments: () => ({ projectId: defaultProjectId }) },
   };
   const commitRoute = defaultProjectId === undefined ? {} : {
-    deterministicIntent: { pattern: GITHUB_COMMIT_INTENT_PATTERN, buildArguments: () => ({ projectId: defaultProjectId }) },
+    deterministicIntent: {
+      pattern: GITHUB_COMMIT_INTENT_PATTERN,
+      buildArguments: () => ({ projectId: defaultProjectId }),
+      answerFromSuccessfulObservation: (observation: { readonly summary: string }) =>
+        `Commits recentes no GitHub:\n${observation.summary}`,
+    },
   };
   return [
     { toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...generalRoute },

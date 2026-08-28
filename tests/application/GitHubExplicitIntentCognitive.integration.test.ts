@@ -26,7 +26,11 @@ const githubCatalog = [
   },
   {
     toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
-    deterministicIntent: { pattern: /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i, buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }) },
+    deterministicIntent: {
+      pattern: /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i,
+      buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }),
+      answerFromSuccessfulObservation: (observation: { readonly summary: string }) => `Commits recentes no GitHub:\n${observation.summary}`,
+    },
   },
 ] as const;
 
@@ -112,16 +116,15 @@ function capturingLogger(): { readonly logger: Logger; readonly calls: Array<{ r
 test('an explicit GitHub request for recent commits calls github.listCommits and the final answer cites the real commit', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-github-explicit-'));
   try {
+    let decideCalls = 0;
     const provider: CognitiveModelProvider = {
-      decide: async (request) => {
-        if (request.recentObservations.length === 0) {
-          return { outcome: 'decided', decision: decision({
-            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
-            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: 'SebastianIA' },
-          }) };
-        }
+      decide: async () => {
+        decideCalls += 1;
+        // This is the invalid repeated production proposal. It must be
+        // unreachable because the deterministic route already completed.
         return { outcome: 'decided', decision: decision({
-          finalAnswer: `Os commits recentes do SebastianIA incluem: ${request.recentObservations[0]?.summary}`,
+          intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+          toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: 'SebastianIA', limit: '5' },
         }) };
       },
     };
@@ -132,7 +135,9 @@ test('an explicit GitHub request for recent commits calls github.listCommits and
     );
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(decideCalls, 0);
     assert.match(String(result.output.message), /corrige timeout do provider cognitivo/);
+    assert.doesNotMatch(String(result.output.message), /não consegui concluir|ainda não sei responder/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -169,25 +174,19 @@ test('the project alias "Sebastian" resolves to the same registered GitHub proje
   }
 });
 
-test('when the operational loop fails after a valid GitHub observation, the answer is an honest operational message, never a "no access" claim from the conversational fallback', async () => {
+test('successful deterministic commits route completes from evidence even if every optional language path would time out', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-github-fallback-guard-'));
   try {
     let respondCalls = 0;
+    let decideCalls = 0;
     const provider: CognitiveModelProvider = {
-      decide: async (request) => {
-        if (request.recentObservations.length === 0) {
-          return { outcome: 'decided', decision: decision({
-            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
-            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: 'SebastianIA' },
-          }) };
-        }
-        // Simulates a decide() timeout/failure on the very next round-trip,
-        // even though a real, valid GitHub observation was already gathered.
-        return { outcome: 'unavailable', reason: 'simulated decide timeout after a real observation' };
+      decide: async () => {
+        decideCalls += 1;
+        return { outcome: 'timeout' };
       },
       respond: async () => {
         respondCalls += 1;
-        return { outcome: 'responded', answer: 'Não tenho acesso ao GitHub.' };
+        return { outcome: 'timeout' };
       },
     };
     const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
@@ -197,9 +196,12 @@ test('when the operational loop fails after a valid GitHub observation, the answ
     );
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(decideCalls, 0, 'the completed deterministic capability must not require another operational decision');
     assert.equal(respondCalls, 0, 'the conversational "no tools" fallback must never be consulted after a real Tool attempt');
+    assert.match(String(result.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
     assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
     assert.doesNotMatch(String(result.output.message), /acesso.{0,20}internet/i);
+    assert.doesNotMatch(String(result.output.message), /não consegui concluir|ainda não sei responder/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
