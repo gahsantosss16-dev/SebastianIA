@@ -61,6 +61,17 @@ const MAX_LISTED_PENDING_TASKS = 500;
 const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
 const NO_MEMORY_ANSWER = 'Ainda não tenho nenhuma memória registrada sobre isso.';
 const NO_PENDING_TASKS_ANSWER = 'Você não tem nenhuma tarefa pendente.';
+const EXPLICIT_MEMORY_QUESTION_MARKERS: readonly string[] = [
+  'o que você sabe sobre',
+  'o que voce sabe sobre',
+  'você lembra',
+  'voce lembra',
+  'na sua memória',
+  'na sua memoria',
+  'você registrou',
+  'voce registrou',
+];
+const PERSONAL_MEMORY_QUESTION_PATTERN = /\b(eu prefiro|eu gosto|meu|minha|meus|minhas)\b/i;
 
 /**
  * SPEC-046 goal recognition: deliberately a handful of marker/pattern
@@ -231,7 +242,7 @@ export class DevelopmentModelProvider implements ModelProvider {
       return { intent: 'respond', ...this.composeContinuationAnswer(composed) };
     }
 
-    if (composed.intent === 'question') {
+    if (composed.intent === 'question' && this.isExplicitMemoryQuestion(request.text)) {
       return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
     }
 
@@ -646,6 +657,14 @@ export class DevelopmentModelProvider implements ModelProvider {
     }
 
     return { answer: NO_MEMORY_ANSWER, recordable: false };
+  }
+
+  private isExplicitMemoryQuestion(text: string): boolean {
+    const lowerText = text.toLowerCase();
+    return (
+      EXPLICIT_MEMORY_QUESTION_MARKERS.some((marker) => lowerText.includes(marker)) ||
+      PERSONAL_MEMORY_QUESTION_PATTERN.test(text)
+    );
   }
 
   /**

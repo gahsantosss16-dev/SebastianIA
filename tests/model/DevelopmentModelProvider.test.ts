@@ -95,6 +95,51 @@ test('interpret falls back to a generic response for unmatched input', async () 
   });
 });
 
+test('SPEC-050 regression: general questions remain eligible for cognitive conversation instead of becoming memory queries', async () => {
+  const provider = new DevelopmentModelProvider();
+  const messages = [
+    'Oi Sebastian. Você está online? Me diga quem você é e o que consegue fazer hoje.',
+    'Oi Sebastian, você está online?',
+    'Quem é você?',
+    'O que você consegue fazer?',
+    'Me explique o que é TypeScript.',
+    'Quero conversar sobre arquitetura de software.',
+  ];
+
+  for (const text of messages) {
+    const decision = await provider.interpret({
+      text,
+      rememberedFacts: [],
+      requestedAt: '2026-08-27T12:00:00.000Z',
+    });
+
+    assert.deepEqual(decision, {
+      intent: 'respond',
+      answer: 'Ainda não sei responder a isso.',
+      recordable: false,
+      cognitiveFallbackEligible: true,
+    });
+  }
+});
+
+test('SPEC-050 regression: explicit memory questions remain deterministic and ineligible for cognitive fallback', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  for (const text of ['O que você sabe sobre mim?', 'Você lembra do que eu prefiro?', 'Qual é meu horário preferido?']) {
+    const decision = await provider.interpret({
+      text,
+      rememberedFacts: [],
+      requestedAt: '2026-08-27T12:00:00.000Z',
+    });
+
+    assert.deepEqual(decision, {
+      intent: 'respond',
+      answer: 'Ainda não tenho nenhuma memória registrada sobre isso.',
+      recordable: false,
+    });
+  }
+});
+
 test('interpret treats an empty remember marker suffix as unmatched', async () => {
   const provider = new DevelopmentModelProvider();
 

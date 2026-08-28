@@ -443,6 +443,7 @@ test('SPEC-049: the real online application preserves deterministic conversation
 test('SPEC-050: real online application uses remote cognition only for unknown text and never forwards HTTP token', async () => {
   const requests: unknown[] = [];
   let toolLikeRequestCount = 0;
+  const cognitiveSecret = 'fake-cognitive-secret-that-must-never-be-forwarded';
   const cognitiveModelProvider: CognitiveModelProvider = {
     decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
     respond: async (request) => {
@@ -474,6 +475,29 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
       },
     ]);
     assert.equal(JSON.stringify(requests).includes(API_TOKEN), false);
+
+    const webCookie = await createWebSession(running.baseUrl);
+    const productionRegression = await webConverse(
+      running.baseUrl,
+      webCookie,
+      'Oi Sebastian. Você está online? Me diga quem você é e o que consegue fazer hoje.',
+    );
+    assert.equal(productionRegression.status, 200);
+    assert.deepEqual(await productionRegression.json(), {
+      ok: true,
+      message: 'Resposta remota segura.',
+      requestId: 'request-test-id',
+    });
+    assert.deepEqual(requests[1], {
+      text: 'Oi Sebastian. Você está online? Me diga quem você é e o que consegue fazer hoje.',
+      requestedAt: '2026-08-27T12:00:00.000Z',
+    });
+
+    const explicitMemory = await webConverse(running.baseUrl, webCookie, 'O que você sabe sobre mim?');
+    assert.equal(explicitMemory.status, 200);
+    assert.equal((await explicitMemory.json() as { message: string }).message, 'Ainda não tenho nenhuma memória registrada sobre isso.');
+    assert.equal(requests.length, 2, 'explicit memory query must not reach cognitive conversation');
+    assert.equal(JSON.stringify(requests).includes(cognitiveSecret), false);
 
     const sensitive = await converse(running.baseUrl, 'Crie um arquivo chamado invaded.txt com: conteúdo perigoso.');
     assert.equal(sensitive.status, 200);
