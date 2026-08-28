@@ -7,6 +7,7 @@ import {
   SEBASTIAN_GITHUB_TOKEN_ENV_VAR,
 } from '../../application/GitHubProjectRegistryConfiguration.js';
 import { GitHubReadOnlyTool } from '../../core/tool/GitHubReadOnlyTool.js';
+import type { Logger } from '../../core/logger.js';
 
 test('with no configuration, the registry is empty and read-only, and no GitHub tool is created', () => {
   const registry = createGitHubProjectRegistry({});
@@ -113,6 +114,85 @@ test('an entry with an unsupported field (e.g. a token or url) is rejected rathe
   };
 
   assert.throws(() => createGitHubProjectRegistry(env));
+});
+
+function capturingLogger(): { readonly logger: Logger; readonly calls: Array<{ readonly level: string; readonly message: string; readonly metadata: unknown }> } {
+  const calls: Array<{ readonly level: string; readonly message: string; readonly metadata: unknown }> = [];
+  const record = (level: string) => (message: string, metadata?: Record<string, unknown>) => {
+    calls.push({ level, message, metadata });
+  };
+  return {
+    calls,
+    logger: { debug: record('debug'), info: record('info'), warn: record('warn'), error: record('error') },
+  };
+}
+
+test('a JSON parse failure logs a safe, bounded diagnostic and never the configured value itself', () => {
+  const { logger, calls } = capturingLogger();
+  const secretLikeValue = 'gahsantosss16-dev/SebastianIA-super-secret-owner-repo-9f31c2';
+  const env = {
+    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: `{not json but mentions "${secretLikeValue}" and a token abc123secret`,
+  };
+
+  assert.throws(
+    () => createGitHubProjectRegistry(env, logger),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, 'GitHub project registry configuration is not valid JSON.');
+      return true;
+    },
+  );
+
+  const errorCalls = calls.filter((call) => call.level === 'error');
+  assert.equal(errorCalls.length, 1);
+  const diagnostic = errorCalls[0]?.metadata as Record<string, unknown>;
+
+  assert.equal(typeof diagnostic.rawLength, 'number');
+  assert.equal(typeof diagnostic.normalizedLength, 'number');
+  assert.equal(typeof diagnostic.startsWithBracket, 'boolean');
+  assert.equal(typeof diagnostic.endsWithBracket, 'boolean');
+  assert.equal(typeof diagnostic.startsWithSingleQuote, 'boolean');
+  assert.equal(typeof diagnostic.startsWithDoubleQuote, 'boolean');
+  assert.equal(typeof diagnostic.endsWithSingleQuote, 'boolean');
+  assert.equal(typeof diagnostic.endsWithDoubleQuote, 'boolean');
+  assert.equal(typeof diagnostic.containsNullCharacter, 'boolean');
+  assert.equal(typeof diagnostic.syntaxErrorMessage, 'string');
+
+  const serializedCalls = JSON.stringify(calls);
+  assert.equal(serializedCalls.includes(secretLikeValue), false);
+  assert.equal(serializedCalls.includes('gahsantosss16-dev'), false);
+  assert.equal(serializedCalls.includes('SebastianIA'), false);
+  assert.equal(serializedCalls.includes('abc123secret'), false);
+  assert.equal(serializedCalls.includes(env[SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]), false);
+});
+
+test('a BOM-prefixed value that still fails after normalization is diagnosed without leaking content', () => {
+  const { logger, calls } = capturingLogger();
+  const byteOrderMark = String.fromCharCode(0xfeff);
+  const secretLikeValue = 'owner=gahsantosss16-dev repository=SebastianIA';
+  const env = {
+    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: `${byteOrderMark}not an array, but has ${secretLikeValue}`,
+  };
+
+  assert.throws(() => createGitHubProjectRegistry(env, logger));
+
+  const diagnostic = calls.find((call) => call.level === 'error')?.metadata as Record<string, unknown>;
+  assert.ok(diagnostic);
+  assert.equal(diagnostic.startsWithBracket, false);
+  assert.equal(JSON.stringify(calls).includes(secretLikeValue), false);
+});
+
+test('a successful parse never logs an error-level diagnostic', () => {
+  const { logger, calls } = capturingLogger();
+  const env = {
+    [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: JSON.stringify([
+      { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', owner: 'sebastian-org', repository: 'neuro-hub', defaultBranch: 'main' },
+    ]),
+  };
+
+  createGitHubProjectRegistry(env, logger);
+
+  assert.equal(calls.some((call) => call.level === 'error'), false);
 });
 
 test('createGitHubReadOnlyTool returns a Tool only when SEBASTIAN_GITHUB_TOKEN is configured', () => {
