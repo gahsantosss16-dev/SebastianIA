@@ -7,3 +7,4 @@ export * from './LocalGitCommandRunner.js';
 export * from './LocalGitInspectionTool.js';
 export * from './LocalAuthorizedCommandTool.js';
 export * from './LocalToolDispatcher.js';
+export * from './RestrictedOnlineTool.js';

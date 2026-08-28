@@ -73,6 +73,13 @@ export interface CorePipelineBootstrapInput {
    * before, with zero network dependency, when this is omitted.
    */
   readonly cognitiveModelProvider?: CognitiveModelProvider;
+  /**
+   * Explicit Tool boundary supplied by a composition root. Omitted by the
+   * existing local/CLI composition, which preserves the current dispatcher.
+   * The online composition uses this seam to install a fail-closed Tool that
+   * has no reference to filesystem, Git or command adapters.
+   */
+  readonly specializedTool?: SpecializedTool;
 }
 
 interface CorePipelineExecutorLike {
@@ -158,10 +165,9 @@ export class CorePipelineBootstrap {
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
     const commandContextHydrator = this.composeCommandContextHydrator(input.memoryFilePath);
-    const specializedTool = this.composeSpecializedTool(
-      input.allowedFilesystemRoot ?? process.cwd(),
-      input.authorizedCommands ?? [],
-    );
+    const specializedTool =
+      input.specializedTool ??
+      this.composeSpecializedTool(input.allowedFilesystemRoot ?? process.cwd(), input.authorizedCommands ?? []);
     const modelProvider = this.composeModelProvider();
     const goalExecutionOrchestrator = this.composeGoalExecutionOrchestrator(specializedTool, input.cognitiveModelProvider);
     const specializedAgent = this.composeSpecializedAgent(specializedTool, modelProvider, goalExecutionOrchestrator);
@@ -200,6 +206,10 @@ export class CorePipelineBootstrap {
 
     if (input.authorizedCommands !== undefined && !Array.isArray(input.authorizedCommands)) {
       throw new CorePipelineBootstrapError('Core pipeline authorizedCommands must be an array when provided.');
+    }
+
+    if (input.specializedTool !== undefined && typeof input.specializedTool.invoke !== 'function') {
+      throw new CorePipelineBootstrapError('Core pipeline specializedTool must provide invoke when provided.');
     }
   }
 

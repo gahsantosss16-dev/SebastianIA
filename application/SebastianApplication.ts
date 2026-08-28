@@ -11,6 +11,7 @@ import {
   VALIDATION_BUILD_TOOL_ID,
   VALIDATION_TYPECHECK_TOOL_ID,
   type AuthorizedCommandDefinition,
+  type SpecializedTool,
 } from '../core/tool/index.js';
 import type { CognitiveModelProvider } from '../core/cognition/index.js';
 import {
@@ -63,6 +64,12 @@ export interface SebastianApplicationOptions {
    * `OllamaCognitiveModelProvider`).
    */
   readonly cognitiveModelProvider?: CognitiveModelProvider;
+  /**
+   * Optional composition-root Tool override. The default remains the complete
+   * local dispatcher used by the CLI. The online entrypoint supplies a
+   * fail-closed implementation so no local capability is reachable over HTTP.
+   */
+  readonly specializedTool?: SpecializedTool;
 }
 
 /**
@@ -91,6 +98,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
       allowedFilesystemRoot,
       authorizedCommands,
       ...(options.cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider: options.cognitiveModelProvider }),
+      ...(options.specializedTool === undefined ? {} : { specializedTool: options.specializedTool }),
       bindings: [
         {
           commandType: LOCAL_GREETING_COMMAND_TYPE,
