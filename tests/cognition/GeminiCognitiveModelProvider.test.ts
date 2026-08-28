@@ -160,6 +160,39 @@ test('cognitive identity is generalist by default and operational capabilities d
   assert.equal(capturedBody.includes('assistente de desenvolvimento local'), false);
 });
 
+test('conversation identity avoids generic service formulas and mirrors informal tone without sacrificing precision', async () => {
+  let capturedConversationBody = '';
+  const conversational = provider(async (_url, init) => {
+    capturedConversationBody = init.body as string;
+    return response(200, geminiEnvelope({ answer: 'Claro kk. Me diz o que você quer montar.' }));
+  });
+  await conversational.respond?.({ text: 'vc pode me ajudar?', requestedAt: '2026-08-27T00:00:00.000Z' });
+
+  for (const expected of [
+    'não comece automaticamente com fórmulas genéricas',
+    'grau de informalidade e abreviações do usuário',
+    'sem caricaturar, perder precisão',
+    'mantendo profissionalismo quando o assunto exigir',
+  ]) {
+    assert.equal(capturedConversationBody.includes(expected), true, expected);
+  }
+  assert.equal(capturedConversationBody.includes('vc pode me ajudar?'), true);
+
+  let capturedDecisionBody = '';
+  const operational = provider(async (_url, init) => {
+    capturedDecisionBody = init.body as string;
+    return response(200, geminiEnvelope({
+      intent: 'conclude', goal: 'ajudar', reasoningSummary: 'Resposta direta.',
+      nextAction: 'concludeCompleted', requiresAuthorization: false,
+      expectedEvidence: 'Nenhuma.', completionState: 'completed', confidence: 0.9,
+      finalAnswer: 'Claro kk. Qual é a ideia?',
+    }));
+  });
+  await operational.decide({ ...decisionRequest(), objective: 'vc pode me ajudar?' });
+  assert.equal(capturedDecisionBody.includes('sem aberturas genéricas de atendimento'), true);
+  assert.equal(capturedDecisionBody.includes('sem caricaturar, perder precisão'), true);
+});
+
 test('SPEC-050: HTTP failures and network failures resolve unavailable without raw failure leakage', async () => {
   for (const status of [401, 403, 429, 500, 503]) {
     const result = await provider(async () => response(status, 'sensitive remote body')).respond?.({

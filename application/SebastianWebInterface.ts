@@ -366,9 +366,13 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   const checkSession = async () => {
     try {
       const response = await fetch('/api/web/session', { credentials: 'same-origin', cache: 'no-store' });
-      if (response.ok && (await response.json()).authenticated === true) showChat();
+      if (response.ok && (await response.json()).authenticated === true) {
+        showChat();
+      } else {
+        showUnlock();
+      }
     } catch {
-      unlockError.textContent = 'Não foi possível verificar a conexão. Tente novamente.';
+      showUnlock('Não foi possível verificar a conexão. Tente novamente.');
     }
   };
 
@@ -468,7 +472,7 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
 </head>
 <body>
   <div class="shell">
-    <section class="unlock" id="unlock" aria-labelledby="unlock-title">
+    <section class="unlock hidden" id="unlock" aria-labelledby="unlock-title">
       <div class="unlock-card">
         <div class="unlock-brand">
           <span class="mark" aria-hidden="true">S</span>

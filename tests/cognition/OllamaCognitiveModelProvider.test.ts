@@ -74,6 +74,11 @@ test('a valid Ollama response round-trips into a decided CognitiveDecisionResult
   assert.equal(capturedBody.model, 'llama3.1:8b');
   assert.equal(capturedBody.format, 'json');
   assert.equal(capturedBody.stream, false);
+  const messages = capturedBody.messages as Array<{ readonly role: string; readonly content: string }>;
+  const systemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
+  assert.match(systemPrompt, /grau de informalidade e abreviações do usuário/);
+  assert.match(systemPrompt, /sem aberturas genéricas de atendimento/);
+  assert.match(systemPrompt, /sem caricaturar, perder precisão/);
 });
 
 test('respects a custom endpoint', async () => {

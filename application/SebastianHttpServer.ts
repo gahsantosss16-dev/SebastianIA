@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { CapabilityResult } from '../core/capability/index.js';
@@ -59,6 +59,7 @@ const silentLogger: Logger = {
 export class SebastianHttpServer {
   private readonly application: OnlineCommandExecutor;
   private readonly expectedTokenDigest: Buffer;
+  private readonly webSessionSigningKey: Buffer;
   private readonly logger: Logger;
   private readonly now: () => Date;
   private readonly createRequestId: () => string;
@@ -68,8 +69,7 @@ export class SebastianHttpServer {
   private converseInFlight = false;
   private shuttingDown = false;
   private applicationShutDown = false;
-  private webSessionDigest: Buffer | undefined;
-  private webSessionExpiresAt = 0;
+  private readonly revokedWebSessions = new Set<string>();
 
   public constructor(options: SebastianHttpServerOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -90,6 +90,7 @@ export class SebastianHttpServer {
 
     this.application = options.application;
     this.expectedTokenDigest = digestToken(apiToken);
+    this.webSessionSigningKey = createHmac('sha256', apiToken).update('sebastian-web-session-v1', 'utf8').digest();
     this.logger = options.logger ?? silentLogger;
     this.now = options.now ?? (() => new Date());
     this.createRequestId = options.requestId ?? randomUUID;
@@ -263,8 +264,10 @@ export class SebastianHttpServer {
         this.writeError(response, 403, 'FORBIDDEN', 'Origem não permitida.', requestId);
         return;
       }
-      this.webSessionDigest = undefined;
-      this.webSessionExpiresAt = 0;
+      const sessionToken = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
+      if (sessionToken !== undefined) {
+        this.revokedWebSessions.add(digestToken(sessionToken).toString('base64url'));
+      }
       this.writeJson(response, 200, { authenticated: false }, { 'Set-Cookie': this.expiredSessionCookie() });
       return;
     }
@@ -287,9 +290,7 @@ export class SebastianHttpServer {
       return;
     }
 
-    const sessionToken = this.createSessionToken();
-    this.webSessionDigest = digestToken(sessionToken);
-    this.webSessionExpiresAt = this.now().getTime() + WEB_SESSION_TTL_MS;
+    const sessionToken = this.createWebSessionToken();
     this.writeJson(response, 201, { authenticated: true }, {
       'Set-Cookie': `${WEB_SESSION_COOKIE}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(WEB_SESSION_TTL_MS / 1_000)}`,
     });
@@ -373,11 +374,28 @@ export class SebastianHttpServer {
   }
 
   private hasValidWebSession(request: IncomingMessage): boolean {
-    if (this.webSessionDigest === undefined || this.now().getTime() >= this.webSessionExpiresAt) {
+    const candidate = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
+    if (candidate === undefined || this.revokedWebSessions.has(digestToken(candidate).toString('base64url'))) {
       return false;
     }
-    const candidate = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
-    return candidate !== undefined && timingSafeEqual(digestToken(candidate), this.webSessionDigest);
+    const parts = candidate.split('.');
+    if (parts.length !== 4 || parts[0] !== 'v1' || !/^\d+$/.test(parts[1] ?? '')) {
+      return false;
+    }
+    const expiresAt = Number(parts[1]);
+    if (!Number.isSafeInteger(expiresAt) || this.now().getTime() >= expiresAt) {
+      return false;
+    }
+    const payload = parts.slice(0, 3).join('.');
+    const suppliedSignature = Buffer.from(parts[3] ?? '', 'base64url');
+    const expectedSignature = createHmac('sha256', this.webSessionSigningKey).update(payload, 'utf8').digest();
+    return suppliedSignature.length === expectedSignature.length && timingSafeEqual(suppliedSignature, expectedSignature);
+  }
+
+  private createWebSessionToken(): string {
+    const payload = `v1.${this.now().getTime() + WEB_SESSION_TTL_MS}.${this.createSessionToken()}`;
+    const signature = createHmac('sha256', this.webSessionSigningKey).update(payload, 'utf8').digest('base64url');
+    return `${payload}.${signature}`;
   }
 
   private expiredSessionCookie(): string {

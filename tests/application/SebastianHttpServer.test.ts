@@ -142,7 +142,9 @@ test('WEB: GET / serves the responsive Sebastian interface without embedding env
     assert.match(root.headers.get('content-security-policy') ?? '', /default-src 'none'/);
     assert.match(html, /SebastianIA/);
     assert.match(html, /Estou online e pronto para conversar/);
+    assert.match(html, /class="unlock hidden"/);
     assert.match(script, /shiftKey/);
+    assert.match(script, /else \{\s*showUnlock\(\);/);
     for (const forbidden of [
       API_TOKEN,
       'cognitive-secret-that-must-not-reach-browser',
@@ -196,6 +198,26 @@ test('WEB: session survives page reopen, expires after 12 hours and logout inval
     assert.equal((await webConverse(running.baseUrl, renewedCookie, 'Olá')).status, 401);
   } finally {
     await running.close();
+  }
+});
+
+test('WEB: refresh and a new tab keep the same signed session across backend restart', async () => {
+  const first = await startServer(successfulApplication());
+  const cookie = await createWebSession(first.baseUrl);
+  const refresh = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
+  assert.deepEqual(await refresh.json(), { authenticated: true });
+  await first.close();
+
+  const restarted = await startServer(successfulApplication());
+  try {
+    const newTab = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
+    assert.deepEqual(await newTab.json(), { authenticated: true });
+
+    const tamperedCookie = `${cookie.slice(0, -1)}${cookie.endsWith('a') ? 'b' : 'a'}`;
+    const invalid = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: tamperedCookie } });
+    assert.deepEqual(await invalid.json(), { authenticated: false });
+  } finally {
+    await restarted.close();
   }
 });
 
