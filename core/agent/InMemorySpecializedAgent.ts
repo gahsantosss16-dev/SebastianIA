@@ -43,6 +43,18 @@ import {
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
 
+/**
+ * Returned when the operational cognitive loop was actually attempted
+ * (eligible and invoked) but did not reach a clean conclusion - e.g. a
+ * `decide` call timed out, returned an invalid structured response, or the
+ * decision budget was exhausted. Deliberately honest about an operational
+ * limitation, never a claim of missing capability: the conversational
+ * fallback prompt explicitly denies having any Tool, which would be false
+ * whenever a real Tool (e.g. a configured `github.*` one) was just attempted
+ * or exists for this request - see `applyCognitiveOperationalDecision`.
+ */
+const OPERATIONAL_ATTEMPT_INCOMPLETE_ANSWER = 'Não consegui concluir essa consulta agora; tente novamente em instantes.';
+
 interface DevelopmentTaskOrchestratorLike {
   execute(plan: DevelopmentTaskPlan, context: DevelopmentTaskExecutionContext): DevelopmentTaskResult;
 }
@@ -168,6 +180,20 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     }
     if (result.outcome === 'proposed') {
       return { intent: 'respond', answer: result.answer, recordable: true, pendingOperation: result.operation };
+    }
+    // A real Tool was already invoked and observed during this attempt
+    // before the loop failed (e.g. a `decide` timeout right after a
+    // successful `github.listCommits` call). Deliberately does NOT return
+    // `decision` unchanged here: it still carries `cognitiveFallbackEligible:
+    // true`, and letting it fall through to `applyCognitiveConversationFallback`
+    // would re-ask the model with a prompt that explicitly denies having any
+    // Tool - producing a false "I don't have GitHub access" answer even
+    // though a real Tool exists and was just used for this exact request.
+    // When no Tool was ever reached (toolCalls === 0), the original
+    // conversational fallback still applies unchanged - nothing false is
+    // being denied there, since no Tool attempt happened at all.
+    if (decision.intent === 'respond' && result.toolCalls > 0) {
+      return { intent: 'respond', answer: OPERATIONAL_ATTEMPT_INCOMPLETE_ANSWER, recordable: false };
     }
     return decision;
   }

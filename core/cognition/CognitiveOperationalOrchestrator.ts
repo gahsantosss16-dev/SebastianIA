@@ -23,7 +23,7 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
 export type CognitiveOperationalResult =
   | { readonly outcome: 'answered'; readonly answer: string; readonly toolCalls: number }
   | { readonly outcome: 'proposed'; readonly answer: string; readonly operation: PendingOperationRecord; readonly toolCalls: number }
-  | { readonly outcome: 'unavailable' }
+  | { readonly outcome: 'unavailable'; readonly toolCalls: number }
   | { readonly outcome: 'blocked'; readonly reason: string; readonly toolCalls: number };
 
 /** Bounded model → Tool → observation loop. Policy, not the model, owns authority. */
@@ -47,11 +47,11 @@ export class CognitiveOperationalOrchestrator {
       try {
         result = await this.provider.decide(this.request(objective, context.requestedAt, observations, context.relevantMemory ?? []));
       } catch {
-        return { outcome: 'unavailable' };
+        return { outcome: 'unavailable', toolCalls };
       }
       if (result.outcome !== 'decided') {
         return result.outcome === 'unavailable' || result.outcome === 'timeout'
-          ? { outcome: 'unavailable' }
+          ? { outcome: 'unavailable', toolCalls }
           : { outcome: 'blocked', reason: 'cognitiveInvalidResponse', toolCalls };
       }
 
