@@ -1,6 +1,8 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { dirname } from 'node:path';
 import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { Logger } from '../core/logger.js';
@@ -28,6 +30,7 @@ export interface SebastianHttpServerOptions {
   readonly now?: () => Date;
   readonly requestId?: () => string;
   readonly sessionToken?: () => string;
+  readonly webSessionStateFilePath?: string;
   readonly executionTimeoutMs?: number;
 }
 
@@ -64,12 +67,13 @@ export class SebastianHttpServer {
   private readonly now: () => Date;
   private readonly createRequestId: () => string;
   private readonly createSessionToken: () => string;
+  private readonly webSessionStateFilePath: string | undefined;
   private readonly executionTimeoutMs: number;
   private readonly server: Server;
   private converseInFlight = false;
   private shuttingDown = false;
   private applicationShutDown = false;
-  private readonly revokedWebSessions = new Set<string>();
+  private inMemoryWebSession: WebSessionState | undefined;
 
   public constructor(options: SebastianHttpServerOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -95,6 +99,10 @@ export class SebastianHttpServer {
     this.now = options.now ?? (() => new Date());
     this.createRequestId = options.requestId ?? randomUUID;
     this.createSessionToken = options.sessionToken ?? (() => randomBytes(32).toString('base64url'));
+    if (options.webSessionStateFilePath !== undefined && options.webSessionStateFilePath.trim() === '') {
+      throw new TypeError('Sebastian web session state file path must be non-empty when provided.');
+    }
+    this.webSessionStateFilePath = options.webSessionStateFilePath;
     this.executionTimeoutMs = executionTimeoutMs;
     this.server = createServer((request, response) => {
       void this.handle(request, response);
@@ -265,8 +273,10 @@ export class SebastianHttpServer {
         return;
       }
       const sessionToken = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
-      if (sessionToken !== undefined) {
-        this.revokedWebSessions.add(digestToken(sessionToken).toString('base64url'));
+      const activeSession = this.readWebSessionState();
+      if (sessionToken !== undefined && activeSession !== undefined &&
+          safelyEqualText(digestToken(sessionToken).toString('base64url'), activeSession.digest)) {
+        this.writeWebSessionState(undefined);
       }
       this.writeJson(response, 200, { authenticated: false }, { 'Set-Cookie': this.expiredSessionCookie() });
       return;
@@ -290,7 +300,12 @@ export class SebastianHttpServer {
       return;
     }
 
-    const sessionToken = this.createWebSessionToken();
+    const expiresAt = this.now().getTime() + WEB_SESSION_TTL_MS;
+    const sessionToken = this.createWebSessionToken(expiresAt);
+    this.writeWebSessionState({
+      digest: digestToken(sessionToken).toString('base64url'),
+      expiresAt,
+    });
     this.writeJson(response, 201, { authenticated: true }, {
       'Set-Cookie': `${WEB_SESSION_COOKIE}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(WEB_SESSION_TTL_MS / 1_000)}`,
     });
@@ -375,7 +390,7 @@ export class SebastianHttpServer {
 
   private hasValidWebSession(request: IncomingMessage): boolean {
     const candidate = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
-    if (candidate === undefined || this.revokedWebSessions.has(digestToken(candidate).toString('base64url'))) {
+    if (candidate === undefined) {
       return false;
     }
     const parts = candidate.split('.');
@@ -389,13 +404,39 @@ export class SebastianHttpServer {
     const payload = parts.slice(0, 3).join('.');
     const suppliedSignature = Buffer.from(parts[3] ?? '', 'base64url');
     const expectedSignature = createHmac('sha256', this.webSessionSigningKey).update(payload, 'utf8').digest();
-    return suppliedSignature.length === expectedSignature.length && timingSafeEqual(suppliedSignature, expectedSignature);
+    if (suppliedSignature.length !== expectedSignature.length || !timingSafeEqual(suppliedSignature, expectedSignature)) {
+      return false;
+    }
+    const activeSession = this.readWebSessionState();
+    return activeSession !== undefined && activeSession.expiresAt === expiresAt &&
+      safelyEqualText(digestToken(candidate).toString('base64url'), activeSession.digest);
   }
 
-  private createWebSessionToken(): string {
-    const payload = `v1.${this.now().getTime() + WEB_SESSION_TTL_MS}.${this.createSessionToken()}`;
+  private createWebSessionToken(expiresAt: number): string {
+    const payload = `v1.${expiresAt}.${this.createSessionToken()}`;
     const signature = createHmac('sha256', this.webSessionSigningKey).update(payload, 'utf8').digest('base64url');
     return `${payload}.${signature}`;
+  }
+
+  private readWebSessionState(): WebSessionState | undefined {
+    if (this.webSessionStateFilePath === undefined) {
+      return this.inMemoryWebSession;
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(this.webSessionStateFilePath, 'utf8')) as unknown;
+      return parseWebSessionState(parsed);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private writeWebSessionState(state: WebSessionState | undefined): void {
+    this.inMemoryWebSession = state;
+    if (this.webSessionStateFilePath === undefined) {
+      return;
+    }
+    mkdirSync(dirname(this.webSessionStateFilePath), { recursive: true });
+    writeFileSync(this.webSessionStateFilePath, JSON.stringify(state ?? null), { encoding: 'utf8', mode: 0o600 });
   }
 
   private expiredSessionCookie(): string {
@@ -442,6 +483,29 @@ export class SebastianHttpServer {
     });
     response.end(body);
   }
+}
+
+interface WebSessionState {
+  readonly digest: string;
+  readonly expiresAt: number;
+}
+
+function parseWebSessionState(value: unknown): WebSessionState | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value as { readonly digest?: unknown; readonly expiresAt?: unknown };
+  if (typeof candidate.digest !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(candidate.digest) ||
+      !Number.isSafeInteger(candidate.expiresAt) || (candidate.expiresAt as number) <= 0) {
+    return undefined;
+  }
+  return { digest: candidate.digest, expiresAt: candidate.expiresAt as number };
+}
+
+function safelyEqualText(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left, 'utf8');
+  const rightBuffer = Buffer.from(right, 'utf8');
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 export function resolveOnlineApiToken(env: NodeJS.ProcessEnv = process.env): string {

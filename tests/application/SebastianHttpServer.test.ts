@@ -41,14 +41,17 @@ async function startServer(
   logger: Logger = silentLogger,
   executionTimeoutMs?: number,
   now: () => Date = () => new Date('2026-08-27T12:00:00.000Z'),
+  webSessionStateFilePath?: string,
 ): Promise<RunningTestServer> {
+  let sessionSequence = 0;
   const http = new SebastianHttpServer({
     application,
     apiToken: API_TOKEN,
     logger,
     requestId: () => 'request-test-id',
-    sessionToken: () => 'opaque-web-session-test-token',
+    sessionToken: () => `opaque-web-session-test-token-${sessionSequence++}`,
     now,
+    ...(webSessionStateFilePath === undefined ? {} : { webSessionStateFilePath }),
     ...(executionTimeoutMs === undefined ? {} : { executionTimeoutMs }),
   });
   const started = await http.listen(0, '127.0.0.1');
@@ -202,22 +205,50 @@ test('WEB: session survives page reopen, expires after 12 hours and logout inval
 });
 
 test('WEB: refresh and a new tab keep the same signed session across backend restart', async () => {
-  const first = await startServer(successfulApplication());
-  const cookie = await createWebSession(first.baseUrl);
-  const refresh = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
-  assert.deepEqual(await refresh.json(), { authenticated: true });
-  await first.close();
-
-  const restarted = await startServer(successfulApplication());
+  const stateDir = mkdtempSync(join(tmpdir(), 'sebastian-web-session-'));
+  const stateFile = join(stateDir, 'web-session.json');
+  const first = await startServer(successfulApplication(), silentLogger, undefined, undefined, stateFile);
   try {
-    const newTab = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
-    assert.deepEqual(await newTab.json(), { authenticated: true });
+    const firstCookie = await createWebSession(first.baseUrl);
+    const refresh = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
+    assert.deepEqual(await refresh.json(), { authenticated: true });
 
-    const tamperedCookie = `${cookie.slice(0, -1)}${cookie.endsWith('a') ? 'b' : 'a'}`;
-    const invalid = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: tamperedCookie } });
-    assert.deepEqual(await invalid.json(), { authenticated: false });
+    const secondCookie = await createWebSession(first.baseUrl);
+    const persistedState = readFileSync(stateFile, 'utf8');
+    assert.equal(persistedState.includes(API_TOKEN), false);
+    assert.equal(persistedState.includes(secondCookie.split('=', 2)[1] ?? ''), false);
+    const superseded = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
+    assert.deepEqual(await superseded.json(), { authenticated: false });
+    await first.close();
+
+    const restarted = await startServer(successfulApplication(), silentLogger, undefined, undefined, stateFile);
+    try {
+      const newTab = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: secondCookie } });
+      assert.deepEqual(await newTab.json(), { authenticated: true });
+
+      const logout = await fetch(`${restarted.baseUrl}/api/web/session`, {
+        method: 'DELETE', headers: { Origin: restarted.baseUrl, Cookie: secondCookie },
+      });
+      assert.equal(logout.status, 200);
+      await restarted.close();
+
+      const afterLogoutRestart = await startServer(successfulApplication(), silentLogger, undefined, undefined, stateFile);
+      try {
+        const revoked = await fetch(`${afterLogoutRestart.baseUrl}/api/web/session`, { headers: { Cookie: secondCookie } });
+        assert.deepEqual(await revoked.json(), { authenticated: false });
+
+        const tamperedCookie = `${secondCookie.slice(0, -1)}${secondCookie.endsWith('a') ? 'b' : 'a'}`;
+        const invalid = await fetch(`${afterLogoutRestart.baseUrl}/api/web/session`, { headers: { Cookie: tamperedCookie } });
+        assert.deepEqual(await invalid.json(), { authenticated: false });
+      } finally {
+        await afterLogoutRestart.close();
+      }
+    } finally {
+      await restarted.close();
+    }
   } finally {
-    await restarted.close();
+    await first.close();
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
 
