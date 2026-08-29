@@ -76,6 +76,8 @@ button { cursor: pointer; }
 }
 .unlock input::placeholder { color: var(--muted); opacity: .55; }
 .unlock input:focus-visible { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+.unlock input[type="checkbox"] { width: 16px; height: 16px; padding: 0; accent-color: var(--accent); cursor: pointer; }
+.remember-device { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; color: var(--muted); font-size: 12.5px; user-select: none; cursor: pointer; }
 .unlock-submit {
   height: 46px;
   margin-top: 2px;
@@ -293,6 +295,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   const chat = document.querySelector('#chat');
   const unlockForm = document.querySelector('#unlock-form');
   const tokenInput = document.querySelector('#access-token');
+  const rememberDeviceInput = document.querySelector('#remember-device');
   const unlockError = document.querySelector('#unlock-error');
   const form = document.querySelector('#composer-form');
   const input = document.querySelector('#message-input');
@@ -516,11 +519,12 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     const button = unlockForm.querySelector('button');
     button.disabled = true;
     try {
+      const remember = rememberDeviceInput ? rememberDeviceInput.checked : true;
       const response = await fetch('/api/web/session', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
+        body: JSON.stringify({ token, remember })
       });
       tokenInput.value = '';
       if (!response.ok) {
@@ -627,6 +631,10 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
         <form class="unlock-form" id="unlock-form">
           <label class="field-label" for="access-token">Chave de acesso</label>
           <input id="access-token" type="password" autocomplete="current-password" required placeholder="Informe sua chave">
+          <label class="remember-device" for="remember-device">
+            <input id="remember-device" type="checkbox" checked>
+            <span>Manter-me conectado neste dispositivo</span>
+          </label>
           <button class="unlock-submit" type="submit">Acessar</button>
           <p class="unlock-error" id="unlock-error" role="alert"></p>
         </form>

@@ -30,6 +30,18 @@ test('sidebar renders real, persisted conversations - listing, opening and creat
   assert.match(SEBASTIAN_WEB_SCRIPT, /showConversationMessages\(\[\]\)/);
 });
 
+test('"Manter-me conectado neste dispositivo" is checked by default, sent with the unlock request, and never persists the password itself', () => {
+  assert.match(SEBASTIAN_WEB_HTML, /<input id="remember-device" type="checkbox" checked>/);
+  assert.match(SEBASTIAN_WEB_HTML, /Manter-me conectado neste dispositivo/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /rememberDeviceInput \? rememberDeviceInput\.checked : true/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /JSON\.stringify\(\{ token, remember \}\)/);
+  // No client-side storage of any kind - the session lives only in the
+  // HttpOnly cookie the server issues; the password itself is never retained.
+  for (const forbidden of ['localStorage', 'sessionStorage', 'indexedDB']) {
+    assert.equal(SEBASTIAN_WEB_SCRIPT.includes(forbidden), false);
+  }
+});
+
 test('execution and error states are accessible, clear and do not expose internal diagnostics', () => {
   assert.match(SEBASTIAN_WEB_SCRIPT, /setAttribute\('aria-busy', 'true'\)/);
   assert.match(SEBASTIAN_WEB_SCRIPT, /removeAttribute\('aria-busy'\)/);

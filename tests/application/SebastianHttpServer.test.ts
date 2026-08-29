@@ -12,6 +12,7 @@ import { createOnlineSebastianApplication } from '../../application/OnlineSebast
 import {
   DEFAULT_ONLINE_PORT,
   MAX_HTTP_BODY_BYTES,
+  WEB_SESSION_REMEMBER_TTL_MS,
   WEB_SESSION_TTL_MS,
   resolveOnlineApiToken,
   resolveOnlinePort,
@@ -94,19 +95,27 @@ async function converse(baseUrl: string, message: string, token = API_TOKEN): Pr
   });
 }
 
-async function createWebSession(baseUrl: string, token = API_TOKEN): Promise<string> {
+// `remember` defaults to true - the unlock form's "Manter-me conectado neste
+// dispositivo" checkbox is checked by default, so most callers exercise that
+// path. Pass `false` explicitly to exercise the non-persistent (session-only,
+// 12h ceiling) path a real browser would drop on close.
+async function createWebSession(baseUrl: string, token = API_TOKEN, remember = true): Promise<string> {
   const response = await fetch(`${baseUrl}/api/web/session`, {
     method: 'POST',
     headers: { Origin: baseUrl, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ token, remember }),
   });
   assert.equal(response.status, 201);
   const setCookie = response.headers.get('set-cookie');
   assert.ok(setCookie);
   assert.match(setCookie, /HttpOnly/);
   assert.match(setCookie, /Secure/);
-    assert.match(setCookie, /SameSite=Strict/);
-  assert.match(setCookie, /Max-Age=43200/);
+  assert.match(setCookie, /SameSite=Lax/);
+  if (remember) {
+    assert.match(setCookie, new RegExp(`Max-Age=${Math.floor(WEB_SESSION_REMEMBER_TTL_MS / 1_000)}\\b`));
+  } else {
+    assert.doesNotMatch(setCookie, /Max-Age/);
+  }
   return setCookie.split(';', 1)[0] ?? '';
 }
 
@@ -232,7 +241,9 @@ test('WEB: session survives page reopen, expires after 12 hours and logout inval
     const afterLogout = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: cookie } });
     assert.deepEqual(await afterLogout.json(), { authenticated: false });
 
-    const renewedCookie = await createWebSession(running.baseUrl);
+    // Unchecking "Manter-me conectado" is what still expires in 12h; the
+    // remembered default (asserted separately) gets a much longer ceiling.
+    const renewedCookie = await createWebSession(running.baseUrl, undefined, false);
     nowMs += WEB_SESSION_TTL_MS;
     const expired = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: renewedCookie } });
     assert.deepEqual(await expired.json(), { authenticated: false });
@@ -242,7 +253,7 @@ test('WEB: session survives page reopen, expires after 12 hours and logout inval
   }
 });
 
-test('WEB: refresh and a new tab keep the same signed session across backend restart', async () => {
+test('WEB: two independent devices stay signed in across a backend restart, and logging out on one never signs out the other', async () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'sebastian-web-session-'));
   const stateFile = join(stateDir, 'web-session.json');
   const first = await startServer(successfulApplication(), silentLogger, undefined, undefined, stateFile);
@@ -251,29 +262,40 @@ test('WEB: refresh and a new tab keep the same signed session across backend res
     const refresh = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
     assert.deepEqual(await refresh.json(), { authenticated: true });
 
+    // A second device/browser signing in (e.g. unlocking on the phone after
+    // already being signed in on desktop) must never invalidate the first -
+    // that single-active-session replacement was exactly why a session
+    // "did not survive" on mobile whenever another device authenticated.
     const secondCookie = await createWebSession(first.baseUrl);
     const persistedState = readFileSync(stateFile, 'utf8');
     assert.equal(persistedState.includes(API_TOKEN), false);
     assert.equal(persistedState.includes(secondCookie.split('=', 2)[1] ?? ''), false);
-    const superseded = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
-    assert.deepEqual(await superseded.json(), { authenticated: false });
+    const stillFirst = await fetch(`${first.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
+    assert.deepEqual(await stillFirst.json(), { authenticated: true }, 'signing in on a second device must not sign the first one out');
     await first.close();
 
     const restarted = await startServer(successfulApplication(), silentLogger, undefined, undefined, stateFile);
     try {
-      const newTab = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: secondCookie } });
-      assert.deepEqual(await newTab.json(), { authenticated: true });
+      const firstAfterRestart = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
+      assert.deepEqual(await firstAfterRestart.json(), { authenticated: true });
+      const secondAfterRestart = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: secondCookie } });
+      assert.deepEqual(await secondAfterRestart.json(), { authenticated: true });
 
       const logout = await fetch(`${restarted.baseUrl}/api/web/session`, {
         method: 'DELETE', headers: { Origin: restarted.baseUrl, Cookie: secondCookie },
       });
       assert.equal(logout.status, 200);
+      // Logging out the second device must revoke only its own session.
+      const firstAfterLogout = await fetch(`${restarted.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
+      assert.deepEqual(await firstAfterLogout.json(), { authenticated: true }, 'logout on one device must not revoke another device\'s session');
       await restarted.close();
 
       const afterLogoutRestart = await startServer(successfulApplication(), silentLogger, undefined, undefined, stateFile);
       try {
         const revoked = await fetch(`${afterLogoutRestart.baseUrl}/api/web/session`, { headers: { Cookie: secondCookie } });
         assert.deepEqual(await revoked.json(), { authenticated: false });
+        const stillSignedIn = await fetch(`${afterLogoutRestart.baseUrl}/api/web/session`, { headers: { Cookie: firstCookie } });
+        assert.deepEqual(await stillSignedIn.json(), { authenticated: true });
 
         const tamperedCookie = `${secondCookie.slice(0, -1)}${secondCookie.endsWith('a') ? 'b' : 'a'}`;
         const invalid = await fetch(`${afterLogoutRestart.baseUrl}/api/web/session`, { headers: { Cookie: tamperedCookie } });
@@ -286,6 +308,73 @@ test('WEB: refresh and a new tab keep the same signed session across backend res
     }
   } finally {
     await first.close();
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test('WEB: "Manter-me conectado" checked (the default) issues a persistent cookie a browser keeps across a full close; unchecked issues a session-only cookie', async () => {
+  const running = await startServer(successfulApplication());
+  try {
+    const remembered = await createWebSession(running.baseUrl, undefined, true);
+    assert.equal(remembered.startsWith('sebastian_session='), true);
+
+    const notRemembered = await createWebSession(running.baseUrl, undefined, false);
+    assert.equal(notRemembered.startsWith('sebastian_session='), true);
+
+    // Both remain independently valid regardless of which was "remembered" -
+    // the distinction is purely about how long the browser/server keep it.
+    const rememberedCheck = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: remembered } });
+    assert.deepEqual(await rememberedCheck.json(), { authenticated: true });
+    const notRememberedCheck = await fetch(`${running.baseUrl}/api/web/session`, { headers: { Cookie: notRemembered } });
+    assert.deepEqual(await notRememberedCheck.json(), { authenticated: true });
+  } finally {
+    await running.close();
+  }
+});
+
+test('WEB: a non-boolean "remember" field is rejected instead of silently defaulting', async () => {
+  const running = await startServer(successfulApplication());
+  try {
+    const response = await fetch(`${running.baseUrl}/api/web/session`, {
+      method: 'POST',
+      headers: { Origin: running.baseUrl, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: API_TOKEN, remember: 'yes' }),
+    });
+    assert.equal(response.status, 400);
+  } finally {
+    await running.close();
+  }
+});
+
+test('WEB: a legacy single-session state file (from before multi-device support) is read transparently and migrated on the next login', async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'sebastian-web-session-legacy-'));
+  const stateFile = join(stateDir, 'web-session.json');
+  let nowMs = new Date('2026-08-27T12:00:00.000Z').getTime();
+  const now = () => new Date(nowMs);
+  try {
+    const first = await startServer(successfulApplication(), silentLogger, undefined, now, stateFile);
+    const legacyCookie = await createWebSession(first.baseUrl);
+    // Overwrite with the legacy single-object shape a pre-multi-device
+    // deployment would have persisted, to prove the new code still reads it.
+    const legacyState = JSON.parse(readFileSync(stateFile, 'utf8')) as unknown[];
+    writeFileSync(stateFile, JSON.stringify(legacyState[0] ?? null), 'utf8');
+    await first.close();
+
+    const second = await startServer(successfulApplication(), silentLogger, undefined, now, stateFile);
+    try {
+      const check = await fetch(`${second.baseUrl}/api/web/session`, { headers: { Cookie: legacyCookie } });
+      assert.deepEqual(await check.json(), { authenticated: true });
+
+      // A fresh login alongside the migrated legacy session must not evict it.
+      const newCookie = await createWebSession(second.baseUrl);
+      const stillLegacy = await fetch(`${second.baseUrl}/api/web/session`, { headers: { Cookie: legacyCookie } });
+      assert.deepEqual(await stillLegacy.json(), { authenticated: true });
+      const newCheck = await fetch(`${second.baseUrl}/api/web/session`, { headers: { Cookie: newCookie } });
+      assert.deepEqual(await newCheck.json(), { authenticated: true });
+    } finally {
+      await second.close();
+    }
+  } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
 });

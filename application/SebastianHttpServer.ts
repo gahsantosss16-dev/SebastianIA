@@ -25,6 +25,16 @@ export const MAX_CONVERSE_MESSAGE_CHARS = 4_000;
 export const HTTP_BODY_TIMEOUT_MS = 10_000;
 export const HTTP_EXECUTION_TIMEOUT_MS = DEFAULT_GEMINI_RESPOND_TIMEOUT_MS + 1_000;
 export const WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
+/**
+ * "Manter-me conectado neste dispositivo" (checked by default in the unlock
+ * form). A session created with this preference gets both a much longer
+ * server-side expiry and a persistent cookie (an explicit `Max-Age`, so the
+ * browser keeps it across a full restart) instead of the 12h session-only
+ * default - see `handleWebSession`'s POST branch and the Set-Cookie header.
+ */
+export const WEB_SESSION_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+/** Bounds how many independent device sessions accumulate in the persisted file; oldest are evicted first. */
+const MAX_ACTIVE_WEB_SESSIONS = 20;
 const WEB_SESSION_COOKIE = 'sebastian_session';
 
 interface OnlineCommandExecutor {
@@ -84,7 +94,7 @@ export class SebastianHttpServer {
   private converseInFlight = false;
   private shuttingDown = false;
   private applicationShutDown = false;
-  private inMemoryWebSession: WebSessionState | undefined;
+  private inMemoryWebSessions: readonly WebSessionRecord[] = [];
 
   public constructor(options: SebastianHttpServerOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -331,11 +341,13 @@ export class SebastianHttpServer {
         this.writeError(response, 403, 'FORBIDDEN', 'Origem não permitida.', requestId);
         return;
       }
+      // Revokes only the caller's own device session - other devices/browsers
+      // that are independently signed in must keep working after this logout.
       const sessionToken = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
-      const activeSession = this.readWebSessionState();
-      if (sessionToken !== undefined && activeSession !== undefined &&
-          safelyEqualText(digestToken(sessionToken).toString('base64url'), activeSession.digest)) {
-        this.writeWebSessionState(undefined);
+      if (sessionToken !== undefined) {
+        const candidateDigest = digestToken(sessionToken).toString('base64url');
+        const remaining = this.readActiveWebSessions().filter((session) => !safelyEqualText(session.digest, candidateDigest));
+        this.writeActiveWebSessions(remaining);
       }
       this.writeJson(response, 200, { authenticated: false }, { 'Set-Cookie': this.expiredSessionCookie() });
       return;
@@ -358,16 +370,41 @@ export class SebastianHttpServer {
       this.writeError(response, 401, 'UNAUTHORIZED', 'Chave de acesso inválida.', requestId);
       return;
     }
+    const remember = extractRememberPreference(body);
 
-    const expiresAt = this.now().getTime() + WEB_SESSION_TTL_MS;
+    const ttlMs = remember ? WEB_SESSION_REMEMBER_TTL_MS : WEB_SESSION_TTL_MS;
+    const expiresAt = this.now().getTime() + ttlMs;
     const sessionToken = this.createWebSessionToken(expiresAt);
-    this.writeWebSessionState({
-      digest: digestToken(sessionToken).toString('base64url'),
-      expiresAt,
-    });
-    this.writeJson(response, 201, { authenticated: true }, {
-      'Set-Cookie': `${WEB_SESSION_COOKIE}=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${Math.floor(WEB_SESSION_TTL_MS / 1_000)}`,
-    });
+    // Independent device sessions: a new login is appended alongside whatever
+    // other devices/browsers are already validly signed in, never replacing
+    // them - that single-slot replacement was exactly why unlocking on one
+    // device (e.g. desktop) silently signed another (e.g. a phone) back out.
+    const survivors = this.readActiveWebSessions().slice(-(MAX_ACTIVE_WEB_SESSIONS - 1));
+    this.writeActiveWebSessions([
+      ...survivors,
+      { digest: digestToken(sessionToken).toString('base64url'), expiresAt },
+    ]);
+    const cookieAttributes = [
+      `${WEB_SESSION_COOKIE}=${sessionToken}`,
+      'Path=/',
+      'HttpOnly',
+      'Secure',
+      // Lax (not Strict): a Strict cookie is withheld by the browser on some
+      // top-level mobile entry points (opening from a home-screen icon, a
+      // notification, or a link from another app) even though the request is
+      // still same-site - exactly the "reabrir no celular" scenario this
+      // feature exists for. Lax still blocks the cookie on cross-site
+      // POST/subresource requests, so CSRF protection (paired with the
+      // existing same-origin check on state-changing routes) is unchanged.
+      'SameSite=Lax',
+      // Persistent (remember=true, the default) gets an explicit Max-Age so
+      // the browser keeps the cookie across a full restart. Not remembered
+      // omits Max-Age entirely, making it an ordinary session cookie the
+      // browser discards when it fully closes - the server-side expiry above
+      // still bounds it independently either way.
+      ...(remember ? [`Max-Age=${Math.floor(ttlMs / 1_000)}`] : []),
+    ];
+    this.writeJson(response, 201, { authenticated: true }, { 'Set-Cookie': cookieAttributes.join('; ') });
   }
 
   private async handleConverse(
@@ -502,9 +539,9 @@ export class SebastianHttpServer {
     if (suppliedSignature.length !== expectedSignature.length || !timingSafeEqual(suppliedSignature, expectedSignature)) {
       return false;
     }
-    const activeSession = this.readWebSessionState();
-    return activeSession !== undefined && activeSession.expiresAt === expiresAt &&
-      safelyEqualText(digestToken(candidate).toString('base64url'), activeSession.digest);
+    const candidateDigest = digestToken(candidate).toString('base64url');
+    return this.readActiveWebSessions().some((session) =>
+      session.expiresAt === expiresAt && safelyEqualText(candidateDigest, session.digest));
   }
 
   private createWebSessionToken(expiresAt: number): string {
@@ -513,29 +550,31 @@ export class SebastianHttpServer {
     return `${payload}.${signature}`;
   }
 
-  private readWebSessionState(): WebSessionState | undefined {
+  /** Every still-unexpired device session. A legacy single-session file (from before multi-device support) is read as its one entry, migrated transparently on the next write. */
+  private readActiveWebSessions(): readonly WebSessionRecord[] {
+    const now = this.now().getTime();
     if (this.webSessionStateFilePath === undefined) {
-      return this.inMemoryWebSession;
+      return this.inMemoryWebSessions.filter((session) => session.expiresAt > now);
     }
     try {
       const parsed = JSON.parse(readFileSync(this.webSessionStateFilePath, 'utf8')) as unknown;
-      return parseWebSessionState(parsed);
+      return parseWebSessionRecords(parsed).filter((session) => session.expiresAt > now);
     } catch {
-      return undefined;
+      return [];
     }
   }
 
-  private writeWebSessionState(state: WebSessionState | undefined): void {
-    this.inMemoryWebSession = state;
+  private writeActiveWebSessions(sessions: readonly WebSessionRecord[]): void {
+    this.inMemoryWebSessions = sessions;
     if (this.webSessionStateFilePath === undefined) {
       return;
     }
     mkdirSync(dirname(this.webSessionStateFilePath), { recursive: true });
-    writeFileSync(this.webSessionStateFilePath, JSON.stringify(state ?? null), { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(this.webSessionStateFilePath, JSON.stringify(sessions), { encoding: 'utf8', mode: 0o600 });
   }
 
   private expiredSessionCookie(): string {
-    return `${WEB_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+    return `${WEB_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   }
 
   private writeWebAsset(response: ServerResponse, contentType: string, body: string): void {
@@ -580,12 +619,12 @@ export class SebastianHttpServer {
   }
 }
 
-interface WebSessionState {
+interface WebSessionRecord {
   readonly digest: string;
   readonly expiresAt: number;
 }
 
-function parseWebSessionState(value: unknown): WebSessionState | undefined {
+function parseWebSessionRecord(value: unknown): WebSessionRecord | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
@@ -595,6 +634,15 @@ function parseWebSessionState(value: unknown): WebSessionState | undefined {
     return undefined;
   }
   return { digest: candidate.digest, expiresAt: candidate.expiresAt as number };
+}
+
+/** Accepts the current array format and, for backward compatibility, a legacy single-session object (or `null`) from before multi-device support existed. */
+function parseWebSessionRecords(value: unknown): readonly WebSessionRecord[] {
+  if (Array.isArray(value)) {
+    return value.map(parseWebSessionRecord).filter((session): session is WebSessionRecord => session !== undefined);
+  }
+  const legacy = parseWebSessionRecord(value);
+  return legacy ? [legacy] : [];
 }
 
 function safelyEqualText(left: string, right: string): boolean {
@@ -673,6 +721,21 @@ function extractSessionCredential(body: unknown): string {
     throw new HttpRequestError(400, 'INVALID_REQUEST', 'Chave de acesso inválida.');
   }
   return token;
+}
+
+/** "Manter-me conectado neste dispositivo" - defaults to true (checked by default in the unlock form) when the field is omitted. */
+function extractRememberPreference(body: unknown): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return true;
+  }
+  const remember = (body as { readonly remember?: unknown }).remember;
+  if (remember === undefined) {
+    return true;
+  }
+  if (typeof remember !== 'boolean') {
+    throw new HttpRequestError(400, 'INVALID_REQUEST', 'Preferência de sessão inválida.');
+  }
+  return remember;
 }
 
 function readCookie(cookieHeader: string | undefined, name: string): string | undefined {
