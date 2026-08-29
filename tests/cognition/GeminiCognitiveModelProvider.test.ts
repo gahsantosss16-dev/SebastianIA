@@ -160,32 +160,44 @@ test('cognitive identity is generalist by default and operational capabilities d
   assert.equal(capturedBody.includes('assistente de desenvolvimento local'), false);
 });
 
-test('conversation identity avoids generic service formulas and mirrors informal tone without sacrificing precision', async () => {
-  let capturedConversationBody = '';
+test('conversation identity dynamically adapts register without forcing chatbot continuations', async () => {
+  const capturedConversationBodies: string[] = [];
   const conversational = provider(async (_url, init) => {
-    capturedConversationBody = init.body as string;
-    return response(200, geminiEnvelope({ answer: 'Claro kk. Me diz o que você quer montar.' }));
+    const body = init.body as string;
+    capturedConversationBodies.push(body);
+    const answer = body.includes('pode me chamar de gabs')
+      ? 'Fechado, Gabs 😄'
+      : body.includes('complexidade ciclomática')
+        ? 'Complexidade ciclomática mede os caminhos independentes pelo fluxo de controle; em geral, mais decisões elevam o valor e o custo de teste.'
+        : 'Opa kk';
+    return response(200, geminiEnvelope({ answer }));
   });
-  await conversational.respond?.({ text: 'vc pode me ajudar?', requestedAt: '2026-08-27T00:00:00.000Z' });
+  const greeting = await conversational.respond?.({ text: 'oi sebastian kk', requestedAt: '2026-08-27T00:00:00.000Z' });
 
   for (const expected of [
-    'não comece automaticamente com fórmulas genéricas',
-    'grau de informalidade e abreviações do usuário',
-    'sem caricaturar, perder precisão',
-    'mantendo profissionalismo quando o assunto exigir',
-    'Mensagens casuais podem receber respostas curtas',
-    'Não termine toda resposta com uma pergunta',
-    'apenas informar uma preferência',
+    'Adapte a forma, não a identidade',
+    'formalidade, tamanho, objetividade, humor, gírias, emojis, abreviações e profundidade técnica',
+    'mensagem atual; (2) troca imediatamente anterior',
+    'menor resposta que satisfaça naturalmente',
+    'Não existe obrigação de prolongar a conversa',
+    'nunca como template',
+    'Uma mensagem técnica pede precisão e pode exigir detalhe',
+    'continuação elíptica',
   ]) {
-    assert.equal(capturedConversationBody.includes(expected), true, expected);
+    assert.equal(capturedConversationBodies[0]?.includes(expected), true, expected);
   }
-  assert.equal(capturedConversationBody.includes('vc pode me ajudar?'), true);
+  assert.deepEqual(greeting, { outcome: 'responded', answer: 'Opa kk' });
 
   const preference = await conversational.respond?.({
     text: 'pode me chamar de gabs', requestedAt: '2026-08-27T00:00:01.000Z',
   });
-  assert.equal(preference?.outcome, 'responded');
-  if (preference?.outcome === 'responded') assert.equal(preference.answer.includes('?'), false);
+  assert.deepEqual(preference, { outcome: 'responded', answer: 'Fechado, Gabs 😄' });
+
+  const technical = await conversational.respond?.({
+    text: 'Explique complexidade ciclomática com precisão técnica.', requestedAt: '2026-08-27T00:00:02.000Z',
+  });
+  assert.equal(technical?.outcome, 'responded');
+  if (technical?.outcome === 'responded') assert.match(technical.answer, /fluxo de controle|custo de teste/);
 
   let capturedDecisionBody = '';
   const operational = provider(async (_url, init) => {
@@ -200,6 +212,8 @@ test('conversation identity avoids generic service formulas and mirrors informal
   await operational.decide({ ...decisionRequest(), objective: 'vc pode me ajudar?' });
   assert.equal(capturedDecisionBody.includes('sem aberturas genéricas de atendimento'), true);
   assert.equal(capturedDecisionBody.includes('sem caricaturar, perder precisão'), true);
+  assert.equal(capturedDecisionBody.includes('menor resposta que satisfaça naturalmente'), false,
+    'conversation style policy must not alter the operational decision prompt');
 });
 
 test('SPEC-050: HTTP failures and network failures resolve unavailable without raw failure leakage', async () => {
