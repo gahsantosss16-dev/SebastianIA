@@ -16,6 +16,33 @@ import {
   type RecentExchangeRecord,
   type RememberedFactRecord,
 } from '../memory/index.js';
+
+export const MAX_COGNITIVE_CONVERSATION_CONTEXT_CHARS = 14_000;
+
+export function applyCognitiveConversationContextBudget(exchanges: readonly RecentExchangeRecord[]): {
+  readonly exchanges: readonly RecentExchangeRecord[];
+  readonly metrics: Readonly<Record<string, number | boolean>>;
+} {
+  const charactersBefore = exchanges.reduce((total, exchange) => total + exchange.requestText.length + exchange.summary.length, 0);
+  const selected: RecentExchangeRecord[] = [];
+  let charactersAfter = 0;
+  for (const exchange of exchanges) {
+    const size = exchange.requestText.length + exchange.summary.length;
+    if (charactersAfter + size > MAX_COGNITIVE_CONVERSATION_CONTEXT_CHARS) break;
+    selected.push(exchange);
+    charactersAfter += size;
+  }
+  return {
+    exchanges: selected,
+    metrics: {
+      exchangeCountBefore: exchanges.length,
+      exchangeCountAfter: selected.length,
+      charactersBefore,
+      charactersAfter,
+      truncationApplied: selected.length !== exchanges.length,
+    },
+  };
+}
 import type {
   ModelInterpretationDecision,
   ModelInterpretationDevelopTaskDecision,
@@ -125,7 +152,9 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const pendingTasks = this.extractPendingTasks(input);
     const recentExchanges = this.extractRecentExchanges(input);
     const pendingOperations = this.extractPendingOperations(input);
+    const abortSignal = this.extractAbortSignal(input);
     const cognitiveRecentExchanges = this.selectCognitiveRecentExchanges(text, rememberedFacts, recentExchanges);
+    const budgetedCognitiveRecentExchanges = this.applyConversationContextBudget(cognitiveRecentExchanges);
 
     const pendingResponse = this.handlePendingOperationResponse(input, text, pendingOperations);
     if (pendingResponse) return pendingResponse;
@@ -144,13 +173,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       input.requestedAt,
       input.executionId,
       input.responsibilityId,
-      cognitiveRecentExchanges,
+      budgetedCognitiveRecentExchanges,
+      abortSignal,
     );
     const conversationalDecision = await this.applyCognitiveConversationFallback(
       operationalDecision,
       text,
       input.requestedAt,
-      cognitiveRecentExchanges,
+      budgetedCognitiveRecentExchanges,
+      abortSignal,
     );
     // General conversation gets the first, dedicated model turn. If that
     // provider path is absent/unavailable, retain the existing operational
@@ -158,7 +189,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     // fallback. A successful conversational answer never pays for `decide`.
     const effectiveDecision = conversationalDecision === decision && operationalDecision === decision
       ? await this.applyCognitiveOperationalDecision(
-          decision, text, input.requestedAt, input.executionId, input.responsibilityId, cognitiveRecentExchanges, true,
+          decision, text, input.requestedAt, input.executionId, input.responsibilityId, budgetedCognitiveRecentExchanges, abortSignal, true,
         )
       : conversationalDecision;
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
@@ -172,6 +203,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     executionId: string,
     responsibilityId: string,
     recentExchanges: readonly RecentExchangeRecord[],
+    signal?: AbortSignal,
     forceFallback = false,
   ): Promise<ModelInterpretationDecision> {
     const eligible =
@@ -191,6 +223,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       relevantMemory: recentExchanges.map((exchange) => ({
         content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
       })),
+      ...(signal === undefined ? {} : { signal }),
     });
     if (result.outcome === 'answered') {
       return { intent: 'respond', answer: result.answer, recordable: true };
@@ -223,6 +256,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     text: string,
     requestedAt: string,
     recentExchanges: readonly RecentExchangeRecord[],
+    signal?: AbortSignal,
   ): Promise<ModelInterpretationDecision> {
     const fallbackEligible = decision.intent === 'respond' && decision.cognitiveFallbackEligible === true;
     this.logger?.info('Cognitive conversational fallback eligibility resolved.', { fallbackEligible });
@@ -235,6 +269,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       const result = await this.cognitiveModelProvider.respond({
         text,
         requestedAt,
+        ...(signal === undefined ? {} : { signal }),
         ...(recentExchanges.length === 0
           ? {}
           : {
@@ -548,6 +583,11 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     return Array.isArray(recentExchanges) ? (recentExchanges as readonly RecentExchangeRecord[]) : [];
   }
 
+  private extractAbortSignal(input: SpecializedAgentHandoffInput): AbortSignal | undefined {
+    const commandInput = input.payload.commandInput as { readonly signal?: unknown } | undefined;
+    return commandInput?.signal instanceof AbortSignal ? commandInput.signal : undefined;
+  }
+
   private extractPendingOperations(input: SpecializedAgentHandoffInput): readonly PendingOperationRecord[] {
     const commandInput = input.payload.commandInput as
       | { readonly temporary?: { readonly values?: { readonly pendingOperations?: unknown } } }
@@ -579,9 +619,10 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
         .filter((match) => match.source === 'exchange')
         .map((match) => byId.get(match.id))
         .filter((exchange): exchange is RecentExchangeRecord => exchange !== undefined);
-      selected = [...relevant, ...(composed.mostRecentExchange && !relevant.some((item) => item.id === composed.mostRecentExchange?.id)
-        ? [composed.mostRecentExchange]
-        : [])].slice(0, 4);
+      selected = [
+        ...(composed.mostRecentExchange ? [composed.mostRecentExchange] : []),
+        ...relevant.filter((item) => item.id !== composed.mostRecentExchange?.id),
+      ].slice(0, 4);
     } else if (composed.intent === 'resumptionReference') {
       // An explicit resumption names the older subject it wants back. Preserve
       // relevance ranking and do not inject the unrelated latest exchange.
@@ -600,6 +641,12 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     }
     this.logConversationContextSelection(composed.intent, recentExchanges, selected);
     return selected;
+  }
+
+  private applyConversationContextBudget(exchanges: readonly RecentExchangeRecord[]): readonly RecentExchangeRecord[] {
+    const budgeted = applyCognitiveConversationContextBudget(exchanges);
+    this.logger?.info('Cognitive conversation context budget applied.', { ...budgeted.metrics });
+    return budgeted.exchanges;
   }
 
   /** Safe production diagnostic: identifiers and positions only, never conversation content. */

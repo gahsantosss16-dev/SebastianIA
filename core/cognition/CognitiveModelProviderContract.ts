@@ -58,6 +58,7 @@ export interface CognitiveDecisionRequest {
   readonly stepsTaken: number;
   readonly stepsRemaining: number;
   readonly requestedAt: string;
+  readonly signal?: AbortSignal;
 }
 
 export type CognitiveIntent = 'investigate' | 'proposeFix' | 'verify' | 'conclude';
@@ -110,6 +111,7 @@ export type CognitiveDecisionResult =
 export interface CognitiveConversationRequest {
   readonly text: string;
   readonly requestedAt: string;
+  readonly signal?: AbortSignal;
   /**
    * Small, already-bounded conversation window selected by Memory. This is
    * session context, not general knowledge and never grants authority.

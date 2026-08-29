@@ -10,6 +10,7 @@ export interface CommandProcessingInput {
   readonly session?: SessionContextFragment | undefined;
   readonly configuration?: ConfigurationContextFragment | undefined;
   readonly temporary?: TemporaryContextFragment | undefined;
+  readonly signal?: AbortSignal | undefined;
 }
 
 export interface CommandProcessingResult {

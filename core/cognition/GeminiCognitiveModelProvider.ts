@@ -96,6 +96,7 @@ const CONVERSATION_SYSTEM_INSTRUCTION =
   'comparar, resumir, escrever, revisar e planejar de forma útil, direta e segura. ' +
   'Soa como um assistente pessoal natural, não como atendimento corporativo: acompanhe o idioma, o grau de informalidade e abreviações do usuário sem caricaturar, perder precisão ou forçar gírias e emojis. ' +
   'Vá direto ao ponto; não comece automaticamente com fórmulas genéricas como "Com certeza! Estou aqui para ajudar" e não repita contexto que já esteja óbvio. Leve humor e personalidade são bem-vindos quando combinarem com a conversa, mantendo profissionalismo quando o assunto exigir. ' +
+  'Mensagens casuais podem receber respostas curtas. Não termine toda resposta com uma pergunta ou oferta de ajuda e evite fórmulas repetitivas como "Como posso te ajudar hoje?". Se o usuário apenas informar uma preferência, reconheça e passe a segui-la sem transformar isso em atendimento formal. Acompanhe o registro do usuário com informalidade natural, nunca caricata. ' +
   'Quando houver contexto recente, use-o somente para compreender a conversa e referências do usuário. ' +
   'Você não possui Tools, filesystem, Git, comandos nem autorização para executar ações. ' +
   'Não invente fatos atuais ou específicos que dependam dessas fontes; explique a limitação quando necessário. ' +
@@ -174,6 +175,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       }),
       ANSWER_SCHEMA,
       this.respondTimeoutMs,
+      request.signal,
     );
     if (result.outcome !== 'generated') {
       this.logOutcome('respond', result.outcome, result);
@@ -229,6 +231,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       JSON.stringify(safeRequest),
       DECISION_SCHEMA,
       this.timeoutMs,
+      request.signal,
     );
     if (result.outcome !== 'generated') {
       this.logOutcome('decide', result.outcome, result);
@@ -258,10 +261,14 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     userContent: string,
     responseJsonSchema: Readonly<Record<string, unknown>>,
     timeoutMs: number,
+    externalSignal?: AbortSignal,
   ): Promise<GeminiStructuredResult> {
     const startedAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const abortFromCaller = (): void => controller.abort();
+    if (externalSignal?.aborted === true) controller.abort();
+    else externalSignal?.addEventListener('abort', abortFromCaller, { once: true });
 
     try {
       const endpoint = `${GEMINI_API_ORIGIN}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`;
@@ -335,6 +342,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       };
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', abortFromCaller);
     }
   }
 

@@ -282,7 +282,10 @@ test('WEB: an opaque HttpOnly session reaches the same real converse command wit
       message: 'Resposta pela interface.',
       requestId: 'request-test-id',
     });
-    assert.deepEqual(inputs, [{ type: 'converse', input: { text: 'Olá Sebastian' }, generatedAt: '2026-08-27T12:00:00.000Z' }]);
+    assert.equal(inputs[0]?.signal instanceof AbortSignal, true);
+    assert.deepEqual(inputs.map(({ signal: _signal, ...input }) => input), [
+      { type: 'converse', input: { text: 'Olá Sebastian' }, generatedAt: '2026-08-27T12:00:00.000Z' },
+    ]);
   } finally {
     await running.close();
   }
@@ -373,7 +376,8 @@ test('SPEC-049: POST /api/converse reaches the real command contract and only re
       message: 'Resposta pública.',
       requestId: 'request-test-id',
     });
-    assert.deepEqual(inputs, [
+    assert.equal(inputs[0]?.signal instanceof AbortSignal, true);
+    assert.deepEqual(inputs.map(({ signal: _signal, ...input }) => input), [
       {
         type: 'converse',
         input: { text: 'Quais são minhas tarefas?' },
@@ -446,14 +450,20 @@ test('SPEC-049: concurrent converse work is rejected instead of building an unbo
   }
 });
 
-test('SPEC-049: an execution timeout keeps the concurrency gate closed until the real operation settles', async () => {
-  let release: (() => void) | undefined;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
+test('SPEC-049: an execution timeout aborts work and immediately releases the concurrency gate', async () => {
+  let calls = 0;
+  let aborted = false;
   const application: TestApplication = {
-    executeCommand: async () => {
-      await gate;
+    executeCommand: async (input) => {
+      calls += 1;
+      if (calls === 1) {
+        await new Promise<void>((_resolve, reject) => {
+          input.signal?.addEventListener('abort', () => {
+            aborted = true;
+            reject(new Error('aborted'));
+          }, { once: true });
+        });
+      }
       return { status: 'succeeded', output: { message: 'ok' }, generatedAt: new Date().toISOString() };
     },
     shutdown: () => undefined,
@@ -462,16 +472,12 @@ test('SPEC-049: an execution timeout keeps the concurrency gate closed until the
   try {
     const timedOut = await converse(running.baseUrl, 'primeira');
     assert.equal(timedOut.status, 504);
+    assert.equal(aborted, true);
 
-    const whileStillRunning = await converse(running.baseUrl, 'segunda');
-    assert.equal(whileStillRunning.status, 503);
-
-    release?.();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const afterSettlement = await converse(running.baseUrl, 'terceira');
-    assert.equal(afterSettlement.status, 200);
+    const afterTimeout = await converse(running.baseUrl, 'segunda');
+    assert.equal(afterTimeout.status, 200);
+    assert.equal(calls, 2);
   } finally {
-    release?.();
     await running.close();
   }
 });

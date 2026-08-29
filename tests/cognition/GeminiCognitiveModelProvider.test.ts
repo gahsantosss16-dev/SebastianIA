@@ -173,10 +173,19 @@ test('conversation identity avoids generic service formulas and mirrors informal
     'grau de informalidade e abreviações do usuário',
     'sem caricaturar, perder precisão',
     'mantendo profissionalismo quando o assunto exigir',
+    'Mensagens casuais podem receber respostas curtas',
+    'Não termine toda resposta com uma pergunta',
+    'apenas informar uma preferência',
   ]) {
     assert.equal(capturedConversationBody.includes(expected), true, expected);
   }
   assert.equal(capturedConversationBody.includes('vc pode me ajudar?'), true);
+
+  const preference = await conversational.respond?.({
+    text: 'pode me chamar de gabs', requestedAt: '2026-08-27T00:00:01.000Z',
+  });
+  assert.equal(preference?.outcome, 'responded');
+  if (preference?.outcome === 'responded') assert.equal(preference.answer.includes('?'), false);
 
   let capturedDecisionBody = '';
   const operational = provider(async (_url, init) => {
@@ -233,6 +242,26 @@ test('SPEC-050: timeout aborts native fetch and resolves timeout without retry',
   assert.deepEqual(result, { outcome: 'timeout' });
   assert.equal(aborted, true);
   assert.equal(calls, 1);
+});
+
+test('external cancellation aborts respond without waiting for its internal deadline', async () => {
+  let aborted = false;
+  const cognitive = provider(async (_url, init) => new Promise<FakeResponse>((_resolve, reject) => {
+    (init.signal as AbortSignal).addEventListener('abort', () => {
+      aborted = true;
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, { once: true });
+  }));
+  const controller = new AbortController();
+  const pending = cognitive.respond?.({
+    text: 'mensagem', requestedAt: '2026-08-27T00:00:00.000Z', signal: controller.signal,
+  });
+  controller.abort();
+
+  assert.deepEqual(await pending, { outcome: 'timeout' });
+  assert.equal(aborted, true);
 });
 
 test('a respond call slower than the old shared 8s timeout, but within the dedicated respond timeout, still succeeds', async () => {

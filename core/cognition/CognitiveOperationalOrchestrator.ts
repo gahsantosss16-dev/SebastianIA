@@ -88,7 +88,7 @@ export class CognitiveOperationalOrchestrator {
 
   public async execute(
     objective: string,
-    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[] },
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly signal?: AbortSignal },
   ): Promise<CognitiveOperationalResult> {
     const observations: CognitiveObservationRecord[] = [];
     let toolCalls = 0;
@@ -102,7 +102,7 @@ export class CognitiveOperationalOrchestrator {
     for (let attempt = 0; attempt < this.maxDecisions; attempt += 1) {
       let result;
       try {
-        result = await this.provider.decide(this.request(objective, context.requestedAt, observations, context.relevantMemory ?? []));
+        result = await this.provider.decide(this.request(objective, context.requestedAt, observations, context.relevantMemory ?? [], context.signal));
       } catch {
         this.logStep(attempt, { nextAction: 'n/a', toolId: undefined, toolInvoked: false, toolOutcome: undefined }, toolCalls);
         return this.finish({ outcome: 'unavailable', toolCalls });
@@ -296,6 +296,7 @@ export class CognitiveOperationalOrchestrator {
     requestedAt: string,
     recentObservations: readonly CognitiveObservationRecord[],
     relevantMemory: readonly { readonly content: string }[],
+    signal?: AbortSignal,
   ): CognitiveDecisionRequest {
     return {
       objective,
@@ -307,6 +308,7 @@ export class CognitiveOperationalOrchestrator {
       stepsTaken: recentObservations.length,
       stepsRemaining: Math.max(0, this.maxDecisions - recentObservations.length),
       requestedAt,
+      ...(signal === undefined ? {} : { signal }),
     };
   }
 

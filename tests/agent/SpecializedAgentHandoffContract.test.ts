@@ -4,6 +4,8 @@ import {
   CONVERSE_COMMAND_TYPE,
   InMemorySpecializedAgent,
   InvalidSpecializedAgentHandoffInputError,
+  MAX_COGNITIVE_CONVERSATION_CONTEXT_CHARS,
+  applyCognitiveConversationContextBudget,
 } from '../../core/agent/index.js';
 import { SpecializedToolInvocationFailureError } from '../../core/tool/index.js';
 import type { ModelInterpretationDecision, ModelProvider } from '../../core/model/ModelProviderContract.js';
@@ -40,6 +42,36 @@ function cognitiveFallbackAgent(
     cognitiveModelProvider,
   );
 }
+
+test('conversation context budget preserves the primary exchange whole and excludes lower-priority overflow', () => {
+  const primary = {
+    id: 'primary', requestText: 'p'.repeat(4_000), summary: 's'.repeat(8_000), kind: 'respond',
+    recordedAt: '2026-08-27T00:00:02.000Z',
+  };
+  const older = {
+    id: 'older', requestText: 'o'.repeat(2_000), summary: 'r'.repeat(2_000), kind: 'respond',
+    recordedAt: '2026-08-27T00:00:01.000Z',
+  };
+  const result = applyCognitiveConversationContextBudget([primary, older]);
+
+  assert.equal(MAX_COGNITIVE_CONVERSATION_CONTEXT_CHARS, 14_000);
+  assert.deepEqual(result.exchanges, [primary]);
+  assert.deepEqual(result.metrics, {
+    exchangeCountBefore: 2, exchangeCountAfter: 1,
+    charactersBefore: 16_000, charactersAfter: 12_000, truncationApplied: true,
+  });
+});
+
+test('conversation context budget leaves a short structured conversation untouched', () => {
+  const exchange = {
+    id: 'short', requestText: 'pode me chamar de gabs', summary: 'Fechado, Gabs.', kind: 'respond',
+    recordedAt: '2026-08-27T00:00:01.000Z',
+  };
+  const result = applyCognitiveConversationContextBudget([exchange]);
+  assert.deepEqual(result.exchanges, [exchange]);
+  assert.equal(result.metrics.truncationApplied, false);
+  assert.equal(result.metrics.charactersBefore, result.metrics.charactersAfter);
+});
 
 function fallbackHandoff(text = 'Explique uma ideia nova') {
   return {

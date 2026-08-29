@@ -6,6 +6,7 @@ import { dirname } from 'node:path';
 import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { Logger } from '../core/logger.js';
+import { DEFAULT_GEMINI_RESPOND_TIMEOUT_MS } from '../core/cognition/index.js';
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
 
@@ -14,7 +15,7 @@ export const DEFAULT_ONLINE_PORT = 3000;
 export const MAX_HTTP_BODY_BYTES = 16 * 1024;
 export const MAX_CONVERSE_MESSAGE_CHARS = 4_000;
 export const HTTP_BODY_TIMEOUT_MS = 10_000;
-export const HTTP_EXECUTION_TIMEOUT_MS = 15_000;
+export const HTTP_EXECUTION_TIMEOUT_MS = DEFAULT_GEMINI_RESPOND_TIMEOUT_MS + 1_000;
 export const WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
 const WEB_SESSION_COOKIE = 'sebastian_session';
 
@@ -328,7 +329,10 @@ export class SebastianHttpServer {
     }
 
     this.converseInFlight = true;
-    let executionStarted = false;
+    const controller = new AbortController();
+    const abortOnDisconnect = (): void => controller.abort();
+    request.once('aborted', abortOnDisconnect);
+    response.once('close', abortOnDisconnect);
     try {
       const body = await readJsonBody(request);
       const message = extractMessage(body);
@@ -336,27 +340,15 @@ export class SebastianHttpServer {
         type: LOCAL_CONVERSE_COMMAND_TYPE,
         input: { text: message },
         generatedAt: this.now().toISOString(),
+        signal: controller.signal,
       });
-      executionStarted = true;
-      void execution.then(
-        () => {
-          this.converseInFlight = false;
-        },
-        () => {
-          this.converseInFlight = false;
-        },
-      );
-      const result = await withTimeout(execution, this.executionTimeoutMs);
+      const result = await withTimeout(execution, this.executionTimeoutMs, () => controller.abort());
       const publicMessage = extractPublicMessage(result);
       this.writeJson(response, 200, { ok: true, message: publicMessage, requestId });
     } finally {
-      // A timed-out execution may still be settling because Promise.race
-      // cannot cancel arbitrary application work. Keep the gate closed until
-      // that real operation settles; only pre-execution parse failures can
-      // release it here.
-      if (!executionStarted) {
-        this.converseInFlight = false;
-      }
+      request.off('aborted', abortOnDisconnect);
+      response.off('close', abortOnDisconnect);
+      this.converseInFlight = false;
     }
   }
 
@@ -636,11 +628,14 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   });
 }
 
-async function withTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, onTimeout: () => void): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(
-      () => reject(new HttpRequestError(504, 'EXECUTION_TIMEOUT', 'Tempo de execução excedido.')),
+      () => {
+        onTimeout();
+        reject(new HttpRequestError(504, 'EXECUTION_TIMEOUT', 'Tempo de execução excedido.'));
+      },
       timeoutMs,
     );
   });
