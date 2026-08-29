@@ -37,6 +37,8 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
    */
   readonly deterministicIntent?: {
     readonly pattern: RegExp;
+    /** Optional narrow continuation route evaluated only against the primary (immediately previous) context. */
+    readonly immediateContext?: { readonly objectivePattern: RegExp; readonly contextPattern: RegExp };
     readonly buildArguments: (objective: string) => Readonly<Record<string, string>>;
     /**
      * A deterministic route may already satisfy the user's full read-only
@@ -71,8 +73,12 @@ export class CognitiveOperationalOrchestrator {
    * objective term must occur in a registered Tool's id/description. This is
    * capability-driven (the catalog is the source), not a phrase/topic list.
    */
-  public hasApplicableToolCandidate(objective: string): boolean {
+  public hasApplicableToolCandidate(objective: string, immediateContext?: string): boolean {
     if (this.catalog.some((entry) => entry.deterministicIntent?.pattern.test(objective) === true)) return true;
+    if (immediateContext !== undefined && this.catalog.some((entry) =>
+      entry.deterministicIntent?.immediateContext?.objectivePattern.test(objective) === true &&
+      entry.deterministicIntent.immediateContext.contextPattern.test(immediateContext),
+    )) return true;
     const objectiveTerms = this.catalogTerms(objective);
     if (objectiveTerms.size === 0) return false;
     return this.catalog.some((entry) => {
@@ -88,7 +94,7 @@ export class CognitiveOperationalOrchestrator {
 
   public async execute(
     objective: string,
-    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly signal?: AbortSignal },
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly signal?: AbortSignal },
   ): Promise<CognitiveOperationalResult> {
     const observations: CognitiveObservationRecord[] = [];
     let toolCalls = 0;
@@ -193,10 +199,18 @@ export class CognitiveOperationalOrchestrator {
    */
   private async applyDeterministicIntentRoute(
     objective: string,
-    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string },
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string },
     observations: CognitiveObservationRecord[],
   ): Promise<{ readonly toolCalls: number; readonly answer?: string }> {
-    const route = this.catalog.find((entry) => entry.deterministicIntent?.pattern.test(objective));
+    const primaryContext = context.immediateContext;
+    const route = this.catalog.find((entry) => {
+      const deterministic = entry.deterministicIntent;
+      if (!deterministic) return false;
+      if (deterministic.pattern.test(objective)) return true;
+      return primaryContext !== undefined &&
+        deterministic.immediateContext?.objectivePattern.test(objective) === true &&
+        deterministic.immediateContext.contextPattern.test(primaryContext) === true;
+    });
     if (!route?.deterministicIntent) {
       return { toolCalls: 0 };
     }

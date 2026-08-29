@@ -43,6 +43,8 @@ const LOCAL_OPERATIONAL_TOOLS: readonly OperationalToolPolicyEntry[] = [
  * composes the actual reply from the resulting observation.
  */
 const GITHUB_COMMIT_INTENT_PATTERN = /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i;
+const GITHUB_COMMIT_CONTINUATION_PATTERN = /(?:último|ultimo|recentes?|mais\s+recente)(?:(?!\n).)*\bcommits?\b|\bcommits?\b(?:(?!\n).)*(?:último|ultimo|recentes?|mais\s+recente)/i;
+const GITHUB_IMMEDIATE_CONTEXT_PATTERN = /\bgithub\b/i;
 /** A message that mentions GitHub generally (project/status/access...) without specifically asking about commits. */
 const GITHUB_GENERAL_INTENT_PATTERN = /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i;
 
@@ -67,11 +69,19 @@ const GITHUB_GENERAL_INTENT_PATTERN = /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i;
  */
 function githubOperationalTools(defaultProjectId: string | undefined): readonly OperationalToolPolicyEntry[] {
   const generalRoute = defaultProjectId === undefined ? {} : {
-    deterministicIntent: { pattern: GITHUB_GENERAL_INTENT_PATTERN, buildArguments: () => ({ projectId: defaultProjectId }) },
+    deterministicIntent: {
+      pattern: GITHUB_GENERAL_INTENT_PATTERN,
+      buildArguments: () => ({ projectId: defaultProjectId }),
+      answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
+    },
   };
   const commitRoute = defaultProjectId === undefined ? {} : {
     deterministicIntent: {
       pattern: GITHUB_COMMIT_INTENT_PATTERN,
+      immediateContext: {
+        objectivePattern: GITHUB_COMMIT_CONTINUATION_PATTERN,
+        contextPattern: GITHUB_IMMEDIATE_CONTEXT_PATTERN,
+      },
       buildArguments: () => ({ projectId: defaultProjectId }),
       answerFromSuccessfulObservation: (observation: { readonly summary: string }) =>
         `Commits recentes no GitHub:\n${observation.summary}`,

@@ -153,6 +153,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const recentExchanges = this.extractRecentExchanges(input);
     const pendingOperations = this.extractPendingOperations(input);
     const abortSignal = this.extractAbortSignal(input);
+    const immediatePreviousExchange = this.latestExchange(recentExchanges);
     const cognitiveRecentExchanges = this.selectCognitiveRecentExchanges(text, rememberedFacts, recentExchanges);
     const budgetedCognitiveRecentExchanges = this.applyConversationContextBudget(cognitiveRecentExchanges);
 
@@ -175,6 +176,8 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       input.responsibilityId,
       budgetedCognitiveRecentExchanges,
       abortSignal,
+      false,
+      immediatePreviousExchange,
     );
     const conversationalDecision = await this.applyCognitiveConversationFallback(
       operationalDecision,
@@ -190,6 +193,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const effectiveDecision = conversationalDecision === decision && operationalDecision === decision
       ? await this.applyCognitiveOperationalDecision(
           decision, text, input.requestedAt, input.executionId, input.responsibilityId, budgetedCognitiveRecentExchanges, abortSignal, true,
+          immediatePreviousExchange,
         )
       : conversationalDecision;
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
@@ -205,12 +209,16 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     recentExchanges: readonly RecentExchangeRecord[],
     signal?: AbortSignal,
     forceFallback = false,
+    immediatePreviousExchange?: RecentExchangeRecord,
   ): Promise<ModelInterpretationDecision> {
     const eligible =
       forceFallback ||
       (decision.intent === 'respond' &&
         decision.cognitiveFallbackEligible === true &&
-        this.cognitiveOperationalOrchestrator?.hasApplicableToolCandidate(text) === true) ||
+        this.cognitiveOperationalOrchestrator?.hasApplicableToolCandidate(
+          text,
+          immediatePreviousExchange === undefined ? undefined : this.formatImmediateContext(immediatePreviousExchange),
+        ) === true) ||
       (decision.intent === 'useTool' && decision.cognitiveOperationalEligible === true);
     if (!eligible || !this.cognitiveOperationalOrchestrator) {
       return decision;
@@ -223,6 +231,9 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       relevantMemory: recentExchanges.map((exchange) => ({
         content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
       })),
+      ...(immediatePreviousExchange === undefined
+        ? {}
+        : { immediateContext: this.formatImmediateContext(immediatePreviousExchange) }),
       ...(signal === undefined ? {} : { signal }),
     });
     if (result.outcome === 'answered') {
@@ -581,6 +592,17 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const recentExchanges = commandInput?.temporary?.values?.recentExchanges;
 
     return Array.isArray(recentExchanges) ? (recentExchanges as readonly RecentExchangeRecord[]) : [];
+  }
+
+  private latestExchange(exchanges: readonly RecentExchangeRecord[]): RecentExchangeRecord | undefined {
+    return exchanges.reduce<RecentExchangeRecord | undefined>(
+      (latest, exchange) => latest === undefined || exchange.recordedAt > latest.recordedAt ? exchange : latest,
+      undefined,
+    );
+  }
+
+  private formatImmediateContext(exchange: RecentExchangeRecord): string {
+    return `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000);
   }
 
   private extractAbortSignal(input: SpecializedAgentHandoffInput): AbortSignal | undefined {

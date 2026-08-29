@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createOnlineCognitiveModelProvider } from './OnlineCognitiveProviderConfiguration.js';
 import { resolveSebastianDataDirectory } from '../core/memory/index.js';
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
+import { resolveBuildProvenance } from './BuildProvenance.js';
 
 const logger = createLogger();
 
@@ -23,7 +24,8 @@ async function startOnlineServer(): Promise<void> {
       webSessionStateFilePath: join(dataDir, 'web-session.json'),
     });
     const started = await httpServer.listen(port);
-    logger.info('Sebastian online started.', { port: started.port });
+    const build = resolveBuildProvenance();
+    logger.info('Sebastian online started.', { port: started.port, buildSha: build.sha, buildSource: build.source });
 
     let stopping = false;
     const shutdown = async (signal: string): Promise<void> => {

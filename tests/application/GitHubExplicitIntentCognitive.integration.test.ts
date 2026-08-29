@@ -22,12 +22,20 @@ const DEFAULT_PROJECT_ID = 'sebastiania';
 const githubCatalog = [
   {
     toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
-    deterministicIntent: { pattern: /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i, buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }) },
+    deterministicIntent: {
+      pattern: /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i,
+      buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }),
+      answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
+    },
   },
   {
     toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
     deterministicIntent: {
       pattern: /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i,
+      immediateContext: {
+        objectivePattern: /(?:último|ultimo|recentes?|mais\s+recente)(?:(?!\n).)*\bcommits?\b|\bcommits?\b(?:(?!\n).)*(?:último|ultimo|recentes?|mais\s+recente)/i,
+        contextPattern: /\bgithub\b/i,
+      },
       buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }),
       answerFromSuccessfulObservation: (observation: { readonly summary: string }) => `Commits recentes no GitHub:\n${observation.summary}`,
     },
@@ -138,6 +146,60 @@ test('an explicit GitHub request for recent commits calls github.listCommits and
     assert.equal(decideCalls, 0);
     assert.match(String(result.output.message), /corrige timeout do provider cognitivo/);
     assert.doesNotMatch(String(result.output.message), /não consegui concluir|ainda não sei responder/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('GitHub project access concludes from getProject and an immediate commit follow-up uses that exact context', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-immediate-continuity-'));
+  try {
+    let decideCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => {
+        decideCalls += 1;
+        return { outcome: 'timeout' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    const project = await app.executeCommand(input('vc consegue ver meus projetos no github?', 10));
+    assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID]);
+    assert.equal(decideCalls, 0, 'a successful getProject observation is already a complete answer');
+    assert.match(String(project.output.message), /SebastianIA|gahsantosss16-dev\/SebastianIA/);
+
+    const commit = await app.executeCommand(input('qual foi o último commit do projeto que vc tem acesso?', 11));
+    assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(decideCalls, 0, 'the immediate GitHub continuation must remain deterministic');
+    assert.match(String(commit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
+
+    const shorterCommit = await app.executeCommand(input('qual foi o último commit?', 14));
+    assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.match(String(shorterCommit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unrelated immediate context never activates the contextual GitHub commits route', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-unrelated-context-'));
+  try {
+    let decideCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => {
+        decideCalls += 1;
+        return { outcome: 'timeout' };
+      },
+      respond: async () => ({ outcome: 'responded', answer: 'Não tenho contexto suficiente para identificar esse commit.' }),
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    await app.executeCommand(input('estou organizando uma viagem para a Espanha', 12));
+    const result = await app.executeCommand(input('qual foi o último commit do projeto que vc tem acesso?', 13));
+
+    assert.deepEqual(invoked, []);
+    assert.ok(decideCalls >= 1, 'without proven GitHub continuity the normal operational fallback remains available');
+    assert.doesNotMatch(String(result.output.message), /abcdef123456|Commits recentes no GitHub/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
