@@ -98,6 +98,8 @@ button { cursor: pointer; }
 .sidebar {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   padding: 20px 16px;
   border-right: 1px solid var(--line);
   background: var(--bg-elevated);
@@ -122,7 +124,8 @@ button { cursor: pointer; }
 .new-conversation:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .new-conversation .icon { width: 14px; height: 14px; color: var(--muted); flex-shrink: 0; }
 
-.sidebar-spacer { flex: 1; }
+.sidebar-spacer { flex: 1; min-height: 0; overflow-y: auto; }
+.sidebar-footer { flex-shrink: 0; display: grid; gap: 4px; }
 .sidebar-status { display: flex; align-items: center; gap: 8px; padding: 8px 6px; color: var(--muted); font-size: 12px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--online); box-shadow: 0 0 8px rgba(95, 191, 136, 0.65); }
 
@@ -164,7 +167,7 @@ button { cursor: pointer; }
   background: rgba(255, 255, 255, 0.045);
   color: var(--ink);
 }
-.message.error .bubble { color: var(--danger); }
+.message.error .bubble { padding: 11px 13px; border: 1px solid var(--danger-line); border-radius: var(--radius-sm); background: rgba(229, 130, 143, 0.06); color: var(--danger); }
 .thinking .bubble { color: var(--muted); }
 .thinking .bubble::after {
   content: "";
@@ -250,6 +253,7 @@ textarea::placeholder { color: var(--muted); opacity: .55; }
   .new-conversation { width: 38px; height: 38px; padding: 0; justify-content: center; }
   .new-conversation span { display: none; }
   .sidebar-spacer { flex: 1; }
+  .sidebar-footer { display: flex; align-items: center; gap: 10px; }
   .sidebar-status { padding: 0; }
   .messages { padding: 26px 18px 12px; }
   .message { max-width: 100%; }
@@ -275,6 +279,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   const input = document.querySelector('#message-input');
   const send = document.querySelector('#send-button');
   const messages = document.querySelector('#messages');
+  const conversation = document.querySelector('.conversation');
   const newConversationButton = document.querySelector('#new-conversation-button');
   const logoutButton = document.querySelector('#logout-button');
   let pending = false;
@@ -320,11 +325,17 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     article.className = ['message', role, extraClass].filter(Boolean).join(' ');
     const label = document.createElement('div');
     label.className = 'message-label';
-    label.textContent = role === 'user' ? 'Você' : 'Sebastian';
+    label.textContent = extraClass === 'error' ? 'Não foi possível concluir' : role === 'user' ? 'Você' : 'Sebastian';
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
     article.append(label, bubble);
+    if (extraClass === 'thinking') {
+      article.setAttribute('role', 'status');
+      article.setAttribute('aria-label', 'Sebastian está preparando a resposta');
+    } else if (extraClass === 'error') {
+      article.setAttribute('role', 'alert');
+    }
     messages.append(article);
     messages.scrollTop = messages.scrollHeight;
     return article;
@@ -361,6 +372,12 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     } catch {
       return fallback;
     }
+  };
+
+  const conversationError = async (response) => {
+    if (response.status === 503) return 'O Sebastian ainda está concluindo outra resposta. Aguarde um instante e tente novamente.';
+    if (response.status === 504) return 'A resposta demorou mais que o esperado. Tente novamente.';
+    return parseError(response, 'Não foi possível concluir a resposta. Tente novamente.');
   };
 
   const checkSession = async () => {
@@ -421,12 +438,13 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     const message = input.value.trim();
     if (!message || pending) return;
     pending = true;
+    conversation.setAttribute('aria-busy', 'true');
     input.value = '';
     resizeInput();
     input.disabled = true;
     send.disabled = true;
     appendMessage('user', message);
-    const thinking = appendMessage('sebastian', 'Processando', 'thinking');
+    const thinking = appendMessage('sebastian', 'Preparando resposta', 'thinking');
     try {
       const response = await fetch('/api/web/converse', {
         method: 'POST',
@@ -440,16 +458,17 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
           showUnlock('Sua sessão expirou. Informe o acesso novamente.');
           return;
         }
-        appendMessage('sebastian', await parseError(response, 'Não consegui concluir esta resposta. Tente novamente.'), 'error');
+        appendMessage('sebastian', await conversationError(response), 'error');
         return;
       }
       const body = await response.json();
       appendMessage('sebastian', body.message);
     } catch {
       thinking.remove();
-      appendMessage('sebastian', 'A conexão foi interrompida. Tente novamente em instantes.', 'error');
+      appendMessage('sebastian', 'A conexão caiu antes da resposta. Verifique sua conexão e tente novamente.', 'error');
     } finally {
       pending = false;
+      conversation.removeAttribute('aria-busy');
       input.disabled = false;
       send.disabled = false;
       input.focus();
@@ -501,11 +520,13 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
           <span>Nova conversa</span>
         </button>
         <div class="sidebar-spacer"></div>
-        <div class="sidebar-status">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span>Online</span>
+        <div class="sidebar-footer">
+          <div class="sidebar-status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>Online</span>
+          </div>
+          <button class="new-conversation" id="logout-button" type="button">Sair</button>
         </div>
-        <button class="new-conversation" id="logout-button" type="button">Sair</button>
       </aside>
       <main class="conversation" aria-label="Conversa com Sebastian">
         <div class="messages" id="messages" aria-live="polite">
