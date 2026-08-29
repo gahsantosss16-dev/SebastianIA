@@ -132,6 +132,20 @@ export type CognitiveConversationResult =
   | { readonly outcome: 'timeout' }
   | { readonly outcome: 'invalidResponse'; readonly reason: string };
 
+/** Bounded evidence-only request for turning successful Tool observations into a proportional user-facing answer. */
+export interface CognitiveSynthesisRequest {
+  readonly objective: string;
+  readonly observations: readonly CognitiveObservationRecord[];
+  readonly requestedAt: string;
+  readonly signal?: AbortSignal;
+}
+
+export type CognitiveSynthesisResult =
+  | { readonly outcome: 'synthesized'; readonly answer: string }
+  | { readonly outcome: 'unavailable'; readonly reason: string }
+  | { readonly outcome: 'timeout' }
+  | { readonly outcome: 'invalidResponse'; readonly reason: string };
+
 /**
  * Substitutable boundary for the general cognitive engine (SPEC-048) -
  * mirrors `ModelProvider`'s role as a seam Core/Tool/GoalExecutionOrchestrator
@@ -145,4 +159,6 @@ export interface CognitiveModelProvider {
   decide(request: CognitiveDecisionRequest): Promise<CognitiveDecisionResult>;
   /** Optional and retrocompatible: only used for an explicitly marked deterministic conversational fallback. */
   respond?(request: CognitiveConversationRequest): Promise<CognitiveConversationResult>;
+  /** Optional evidence-only presentation seam; it cannot select or invoke a Tool or change authorization. */
+  synthesize?(request: CognitiveSynthesisRequest): Promise<CognitiveSynthesisResult>;
 }

@@ -45,8 +45,8 @@ const LOCAL_OPERATIONAL_TOOLS: readonly OperationalToolPolicyEntry[] = [
 const GITHUB_COMMIT_INTENT_PATTERN = /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i;
 const GITHUB_COMMIT_CONTINUATION_PATTERN = /(?:último|ultimo|recentes?|mais\s+recente)(?:(?!\n).)*\bcommits?\b|\bcommits?\b(?:(?!\n).)*(?:último|ultimo|recentes?|mais\s+recente)/i;
 const GITHUB_IMMEDIATE_CONTEXT_PATTERN = /\bgithub\b/i;
-/** A message that mentions GitHub generally (project/status/access...) without specifically asking about commits. */
-const GITHUB_GENERAL_INTENT_PATTERN = /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i;
+/** A direct GitHub capability/project-access question; broader semantic questions remain cognitive. */
+const GITHUB_GENERAL_INTENT_PATTERN = /^\s*github\s*[?!.]*\s*$|^(?=.*\bgithub\b)(?=.*\b(?:projet\w*|acesso|acessar)\b|.*\bconsegue\s+ver\b)(?!.*\bcommits?\b)/i;
 
 /**
  * Investigation tools for GitHub projects previously registered by the

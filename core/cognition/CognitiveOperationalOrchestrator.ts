@@ -42,10 +42,8 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
     readonly buildArguments: (objective: string) => Readonly<Record<string, string>>;
     /**
      * A deterministic route may already satisfy the user's full read-only
-     * intent. In that case its successful observation is sufficient to
-     * compose the final answer and the operational planner must not be
-     * consulted again (which could only repeat or contradict the completed
-     * capability). Rejected/failed Tool outcomes never use this shortcut.
+     * intent. This formatter is the safe fallback if evidence-only cognitive
+     * synthesis is absent or fails; rejected/failed Tool outcomes never use it.
      */
     readonly answerFromSuccessfulObservation?: (observation: CognitiveObservationRecord) => string;
   };
@@ -125,6 +123,12 @@ export class CognitiveOperationalOrchestrator {
       const decision = result.decision;
       if (decision.nextAction === 'concludeCompleted') {
         this.logStep(attempt, { nextAction: decision.nextAction, toolId: undefined, toolInvoked: false, toolOutcome: undefined }, toolCalls);
+        const successfulObservations = observations.filter((observation) => observation.outcome === 'ok');
+        if (successfulObservations.length > 0 && successfulObservations.length === observations.length) {
+          const evidenceFallback = successfulObservations.map((observation) => observation.summary).join('\n');
+          const answer = await this.synthesizeOrFallback(objective, context, successfulObservations, evidenceFallback);
+          return this.finish({ outcome: 'answered', answer, toolCalls });
+        }
         return this.finish(
           decision.finalAnswer
             ? { outcome: 'answered', answer: decision.finalAnswer, toolCalls }
@@ -249,10 +253,42 @@ export class CognitiveOperationalOrchestrator {
       toolInvoked: true,
       toolOutcome,
     });
-    const answer = toolOutcome === 'ok'
-      ? route.deterministicIntent.answerFromSuccessfulObservation?.(observations[observations.length - 1]!)
+    const successfulObservation = observations[observations.length - 1]!;
+    const fallbackAnswer = toolOutcome === 'ok'
+      ? route.deterministicIntent.answerFromSuccessfulObservation?.(successfulObservation)
       : undefined;
+    const answer = fallbackAnswer === undefined
+      ? undefined
+      : await this.synthesizeOrFallback(objective, context, [successfulObservation], fallbackAnswer);
     return { toolCalls: 1, ...(answer === undefined ? {} : { answer }) };
+  }
+
+  private async synthesizeOrFallback(
+    objective: string,
+    context: { readonly requestedAt: string; readonly signal?: AbortSignal },
+    observations: readonly CognitiveObservationRecord[],
+    fallbackAnswer: string,
+  ): Promise<string> {
+    if (typeof this.provider.synthesize !== 'function') {
+      this.logger?.info('Cognitive operational synthesis completed.', { outcome: 'notConfigured', fallbackUsed: true });
+      return fallbackAnswer;
+    }
+    try {
+      const result = await this.provider.synthesize({
+        objective,
+        observations,
+        requestedAt: context.requestedAt,
+        ...(context.signal === undefined ? {} : { signal: context.signal }),
+      });
+      if (result.outcome === 'synthesized' && result.answer.trim() !== '') {
+        this.logger?.info('Cognitive operational synthesis completed.', { outcome: 'synthesized', fallbackUsed: false });
+        return result.answer.trim();
+      }
+      this.logger?.info('Cognitive operational synthesis completed.', { outcome: result.outcome, fallbackUsed: true });
+    } catch {
+      this.logger?.info('Cognitive operational synthesis completed.', { outcome: 'unavailable', fallbackUsed: true });
+    }
+    return fallbackAnswer;
   }
 
   public executeAuthorized(

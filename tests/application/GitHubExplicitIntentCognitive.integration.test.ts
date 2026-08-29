@@ -23,7 +23,7 @@ const githubCatalog = [
   {
     toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
     deterministicIntent: {
-      pattern: /^(?=.*\bgithub\b)(?!.*\bcommits?\b)/i,
+      pattern: /^\s*github\s*[?!.]*\s*$|^(?=.*\bgithub\b)(?=.*\b(?:projet\w*|acesso|acessar)\b|.*\bconsegue\s+ver\b)(?!.*\bcommits?\b)/i,
       buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }),
       answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
     },
@@ -95,6 +95,22 @@ function commitsFetchImpl() {
   };
 }
 
+function multipleCommitsFetchImpl() {
+  return async (url: string) => {
+    if (!url.includes('/commits')) throw new Error(`unexpected fetch: ${url}`);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { sha: '78702c464f99', commit: { message: 'fix: preserve GitHub continuity and log build SHA', author: { name: 'Gabriel', date: '2026-08-28T03:00:00Z' } } },
+        { sha: '2c27fafbcee2', commit: { message: 'refine dynamic conversational adaptation', author: { name: 'Gabriel', date: '2026-08-28T02:00:00Z' } } },
+        { sha: '1d8cb3961bf9', commit: { message: 'fix cognitive timeout cancellation and context budget', author: { name: 'Gabriel', date: '2026-08-28T01:00:00Z' } } },
+        { sha: 'debb0a1a3880', commit: { message: 'preserve single web session across restarts', author: { name: 'Gabriel', date: '2026-08-27T23:00:00Z' } } },
+      ]),
+    };
+  };
+}
+
 function buildApp(provider: CognitiveModelProvider, fetchImpl: ReturnType<typeof commitsFetchImpl>, root: string, effectiveLogger: Logger = logger) {
   const registry = sebastianRegistry();
   const githubTool = new GitHubReadOnlyTool({ token: 'fake-token', registry, fetchImpl });
@@ -151,14 +167,115 @@ test('an explicit GitHub request for recent commits calls github.listCommits and
   }
 });
 
+test('evidence synthesis is proportional for singular, plural and explicit quantity requests', async () => {
+  const cases = [
+    {
+      objective: 'qual foi o último commit no github?',
+      answer: 'O último foi o 78702c46 — fix: preserve GitHub continuity and log build SHA.',
+      included: ['78702c46'], excluded: ['2c27fafb', '1d8cb396'],
+    },
+    {
+      objective: 'quais foram os últimos commits no github?',
+      answer: 'Os últimos foram 78702c46, 2c27fafb, 1d8cb396 e debb0a1a.',
+      included: ['78702c46', '2c27fafb'], excluded: [],
+    },
+    {
+      objective: 'me mostra os últimos 3 commits no github',
+      answer: '78702c46, 2c27fafb e 1d8cb396.',
+      included: ['78702c46', '2c27fafb', '1d8cb396'], excluded: ['debb0a1a'],
+    },
+  ] as const;
+
+  for (const [index, scenario] of cases.entries()) {
+    const root = mkdtempSync(join(tmpdir(), `sebastian-github-synthesis-${index}-`));
+    try {
+      let synthesisObservations = 0;
+      const provider: CognitiveModelProvider = {
+        decide: async () => { throw new Error('deterministic completion must not call decide'); },
+        synthesize: async (request) => {
+          synthesisObservations = request.observations.length;
+          assert.match(request.observations[0]?.summary ?? '', /78702c464f99/);
+          return { outcome: 'synthesized', answer: scenario.answer };
+        },
+      };
+      const { app, invoked } = buildApp(provider, multipleCommitsFetchImpl(), root);
+      const result = await app.executeCommand(input(scenario.objective, 20 + index));
+      assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+      assert.equal(synthesisObservations, 1);
+      for (const value of scenario.included) assert.match(String(result.output.message), new RegExp(value));
+      for (const value of scenario.excluded) assert.doesNotMatch(String(result.output.message), new RegExp(value));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a semantic GitHub question uses observed commits instead of dumping the collection', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-semantic-synthesis-'));
+  try {
+    const provider: CognitiveModelProvider = {
+      decide: async (request) => request.recentObservations.length === 0
+        ? { outcome: 'decided', decision: decision({
+            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: DEFAULT_PROJECT_ID },
+          }) }
+        : { outcome: 'decided', decision: decision({
+            finalAnswer: 'A observação já é suficiente para concluir.',
+          }) },
+      synthesize: async (request) => {
+        assert.match(request.observations[0]?.summary ?? '', /preserve GitHub continuity/);
+        return { outcome: 'synthesized', answer: 'Sim. A mudança mais recente relacionada ao GitHub preservou a continuidade e registrou o SHA do build.' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, multipleCommitsFetchImpl(), root);
+    const result = await app.executeCommand(input('teve alguma mudança relacionada ao github recentemente?', 24));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.match(String(result.output.message), /preservou a continuidade/i);
+    assert.doesNotMatch(String(result.output.message), /2c27fafb|1d8cb396|debb0a1a/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('failed synthesis after a successful Tool uses evidence fallback without reporting Tool failure', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-synthesis-fallback-'));
+  try {
+    let decideCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => { decideCalls += 1; return { outcome: 'timeout' }; },
+      synthesize: async () => ({ outcome: 'timeout' }),
+    };
+    const { app, invoked } = buildApp(provider, multipleCommitsFetchImpl(), root);
+    const result = await app.executeCommand(input('qual foi o último commit no github?', 25));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(decideCalls, 0);
+    assert.match(String(result.output.message), /78702c464f99/);
+    assert.doesNotMatch(String(result.output.message), /não consegui concluir|falhou/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('GitHub project access concludes from getProject and an immediate commit follow-up uses that exact context', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-github-immediate-continuity-'));
   try {
     let decideCalls = 0;
+    let synthesisCalls = 0;
     const provider: CognitiveModelProvider = {
       decide: async () => {
         decideCalls += 1;
         return { outcome: 'timeout' };
+      },
+      synthesize: async (request) => {
+        synthesisCalls += 1;
+        return {
+          outcome: 'synthesized',
+          answer: request.observations[0]?.toolId === GITHUB_GET_PROJECT_TOOL_ID
+            ? 'Consigo ver o projeto SebastianIA no GitHub.'
+            : 'No GitHub, o último foi abcdef123456 — fix: corrige timeout do provider cognitivo.',
+        };
       },
     };
     const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
@@ -166,15 +283,18 @@ test('GitHub project access concludes from getProject and an immediate commit fo
     const project = await app.executeCommand(input('vc consegue ver meus projetos no github?', 10));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID]);
     assert.equal(decideCalls, 0, 'a successful getProject observation is already a complete answer');
+    assert.equal(synthesisCalls, 1);
     assert.match(String(project.output.message), /SebastianIA|gahsantosss16-dev\/SebastianIA/);
 
     const commit = await app.executeCommand(input('qual foi o último commit do projeto que vc tem acesso?', 11));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
     assert.equal(decideCalls, 0, 'the immediate GitHub continuation must remain deterministic');
+    assert.equal(synthesisCalls, 2);
     assert.match(String(commit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
 
     const shorterCommit = await app.executeCommand(input('qual foi o último commit?', 14));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(synthesisCalls, 3);
     assert.match(String(shorterCommit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
   } finally {
     rmSync(root, { recursive: true, force: true });

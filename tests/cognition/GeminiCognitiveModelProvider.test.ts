@@ -89,6 +89,43 @@ test('SPEC-050: valid structured Gemini response becomes conversational text and
   assert.equal(body.includes('application/json'), true);
 });
 
+test('operational synthesis receives only bounded evidence and returns a grounded proportional answer', async () => {
+  let capturedBody = '';
+  const cognitive = provider(async (_url, init) => {
+    capturedBody = String(init.body);
+    return response(200, geminiEnvelope({
+      answer: 'O último foi abcdef12 — fix: síntese proporcional.',
+      evidence: ['abcdef123456 fix: síntese proporcional'],
+    }));
+  });
+  const result = await cognitive.synthesize?.({
+    objective: 'qual foi o último commit?',
+    observations: [{
+      stepId: 'operational:1', toolId: 'github.listCommits', outcome: 'ok',
+      summary: '10 commit(s) recentes:\nabcdef123456 fix: síntese proporcional\n999999999999 chore: antigo',
+    }],
+    requestedAt: '2026-08-28T00:00:00.000Z',
+  });
+
+  assert.deepEqual(result, { outcome: 'synthesized', answer: 'O último foi abcdef12 — fix: síntese proporcional.' });
+  assert.equal(capturedBody.includes('A observação é evidência'), true);
+  assert.equal(capturedBody.includes('availableTools'), false);
+  assert.equal(capturedBody.includes('authorization'), false);
+});
+
+test('operational synthesis rejects evidence not present in the successful observation', async () => {
+  const cognitive = provider(async () => response(200, geminiEnvelope({
+    answer: 'O último foi INVENTADO.',
+    evidence: ['sha-inexistente dado inventado'],
+  })));
+  const result = await cognitive.synthesize?.({
+    objective: 'qual foi o último commit?',
+    observations: [{ stepId: '1', toolId: 'github.listCommits', outcome: 'ok', summary: 'abcdef123456 commit real' }],
+    requestedAt: '2026-08-28T00:00:00.000Z',
+  });
+  assert.equal(result?.outcome, 'invalidResponse');
+});
+
 test('Gemini conversation payload includes bounded recent context without granting tools or authority', async () => {
   let capturedBody = '';
   const cognitive = provider(async (_url, init) => {

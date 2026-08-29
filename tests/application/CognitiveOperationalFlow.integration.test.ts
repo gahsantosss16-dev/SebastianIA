@@ -287,6 +287,12 @@ test('read-only planner autonomously chains search, file read and diagnosis whil
         if (request.recentObservations.length === 1) return { outcome: 'decided', decision: decision({ intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress', toolId: FILESYSTEM_READ_FILE_TOOL_ID, toolArguments: { path: 'worker.ts' } }) };
         return { outcome: 'decided', decision: decision({ finalAnswer: 'Diagnóstico: worker.ts usa queueName sem definição local.' }) };
       },
+      synthesize: async (request) => ({
+        outcome: 'synthesized',
+        answer: request.objective.includes('entrega')
+          ? 'Diagnóstico: worker.ts usa queueName sem definição local.'
+          : 'Síntese baseada na observação.',
+      }),
     };
     const realTool = new OnlineReadOnlyTool(root);
     const tool = { invoke(invocation: SpecializedToolInvocationInput) { invoked.push(invocation.toolId); return realTool.invoke(invocation); } };
