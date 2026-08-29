@@ -2,6 +2,9 @@ import { ContextManager } from '../context/ContextManager.js';
 import { type CommandProcessingInput, type CommandProcessingResult } from './CommandTypes.js';
 import { InvalidCommandInputError, UnsupportedCommandTypeError } from './CommandErrors.js';
 
+/** The conversation identity every command falls back to when no caller supplies one - the single linear history that predates per-conversation persistence. */
+export const DEFAULT_CONVERSATION_ID = 'conversation-1';
+
 export class CommandProcessor {
   constructor(private readonly contextManager: ContextManager = new ContextManager()) {}
 
@@ -22,14 +25,14 @@ export class CommandProcessor {
     const context = this.contextManager.buildSnapshot({
       generatedAt: input.generatedAt,
       conversation: {
-        conversationId: input.conversation?.conversationId ?? 'conversation-1',
+        conversationId: input.conversation?.conversationId ?? DEFAULT_CONVERSATION_ID,
         messages: input.conversation?.messages,
         decisions: input.conversation?.decisions,
         pendingTasks: input.conversation?.pendingTasks,
         summary: input.conversation?.summary,
       },
       session: {
-        conversationId: input.session?.conversationId ?? 'conversation-1',
+        conversationId: input.session?.conversationId ?? DEFAULT_CONVERSATION_ID,
         sessionId: input.session?.sessionId ?? 'session-1',
         messages: input.session?.messages,
         decisions: input.session?.decisions,

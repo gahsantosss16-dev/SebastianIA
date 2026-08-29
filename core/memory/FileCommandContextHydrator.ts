@@ -13,6 +13,15 @@ import {
   type PendingOperationStatus,
 } from './PendingOperationContract.js';
 
+/**
+ * The conversation identity every command falls back to when no caller
+ * supplies one (see `CommandProcessor.DEFAULT_CONVERSATION_ID`). Duplicated
+ * here as a literal, not imported, to keep `core/memory` free of a dependency
+ * on `core/command` - the two modules agree on the string by convention, the
+ * same way `CommandProcessor` already did before this file existed.
+ */
+const DEFAULT_CONVERSATION_ID = 'conversation-1';
+
 /** Command type recorded by the memory capability that persists a fact for later recall. */
 export const MEMORY_REMEMBER_COMMAND_TYPE = 'remember';
 
@@ -94,10 +103,25 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
       .listRecords(COMMAND_RESULTS_NAMESPACE)
       .filter((record) => record.resultStatus === 'succeeded');
 
+    // Conversational state (exchanges, tasks, pending operations) is scoped to
+    // the requested conversation once a conversationId is actually supplied -
+    // a conversation must never see another conversation's turns. A record
+    // without any conversationId at all predates per-conversation persistence
+    // and is folded into DEFAULT_CONVERSATION_ID so existing history is never
+    // orphaned by the introduction of scoping. Remembered facts are permanent
+    // memory, deliberately never scoped this way - see the class doc comment.
+    const scopedRecords = request.conversationId === undefined
+      ? succeededRecords
+      : succeededRecords.filter((record) => {
+          const conversationId = (record.metadata as { readonly conversationId?: unknown } | undefined)?.conversationId;
+          return conversationId === request.conversationId ||
+            (conversationId === undefined && request.conversationId === DEFAULT_CONVERSATION_ID);
+        });
+
     const facts = this.readRememberedFacts(succeededRecords);
-    const pendingTasks = this.readPendingTasks(succeededRecords);
-    const recentExchanges = this.readRecentExchanges(succeededRecords);
-    const pendingOperations = this.readPendingOperations(succeededRecords);
+    const pendingTasks = this.readPendingTasks(scopedRecords);
+    const recentExchanges = this.readRecentExchanges(scopedRecords);
+    const pendingOperations = this.readPendingOperations(scopedRecords);
 
     if (facts.length === 0 && pendingTasks.length === 0 && recentExchanges.length === 0 && pendingOperations.length === 0) {
       return { status: 'absent' };
@@ -115,6 +139,38 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
     };
 
     return { status: 'hydrated', context };
+  }
+
+  /**
+   * The full, unbounded turn history for one conversation - unlike `hydrate`,
+   * never capped to `MAX_HYDRATED_RECENT_EXCHANGES`. This exists for a human
+   * reopening a conversation in a UI (who wants everything they can scroll
+   * back through), not for the cognitive context window fed to a model turn.
+   * Legacy records with no conversationId at all are folded into
+   * DEFAULT_CONVERSATION_ID, exactly like `hydrate`.
+   */
+  public listConversationTurns(conversationId: string): readonly RecentExchangeRecord[] {
+    if (typeof conversationId !== 'string' || conversationId.trim() === '') {
+      throw new InvalidCommandContextHydrationRequestError('Conversation id must be a non-empty string.');
+    }
+
+    const scopedRecords = this.store
+      .listRecords(COMMAND_RESULTS_NAMESPACE)
+      .filter((record) => record.resultStatus === 'succeeded')
+      .filter((record) => {
+        const recordConversationId = (record.metadata as { readonly conversationId?: unknown } | undefined)?.conversationId;
+        return recordConversationId === conversationId ||
+          (recordConversationId === undefined && conversationId === DEFAULT_CONVERSATION_ID);
+      });
+
+    const exchanges: RecentExchangeRecord[] = [];
+    for (const record of scopedRecords) {
+      const exchange = this.extractRecentExchange(record);
+      if (exchange) {
+        exchanges.push(exchange);
+      }
+    }
+    return exchanges.sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
   }
 
   private readPendingOperations(

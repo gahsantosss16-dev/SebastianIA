@@ -4,7 +4,13 @@ import { createLogger } from '../core/logger.js';
 import { createOnlineSebastianApplication } from './OnlineSebastianApplication.js';
 import { join } from 'node:path';
 import { createOnlineCognitiveModelProvider } from './OnlineCognitiveProviderConfiguration.js';
-import { resolveSebastianDataDirectory } from '../core/memory/index.js';
+import {
+  ConversationRegistry,
+  FileCommandContextHydrator,
+  FileMemoryStore,
+  resolveMemoryFilePath,
+  resolveSebastianDataDirectory,
+} from '../core/memory/index.js';
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
 import { resolveBuildProvenance } from './BuildProvenance.js';
 
@@ -17,9 +23,18 @@ async function startOnlineServer(): Promise<void> {
     const cognitiveModelProvider = createOnlineCognitiveModelProvider(process.env, logger);
     const dataDir = resolveSebastianDataDirectory();
     const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env);
+    // A second reader over the same memory.json document - safe by
+    // FileMemoryStore's own design (every read re-parses from disk, no
+    // shared in-process cache) - so the HTTP layer can list/validate/reopen
+    // conversations without threading conversation CRUD through Core's
+    // cognition-facing command pipeline.
+    const conversationMemoryStore = new FileMemoryStore(resolveMemoryFilePath(dataDir));
+    const conversationHydrator = new FileCommandContextHydrator(conversationMemoryStore);
+    const conversationRegistry = new ConversationRegistry(conversationMemoryStore, conversationHydrator);
     const httpServer = new SebastianHttpServer({
       application,
       apiToken,
+      conversationRegistry,
       logger,
       webSessionStateFilePath: join(dataDir, 'web-session.json'),
     });

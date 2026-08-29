@@ -421,6 +421,7 @@ function writeExchangeRecord(
   recordedAt: string,
   conversationTurn: Readonly<Record<string, unknown>>,
   extraOutput: Readonly<Record<string, unknown>> = {},
+  metadata: Readonly<Record<string, unknown>> = {},
 ): void {
   writer.write({
     executionId,
@@ -429,7 +430,7 @@ function writeExchangeRecord(
     resultGeneratedAt: recordedAt,
     resultStatus: 'succeeded',
     output: { ...extraOutput, conversationTurn },
-    metadata: {},
+    metadata,
   });
 }
 
@@ -580,5 +581,107 @@ test('hydrator reconstructs facts, tasks and recent exchanges together without i
     assert.equal(temporary.values.rememberedFacts.length, 1);
     assert.equal(temporary.values.pendingTasks.length, 0);
     assert.equal(temporary.values.recentExchanges.length, 1);
+  });
+});
+
+test('hydrate scopes recent exchanges to the requested conversationId, never leaking another conversation\'s turns', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writeExchangeRecord(
+      writer, 'converse:a1', '2026-08-13T00:00:00.000Z',
+      { requestText: 'pergunta em A', summary: 'resposta em A', kind: 'respond' }, {}, { conversationId: 'conversation-a' },
+    );
+    writeExchangeRecord(
+      writer, 'converse:b1', '2026-08-13T00:01:00.000Z',
+      { requestText: 'pergunta em B', summary: 'resposta em B', kind: 'respond' }, {}, { conversationId: 'conversation-b' },
+    );
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcomeA = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-a' });
+    const outcomeB = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-b' });
+
+    if (outcomeA.status !== 'hydrated' || outcomeB.status !== 'hydrated') {
+      assert.fail('Expected both conversations to hydrate.');
+    }
+    const exchangesA = (outcomeA.context.temporary as { values: { recentExchanges: ReadonlyArray<{ requestText: string }> } }).values.recentExchanges;
+    const exchangesB = (outcomeB.context.temporary as { values: { recentExchanges: ReadonlyArray<{ requestText: string }> } }).values.recentExchanges;
+    assert.deepEqual(exchangesA.map((e) => e.requestText), ['pergunta em A']);
+    assert.deepEqual(exchangesB.map((e) => e.requestText), ['pergunta em B']);
+  });
+});
+
+test('hydrate keeps remembered facts global regardless of which conversationId is requested', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writer.write({
+      executionId: 'remember:2026-08-13T00:00:00.000Z',
+      commandType: 'remember',
+      commandGeneratedAt: '2026-08-13T00:00:00.000Z',
+      resultGeneratedAt: '2026-08-13T00:00:00.000Z',
+      resultStatus: 'succeeded',
+      output: { fact: 'prefiro reuniões de manhã' },
+      metadata: {},
+    });
+    writeExchangeRecord(
+      writer, 'converse:a1', '2026-08-13T00:01:00.000Z',
+      { requestText: 'pergunta em A', summary: 'resposta em A', kind: 'respond' }, {}, { conversationId: 'conversation-a' },
+    );
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const outcomeB = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-b-brand-new' });
+
+    if (outcomeB.status !== 'hydrated') {
+      assert.fail('Expected the fact to make conversation B hydrate even with no exchanges of its own.');
+    }
+    const { values } = outcomeB.context.temporary as { values: { rememberedFacts: ReadonlyArray<{ content: string }>; recentExchanges: unknown[] } };
+    assert.deepEqual(values.rememberedFacts.map((fact) => fact.content), ['prefiro reuniões de manhã']);
+    assert.deepEqual(values.recentExchanges, []);
+  });
+});
+
+test('hydrate folds a legacy record with no conversationId at all into conversation-1, never into any other conversation', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    writeExchangeRecord(writer, 'converse:legacy', '2026-08-13T00:00:00.000Z', {
+      requestText: 'mensagem antiga sem conversationId',
+      summary: 'resposta antiga',
+      kind: 'respond',
+    });
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const legacyOutcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-1' });
+    const otherOutcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-other' });
+
+    if (legacyOutcome.status !== 'hydrated') {
+      assert.fail('Expected legacy record to hydrate under conversation-1.');
+    }
+    assert.deepEqual(otherOutcome, { status: 'absent' });
+    const legacyExchanges = (legacyOutcome.context.temporary as { values: { recentExchanges: ReadonlyArray<{ requestText: string }> } }).values.recentExchanges;
+    assert.deepEqual(legacyExchanges.map((e) => e.requestText), ['mensagem antiga sem conversationId']);
+  });
+});
+
+test('listConversationTurns returns one conversation\'s full, unbounded history and excludes another\'s', () => {
+  withTempStore((store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    for (let index = 0; index < 12; index += 1) {
+      const minute = String(index).padStart(2, '0');
+      writeExchangeRecord(
+        writer, `converse:a${index}`, `2026-08-13T00:${minute}:00.000Z`,
+        { requestText: `mensagem A ${index}`, summary: `resposta A ${index}`, kind: 'respond' }, {}, { conversationId: 'conversation-a' },
+      );
+    }
+    writeExchangeRecord(
+      writer, 'converse:b0', '2026-08-13T01:00:00.000Z',
+      { requestText: 'mensagem B', summary: 'resposta B', kind: 'respond' }, {}, { conversationId: 'conversation-b' },
+    );
+
+    const hydrator = new FileCommandContextHydrator(store);
+    const turnsA = hydrator.listConversationTurns('conversation-a');
+    const turnsB = hydrator.listConversationTurns('conversation-b');
+
+    assert.equal(turnsA.length, 12, 'unlike hydrate(), listConversationTurns must never cap at the 8-turn cognitive window');
+    assert.deepEqual(turnsA.map((t) => t.requestText), Array.from({ length: 12 }, (_, i) => `mensagem A ${i}`));
+    assert.deepEqual(turnsB.map((t) => t.requestText), ['mensagem B']);
   });
 });

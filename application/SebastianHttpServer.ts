@@ -7,8 +7,16 @@ import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { Logger } from '../core/logger.js';
 import { DEFAULT_GEMINI_RESPOND_TIMEOUT_MS } from '../core/cognition/index.js';
+import {
+  deriveConversationTitle,
+  isValidConversationIdFormat,
+  type ConversationRegistry,
+  type ConversationSummaryRecord,
+} from '../core/memory/index.js';
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
+
+const WEB_CONVERSATION_SESSION_ID = 'session-1';
 
 export const SEBASTIAN_API_TOKEN_ENV_VAR = 'SEBASTIAN_API_TOKEN';
 export const DEFAULT_ONLINE_PORT = 3000;
@@ -27,6 +35,7 @@ interface OnlineCommandExecutor {
 export interface SebastianHttpServerOptions {
   readonly application: OnlineCommandExecutor;
   readonly apiToken: string;
+  readonly conversationRegistry: ConversationRegistry;
   readonly logger?: Logger;
   readonly now?: () => Date;
   readonly requestId?: () => string;
@@ -62,6 +71,7 @@ const silentLogger: Logger = {
 
 export class SebastianHttpServer {
   private readonly application: OnlineCommandExecutor;
+  private readonly conversationRegistry: ConversationRegistry;
   private readonly expectedTokenDigest: Buffer;
   private readonly webSessionSigningKey: Buffer;
   private readonly logger: Logger;
@@ -86,6 +96,14 @@ export class SebastianHttpServer {
     if (typeof options.application.shutdown !== 'function') {
       throw new TypeError('Sebastian HTTP server application must provide shutdown.');
     }
+    if (
+      !options.conversationRegistry ||
+      typeof options.conversationRegistry.create !== 'function' ||
+      typeof options.conversationRegistry.list !== 'function' ||
+      typeof options.conversationRegistry.get !== 'function'
+    ) {
+      throw new TypeError('Sebastian HTTP server conversationRegistry must provide create, list and get.');
+    }
 
     const apiToken = validateApiToken(options.apiToken);
     const executionTimeoutMs = options.executionTimeoutMs ?? HTTP_EXECUTION_TIMEOUT_MS;
@@ -94,6 +112,7 @@ export class SebastianHttpServer {
     }
 
     this.application = options.application;
+    this.conversationRegistry = options.conversationRegistry;
     this.expectedTokenDigest = digestToken(apiToken);
     this.webSessionSigningKey = createHmac('sha256', apiToken).update('sebastian-web-session-v1', 'utf8').digest();
     this.logger = options.logger ?? silentLogger;
@@ -228,6 +247,45 @@ export class SebastianHttpServer {
         return;
       }
 
+      if (url.pathname === '/api/web/conversations') {
+        // Browsers do not send Origin on a plain same-origin GET (only on
+        // state-changing methods and cross-origin requests) - the same-origin
+        // check only applies to POST here, exactly like GET /api/web/session
+        // versus its POST/DELETE siblings.
+        if (request.method === 'GET') {
+          if (!this.hasValidWebSession(request)) {
+            this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
+            return;
+          }
+          this.handleListConversations(response);
+          return;
+        }
+        if (request.method === 'POST') {
+          if (!this.hasSameOrigin(request) || !this.hasValidWebSession(request)) {
+            this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
+            return;
+          }
+          this.handleCreateConversation(response);
+          return;
+        }
+        this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET, POST' });
+        return;
+      }
+
+      if (url.pathname.startsWith('/api/web/conversations/')) {
+        if (request.method !== 'GET') {
+          this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET' });
+          return;
+        }
+        if (!this.hasValidWebSession(request)) {
+          this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
+          return;
+        }
+        const conversationId = url.pathname.slice('/api/web/conversations/'.length);
+        this.handleGetConversation(response, conversationId, requestId);
+        return;
+      }
+
       if (url.pathname !== '/api/converse') {
         this.writeError(response, 404, 'NOT_FOUND', 'Rota não encontrada.', requestId);
         return;
@@ -336,20 +394,65 @@ export class SebastianHttpServer {
     try {
       const body = await readJsonBody(request);
       const message = extractMessage(body);
+      const conversationId = extractOptionalConversationId(body);
+      if (conversationId !== undefined && !this.conversationRegistry.get(conversationId)) {
+        this.writeError(response, 404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.', requestId);
+        return;
+      }
       const execution = this.application.executeCommand({
         type: LOCAL_CONVERSE_COMMAND_TYPE,
         input: { text: message },
         generatedAt: this.now().toISOString(),
         signal: controller.signal,
+        ...(conversationId === undefined ? {} : {
+          conversation: { conversationId },
+          session: { conversationId, sessionId: WEB_CONVERSATION_SESSION_ID },
+        }),
       });
       const result = await withTimeout(execution, this.executionTimeoutMs, () => controller.abort());
       const publicMessage = extractPublicMessage(result);
+      if (conversationId !== undefined) {
+        this.conversationRegistry.touch(conversationId, this.now().toISOString());
+        this.conversationRegistry.applyTitleIfPlaceholder(conversationId, deriveConversationTitle(message));
+      }
       this.writeJson(response, 200, { ok: true, message: publicMessage, requestId });
     } finally {
       request.off('aborted', abortOnDisconnect);
       response.off('close', abortOnDisconnect);
       this.converseInFlight = false;
     }
+  }
+
+  private handleCreateConversation(response: ServerResponse): void {
+    const conversation = this.conversationRegistry.create();
+    this.writeJson(response, 201, { conversation: this.publicConversationSummary(conversation) });
+  }
+
+  private handleListConversations(response: ServerResponse): void {
+    const conversations = this.conversationRegistry.list().map((conversation) => this.publicConversationSummary(conversation));
+    this.writeJson(response, 200, { conversations });
+  }
+
+  private handleGetConversation(response: ServerResponse, conversationId: string, requestId: string): void {
+    if (!isValidConversationIdFormat(conversationId)) {
+      this.writeError(response, 404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.', requestId);
+      return;
+    }
+    const conversation = this.conversationRegistry.get(conversationId);
+    const turns = conversation ? this.conversationRegistry.listTurns(conversationId) : undefined;
+    if (!conversation || !turns) {
+      this.writeError(response, 404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.', requestId);
+      return;
+    }
+    const messages = turns.flatMap((turn) => [
+      { role: 'user', content: turn.requestText },
+      { role: 'sebastian', content: turn.summary },
+    ]);
+    this.writeJson(response, 200, { conversation: this.publicConversationSummary(conversation), messages });
+  }
+
+  private publicConversationSummary(conversation: ConversationSummaryRecord): Readonly<Record<string, unknown>> {
+    return { id: conversation.id, title: conversation.title, createdAt: conversation.createdAt, lastActivityAt: conversation.lastActivityAt };
   }
 
   private isAuthorized(authorization: string | undefined): boolean {
@@ -545,6 +648,20 @@ function extractMessage(body: unknown): string {
     throw new HttpRequestError(400, 'INVALID_REQUEST', 'Mensagem excede o limite permitido.');
   }
   return message.trim();
+}
+
+function extractOptionalConversationId(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return undefined;
+  }
+  const conversationId = (body as { readonly conversationId?: unknown }).conversationId;
+  if (conversationId === undefined) {
+    return undefined;
+  }
+  if (!isValidConversationIdFormat(conversationId)) {
+    throw new HttpRequestError(400, 'INVALID_REQUEST', 'Identificador de conversa inválido.');
+  }
+  return conversationId;
 }
 
 function extractSessionCredential(body: unknown): string {

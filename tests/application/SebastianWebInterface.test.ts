@@ -10,12 +10,24 @@ test('desktop and narrow chat layouts constrain the conversation to the viewport
   assert.match(SEBASTIAN_WEB_SCRIPT, /messages\.scrollTop = messages\.scrollHeight/);
 });
 
-test('sidebar keeps its footer fixed and reserves an independently scrollable middle region without rendering fake history', () => {
+test('sidebar keeps its footer fixed and reserves an independently scrollable middle region', () => {
   assert.match(SEBASTIAN_WEB_STYLES, /\.sidebar \{[^}]*min-height: 0;[^}]*overflow: hidden;/);
-  assert.match(SEBASTIAN_WEB_STYLES, /\.sidebar-spacer \{[^}]*min-height: 0;[^}]*overflow-y: auto;/);
+  assert.match(SEBASTIAN_WEB_STYLES, /\.conversation-list \{[^}]*min-height: 0;[^}]*overflow-y: auto;/);
   assert.match(SEBASTIAN_WEB_STYLES, /\.sidebar-footer \{[^}]*flex-shrink: 0;/);
-  assert.match(SEBASTIAN_WEB_HTML, /<div class="sidebar-spacer"><\/div>[\s\S]*<div class="sidebar-footer">/);
-  assert.doesNotMatch(SEBASTIAN_WEB_HTML, /conversation-history|histórico de conversas/i);
+  assert.match(SEBASTIAN_WEB_HTML, /<nav class="conversation-list" id="conversation-list"[^>]*><\/nav>[\s\S]*<div class="sidebar-footer">/);
+  // The narrow layout never redesigns the compact header - the full list is
+  // simply hidden there, exactly like the brand name and the composer hint.
+  assert.match(SEBASTIAN_WEB_STYLES, /@media \(max-width: 760px\)[\s\S]*\.conversation-list \{ display: none; \}/);
+});
+
+test('sidebar renders real, persisted conversations - listing, opening and creating them through the actual API, with the active one visually marked', () => {
+  assert.match(SEBASTIAN_WEB_SCRIPT, /fetch\('\/api\/web\/conversations', \{ credentials: 'same-origin', cache: 'no-store' \}\)/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /fetch\('\/api\/web\/conversations', \{ method: 'POST', credentials: 'same-origin' \}\)/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /fetch\('\/api\/web\/conversations\/' \+ encodeURIComponent\(id\)/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /setAttribute\('aria-current', String\(item\.id === activeConversationId\)\)/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /conversationId: activeConversationId/);
+  // A brand new conversation always clears the pane instead of resuming the previous one's messages.
+  assert.match(SEBASTIAN_WEB_SCRIPT, /showConversationMessages\(\[\]\)/);
 });
 
 test('execution and error states are accessible, clear and do not expose internal diagnostics', () => {

@@ -124,7 +124,26 @@ button { cursor: pointer; }
 .new-conversation:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .new-conversation .icon { width: 14px; height: 14px; color: var(--muted); flex-shrink: 0; }
 
-.sidebar-spacer { flex: 1; min-height: 0; overflow-y: auto; }
+.conversation-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 12px 0 0; padding: 0; list-style: none; }
+.conversation-item {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 12.5px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background .15s, border-color .15s;
+}
+.conversation-item:hover { background: rgba(255, 255, 255, 0.045); }
+.conversation-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.conversation-item[aria-current="true"] { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.conversation-list-empty { padding: 9px 10px; color: var(--muted); font-size: 12px; }
 .sidebar-footer { flex-shrink: 0; display: grid; gap: 4px; }
 .sidebar-status { display: flex; align-items: center; gap: 8px; padding: 8px 6px; color: var(--muted); font-size: 12px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--online); box-shadow: 0 0 8px rgba(95, 191, 136, 0.65); }
@@ -252,7 +271,7 @@ textarea::placeholder { color: var(--muted); opacity: .55; }
   .sidebar-brand-name { display: none; }
   .new-conversation { width: 38px; height: 38px; padding: 0; justify-content: center; }
   .new-conversation span { display: none; }
-  .sidebar-spacer { flex: 1; }
+  .conversation-list { display: none; }
   .sidebar-footer { display: flex; align-items: center; gap: 10px; }
   .sidebar-status { padding: 0; }
   .messages { padding: 26px 18px 12px; }
@@ -280,9 +299,11 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   const send = document.querySelector('#send-button');
   const messages = document.querySelector('#messages');
   const conversation = document.querySelector('.conversation');
+  const conversationList = document.querySelector('#conversation-list');
   const newConversationButton = document.querySelector('#new-conversation-button');
   const logoutButton = document.querySelector('#logout-button');
   let pending = false;
+  let activeConversationId = null;
 
   const showChat = () => {
     unlock.classList.add('hidden');
@@ -341,17 +362,110 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     return article;
   };
 
-  const resetConversation = () => {
-    if (pending) return;
+  const showConversationMessages = (turns) => {
     messages.innerHTML = '';
-    messages.append(buildEmptyState());
-    input.value = '';
-    input.style.height = 'auto';
-    input.focus();
+    if (!turns || turns.length === 0) {
+      messages.append(buildEmptyState());
+      return;
+    }
+    for (const turn of turns) {
+      appendMessage(turn.role === 'user' ? 'user' : 'sebastian', turn.content);
+    }
+  };
+
+  const renderConversationList = (conversations) => {
+    if (!conversationList) return;
+    conversationList.innerHTML = '';
+    if (!conversations || conversations.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'conversation-list-empty';
+      empty.textContent = 'Nenhuma conversa ainda.';
+      conversationList.append(empty);
+      return;
+    }
+    for (const item of conversations) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'conversation-item';
+      button.textContent = item.title;
+      button.dataset.conversationId = item.id;
+      button.setAttribute('aria-current', String(item.id === activeConversationId));
+      button.addEventListener('click', () => {
+        if (pending || item.id === activeConversationId) return;
+        void openConversation(item.id);
+      });
+      conversationList.append(button);
+    }
+  };
+
+  const refreshConversationList = async () => {
+    try {
+      const response = await fetch('/api/web/conversations', { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) return;
+      const body = await response.json();
+      renderConversationList(Array.isArray(body.conversations) ? body.conversations : []);
+    } catch {
+      // The sidebar list is a convenience; a transient failure to refresh it
+      // must never interrupt an otherwise-working conversation.
+    }
+  };
+
+  const openConversation = async (id) => {
+    try {
+      const response = await fetch('/api/web/conversations/' + encodeURIComponent(id), {
+        credentials: 'same-origin',
+        cache: 'no-store'
+      });
+      if (!response.ok) return;
+      const body = await response.json();
+      activeConversationId = id;
+      showConversationMessages(body.messages);
+      input.value = '';
+      input.style.height = 'auto';
+      input.focus();
+      await refreshConversationList();
+    } catch {
+      // Leave the previously active conversation visible rather than
+      // clearing the screen on a transient failure to reopen another one.
+    }
+  };
+
+  const createConversation = async () => {
+    try {
+      const response = await fetch('/api/web/conversations', { method: 'POST', credentials: 'same-origin' });
+      if (!response.ok) return;
+      const body = await response.json();
+      activeConversationId = body.conversation.id;
+      showConversationMessages([]);
+      input.value = '';
+      input.style.height = 'auto';
+      input.focus();
+      await refreshConversationList();
+    } catch {
+      // A failed create leaves the previous conversation active and visible.
+    }
+  };
+
+  const ensureActiveConversation = async () => {
+    try {
+      const response = await fetch('/api/web/conversations', { credentials: 'same-origin', cache: 'no-store' });
+      const body = response.ok ? await response.json() : { conversations: [] };
+      const conversations = Array.isArray(body.conversations) ? body.conversations : [];
+      if (conversations.length > 0) {
+        await openConversation(conversations[0].id);
+        return;
+      }
+      await createConversation();
+    } catch {
+      renderConversationList([]);
+    }
   };
 
   if (newConversationButton) {
-    newConversationButton.addEventListener('click', resetConversation);
+    newConversationButton.addEventListener('click', () => {
+      if (pending) return;
+      void createConversation();
+    });
   }
 
   if (logoutButton) {
@@ -385,6 +499,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       const response = await fetch('/api/web/session', { credentials: 'same-origin', cache: 'no-store' });
       if (response.ok && (await response.json()).authenticated === true) {
         showChat();
+        await ensureActiveConversation();
       } else {
         showUnlock();
       }
@@ -413,6 +528,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
         return;
       }
       showChat();
+      await ensureActiveConversation();
     } catch {
       tokenInput.value = '';
       unlockError.textContent = 'Não foi possível estabelecer uma sessão segura.';
@@ -450,7 +566,9 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message })
+        body: JSON.stringify(
+          activeConversationId ? { message, conversationId: activeConversationId } : { message }
+        )
       });
       thinking.remove();
       if (!response.ok) {
@@ -458,11 +576,17 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
           showUnlock('Sua sessão expirou. Informe o acesso novamente.');
           return;
         }
+        if (response.status === 404) {
+          appendMessage('sebastian', 'Esta conversa não está mais disponível. Iniciando uma nova.', 'error');
+          await createConversation();
+          return;
+        }
         appendMessage('sebastian', await conversationError(response), 'error');
         return;
       }
       const body = await response.json();
       appendMessage('sebastian', body.message);
+      void refreshConversationList();
     } catch {
       thinking.remove();
       appendMessage('sebastian', 'A conexão caiu antes da resposta. Verifique sua conexão e tente novamente.', 'error');
@@ -519,7 +643,7 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
           <svg class="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
           <span>Nova conversa</span>
         </button>
-        <div class="sidebar-spacer"></div>
+        <nav class="conversation-list" id="conversation-list" aria-label="Conversas recentes"></nav>
         <div class="sidebar-footer">
           <div class="sidebar-status">
             <span class="status-dot" aria-hidden="true"></span>

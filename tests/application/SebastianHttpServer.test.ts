@@ -7,6 +7,7 @@ import type { CapabilityResult } from '../../core/capability/index.js';
 import type { CommandProcessingInput } from '../../core/command/index.js';
 import type { Logger } from '../../core/logger.js';
 import type { CognitiveModelProvider } from '../../core/cognition/index.js';
+import { ConversationRegistry, FileCommandContextHydrator, FileMemoryStore, resolveMemoryFilePath } from '../../core/memory/index.js';
 import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import {
   DEFAULT_ONLINE_PORT,
@@ -36,17 +37,30 @@ const silentLogger: Logger = {
   error: () => undefined,
 };
 
+function createTestConversationRegistry(memoryFilePath?: string): ConversationRegistry {
+  const path = memoryFilePath ?? join(mkdtempSync(join(tmpdir(), 'sebastian-conversations-')), 'memory.json');
+  const store = new FileMemoryStore(path);
+  return new ConversationRegistry(store, new FileCommandContextHydrator(store));
+}
+
+/** Builds a conversation registry backed by the exact same memory.json a `dataDir`-scoped online application persists to - mirrors how http.ts wires the two together. */
+function createConversationRegistryForDataDir(dataDir: string): ConversationRegistry {
+  return createTestConversationRegistry(resolveMemoryFilePath(dataDir));
+}
+
 async function startServer(
   application: TestApplication,
   logger: Logger = silentLogger,
   executionTimeoutMs?: number,
   now: () => Date = () => new Date('2026-08-27T12:00:00.000Z'),
   webSessionStateFilePath?: string,
+  conversationRegistry: ConversationRegistry = createTestConversationRegistry(),
 ): Promise<RunningTestServer> {
   let sessionSequence = 0;
   const http = new SebastianHttpServer({
     application,
     apiToken: API_TOKEN,
+    conversationRegistry,
     logger,
     requestId: () => 'request-test-id',
     sessionToken: () => `opaque-web-session-test-token-${sessionSequence++}`,
@@ -96,12 +110,36 @@ async function createWebSession(baseUrl: string, token = API_TOKEN): Promise<str
   return setCookie.split(';', 1)[0] ?? '';
 }
 
-async function webConverse(baseUrl: string, cookie: string, message: string): Promise<Response> {
+async function webConverse(baseUrl: string, cookie: string, message: string, conversationId?: string): Promise<Response> {
   return fetch(`${baseUrl}/api/web/converse`, {
     method: 'POST',
     headers: { Origin: baseUrl, Cookie: cookie, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(conversationId === undefined ? { message } : { message, conversationId }),
   });
+}
+
+async function createWebConversation(baseUrl: string, cookie: string): Promise<{ readonly id: string; readonly title: string }> {
+  const response = await fetch(`${baseUrl}/api/web/conversations`, {
+    method: 'POST',
+    headers: { Origin: baseUrl, Cookie: cookie },
+  });
+  assert.equal(response.status, 201);
+  const body = await response.json() as { readonly conversation: { readonly id: string; readonly title: string } };
+  return body.conversation;
+}
+
+// Deliberately no Origin header on these two GET helpers - a real browser
+// does not send one for a plain same-origin GET, and the server must accept
+// that (see SebastianHttpServer's GET vs POST same-origin split).
+async function listWebConversations(baseUrl: string, cookie: string): Promise<readonly { readonly id: string; readonly title: string; readonly lastActivityAt: string }[]> {
+  const response = await fetch(`${baseUrl}/api/web/conversations`, { headers: { Cookie: cookie } });
+  assert.equal(response.status, 200);
+  const body = await response.json() as { readonly conversations: readonly { readonly id: string; readonly title: string; readonly lastActivityAt: string }[] };
+  return body.conversations;
+}
+
+async function getWebConversation(baseUrl: string, cookie: string, id: string): Promise<Response> {
+  return fetch(`${baseUrl}/api/web/conversations/${encodeURIComponent(id)}`, { headers: { Cookie: cookie } });
 }
 
 test('SPEC-049: missing API token fails before server construction', () => {
@@ -765,5 +803,313 @@ test('SPEC-049: hostile HTTP requests cannot create/edit files, execute validati
     await running.close();
     process.chdir(previousCwd);
     rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: two conversations keep independent history and cognitive context - neither leaks into the other', async () => {
+  // Each converse command is persisted under a key derived from
+  // `type:generatedAt` (see FileCommandResultMemoryWriter) - a frozen clock
+  // would make every message in this test collide on the exact same storage
+  // key and overwrite each other regardless of conversationId, so this test
+  // (unlike most others in this file) needs its timestamps to actually move.
+  let nowMs = new Date('2026-08-27T12:00:00.000Z').getTime();
+  const now = () => new Date(nowMs);
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-conversations-isolation-'));
+  const requests: { readonly text: string; readonly recentExchanges?: readonly { readonly requestText: string }[] }[] = [];
+  const cognitiveModelProvider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
+    respond: async (request) => {
+      requests.push(request);
+      return { outcome: 'responded', answer: `Resposta para: ${request.text}` };
+    },
+  };
+  const application = createOnlineSebastianApplication(silentLogger, cognitiveModelProvider, dataDir);
+  const registry = createConversationRegistryForDataDir(dataDir);
+  const running = await startServer(application, silentLogger, undefined, now, undefined, registry);
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const conversationA = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+    const conversationB = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+    assert.notEqual(conversationA.id, conversationB.id);
+
+    assert.equal((await webConverse(running.baseUrl, cookie, 'Explique recursão de cauda.', conversationA.id)).status, 200);
+    nowMs += 1_000;
+    assert.equal((await webConverse(running.baseUrl, cookie, 'Explique grafo acíclico dirigido.', conversationB.id)).status, 200);
+    nowMs += 1_000;
+
+    requests.length = 0;
+    // "as duas" is a recognized continuation-reference marker (ConversationContextComposer),
+    // which deterministically pulls in the immediately preceding exchange regardless of
+    // lexical overlap score - the reliable way to force real context into this follow-up.
+    assert.equal((await webConverse(running.baseUrl, cookie, 'Compare as duas formas de pensar sobre isso.', conversationA.id)).status, 200);
+    assert.equal(requests.length, 1);
+    const contextSeenByModel = requests[0]!.recentExchanges ?? [];
+    assert.ok(contextSeenByModel.some((exchange) => exchange.requestText.includes('recursão de cauda')));
+    assert.equal(contextSeenByModel.some((exchange) => exchange.requestText.includes('grafo acíclico')), false);
+
+    const loadedA = await getWebConversation(running.baseUrl, cookie, conversationA.id);
+    assert.equal(loadedA.status, 200);
+    const messagesA = (await loadedA.json() as { messages: readonly { content: string }[] }).messages;
+    assert.ok(messagesA.some((message) => message.content.includes('recursão de cauda')));
+    assert.equal(messagesA.some((message) => message.content.includes('grafo acíclico')), false);
+
+    const loadedB = await getWebConversation(running.baseUrl, cookie, conversationB.id);
+    assert.equal(loadedB.status, 200);
+    const messagesB = (await loadedB.json() as { messages: readonly { content: string }[] }).messages;
+    assert.ok(messagesB.some((message) => message.content.includes('grafo acíclico')));
+    assert.equal(messagesB.some((message) => message.content.includes('recursão de cauda')), false);
+  } finally {
+    await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: listing sorts by most recent activity, and a brand new conversation never resumes the previous one\'s context', async () => {
+  let nowMs = new Date('2026-08-27T12:00:00.000Z').getTime();
+  const now = () => new Date(nowMs);
+  const requests: { readonly recentExchanges?: readonly unknown[] }[] = [];
+  const cognitiveModelProvider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
+    respond: async (request) => {
+      requests.push(request);
+      return { outcome: 'responded', answer: 'Resposta cognitiva.' };
+    },
+  };
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-conversations-ordering-'));
+  const application = createOnlineSebastianApplication(silentLogger, cognitiveModelProvider, dataDir);
+  const registry = createConversationRegistryForDataDir(dataDir);
+  const running = await startServer(application, silentLogger, undefined, now, undefined, registry);
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const conversationA = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+    const conversationB = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+
+    await webConverse(running.baseUrl, cookie, 'Primeira mensagem em A.', conversationA.id);
+    nowMs += 1_000;
+    await webConverse(running.baseUrl, cookie, 'Primeira mensagem em B.', conversationB.id);
+    nowMs += 1_000;
+
+    assert.deepEqual((await listWebConversations(running.baseUrl, cookie)).map((c) => c.id), [conversationB.id, conversationA.id]);
+
+    requests.length = 0;
+    await webConverse(running.baseUrl, cookie, 'Segunda mensagem em A.', conversationA.id);
+    assert.deepEqual((await listWebConversations(running.baseUrl, cookie)).map((c) => c.id), [conversationA.id, conversationB.id]);
+    // The immediately preceding turn belongs to A itself (its own first message), never to B.
+    assert.equal(requests.length, 1);
+
+    const conversationC = await createWebConversation(running.baseUrl, cookie);
+    requests.length = 0;
+    await webConverse(running.baseUrl, cookie, 'Mensagem em uma conversa totalmente nova.', conversationC.id);
+    assert.equal(requests.length, 1);
+    assert.deepEqual(requests[0]!.recentExchanges ?? [], [], 'a brand new conversation must start with no prior context at all');
+  } finally {
+    await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: reopening a conversation returns its real saved history and lets it continue', async () => {
+  // Two converse commands are sent below; each needs its own timestamp so
+  // they persist under distinct storage keys instead of overwriting each other.
+  let nowMs = new Date('2026-08-27T12:00:00.000Z').getTime();
+  const now = () => new Date(nowMs);
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-conversations-reopen-'));
+  const application = createOnlineSebastianApplication(silentLogger, undefined, dataDir);
+  const registry = createConversationRegistryForDataDir(dataDir);
+  const running = await startServer(application, silentLogger, undefined, now, undefined, registry);
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const conversation = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+    await webConverse(running.baseUrl, cookie, 'Quais são minhas tarefas?', conversation.id);
+    nowMs += 1_000;
+
+    const loaded = await getWebConversation(running.baseUrl, cookie, conversation.id);
+    assert.equal(loaded.status, 200);
+    const body = await loaded.json() as {
+      readonly conversation: { readonly id: string; readonly title: string };
+      readonly messages: readonly { readonly role: string; readonly content: string }[];
+    };
+    assert.equal(body.conversation.id, conversation.id);
+    assert.notEqual(body.conversation.title, 'Nova conversa');
+    assert.deepEqual(body.messages, [
+      { role: 'user', content: 'Quais são minhas tarefas?' },
+      { role: 'sebastian', content: 'Você não tem nenhuma tarefa pendente.' },
+    ]);
+
+    const continued = await webConverse(running.baseUrl, cookie, 'E se eu adicionar uma agora?', conversation.id);
+    assert.equal(continued.status, 200);
+
+    const reloaded = await getWebConversation(running.baseUrl, cookie, conversation.id);
+    const reloadedMessages = (await reloaded.json() as { messages: readonly { content: string }[] }).messages;
+    assert.equal(reloadedMessages.length, 4);
+  } finally {
+    await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: conversations and their history survive an application restart', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-conversations-restart-'));
+  try {
+    const firstApp = createOnlineSebastianApplication(silentLogger, undefined, dataDir);
+    const firstRegistry = createConversationRegistryForDataDir(dataDir);
+    const first = await startServer(firstApp, silentLogger, undefined, undefined, undefined, firstRegistry);
+    const cookie = await createWebSession(first.baseUrl);
+    const conversation = await createWebConversation(first.baseUrl, cookie);
+    await webConverse(first.baseUrl, cookie, 'Quais são minhas tarefas?', conversation.id);
+    await first.close();
+
+    const secondApp = createOnlineSebastianApplication(silentLogger, undefined, dataDir);
+    const secondRegistry = createConversationRegistryForDataDir(dataDir);
+    const second = await startServer(secondApp, silentLogger, undefined, undefined, undefined, secondRegistry);
+    try {
+      const secondCookie = await createWebSession(second.baseUrl);
+      const list = await listWebConversations(second.baseUrl, secondCookie);
+      assert.deepEqual(list.map((c) => c.id), [conversation.id]);
+
+      const reopened = await getWebConversation(second.baseUrl, secondCookie, conversation.id);
+      assert.equal(reopened.status, 200);
+      const messages = (await reopened.json() as { messages: readonly { content: string }[] }).messages;
+      assert.ok(messages.some((message) => message.content === 'Quais são minhas tarefas?'));
+    } finally {
+      await second.close();
+    }
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: permanent memory stays independent of which conversation is active', async () => {
+  // Two converse commands are sent below; each needs its own timestamp so
+  // they persist under distinct storage keys instead of overwriting each other.
+  let nowMs = new Date('2026-08-27T12:00:00.000Z').getTime();
+  const now = () => new Date(nowMs);
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-conversations-memory-independence-'));
+  const application = createOnlineSebastianApplication(silentLogger, undefined, dataDir);
+  const registry = createConversationRegistryForDataDir(dataDir);
+  const running = await startServer(application, silentLogger, undefined, now, undefined, registry);
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const conversationA = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+    const rememberResponse = await webConverse(
+      running.baseUrl, cookie, 'Sebastian, lembra que prefiro reuniões de manhã', conversationA.id,
+    );
+    assert.equal(rememberResponse.status, 200);
+    nowMs += 1_000;
+
+    const conversationB = await createWebConversation(running.baseUrl, cookie);
+    nowMs += 1_000;
+    const recallResponse = await webConverse(
+      running.baseUrl, cookie, 'Qual horário eu prefiro para reuniões?', conversationB.id,
+    );
+    assert.equal(recallResponse.status, 200);
+    // The fact was remembered while conversation A was active but is recalled
+    // successfully from conversation B, which never mentioned it before -
+    // proof that permanent memory does not depend on which conversation asks.
+    assert.equal(
+      (await recallResponse.json() as { message: string }).message,
+      'Sobre isso, você registrou: "prefiro reuniões de manhã".',
+    );
+
+    // Isolation the other way around: B's own recall exchange must never
+    // appear in A, and A's remember request must never appear in B.
+    const loadedA = await getWebConversation(running.baseUrl, cookie, conversationA.id);
+    const messagesA = (await loadedA.json() as { messages: readonly { content: string }[] }).messages;
+    assert.equal(messagesA.some((message) => message.content.includes('Qual horário')), false);
+
+    const loadedB = await getWebConversation(running.baseUrl, cookie, conversationB.id);
+    const messagesB = (await loadedB.json() as { messages: readonly { content: string }[] }).messages;
+    assert.equal(messagesB.some((message) => message.content.includes('Sebastian, lembra que')), false);
+  } finally {
+    await running.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: invalid or nonexistent conversation ids are rejected instead of silently falling back', async () => {
+  const running = await startServer(successfulApplication());
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+
+    const malformed = await webConverse(running.baseUrl, cookie, 'Olá', '../../etc/passwd');
+    assert.equal(malformed.status, 400);
+
+    const wellFormedButMissing = await webConverse(running.baseUrl, cookie, 'Olá', 'conversation-does-not-exist');
+    assert.equal(wellFormedButMissing.status, 404);
+
+    const missingGet = await getWebConversation(running.baseUrl, cookie, 'conversation-does-not-exist');
+    assert.equal(missingGet.status, 404);
+
+    const malformedGet = await getWebConversation(running.baseUrl, cookie, '../etc/passwd');
+    assert.equal(malformedGet.status, 404);
+  } finally {
+    await running.close();
+  }
+});
+
+test('CONVERSATIONS: listing and reopening work over a plain same-origin GET with no Origin header, exactly like a real browser sends', async () => {
+  const running = await startServer(successfulApplication());
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const created = await fetch(`${running.baseUrl}/api/web/conversations`, {
+      method: 'POST',
+      headers: { Origin: running.baseUrl, Cookie: cookie },
+    });
+    assert.equal(created.status, 201);
+    const { conversation } = await created.json() as { conversation: { id: string } };
+
+    const list = await fetch(`${running.baseUrl}/api/web/conversations`, { headers: { Cookie: cookie } });
+    assert.equal(list.status, 200);
+
+    const loaded = await fetch(`${running.baseUrl}/api/web/conversations/${conversation.id}`, { headers: { Cookie: cookie } });
+    assert.equal(loaded.status, 200);
+
+    // POST still requires the same-origin guard - only GET is relaxed.
+    const createWithoutOrigin = await fetch(`${running.baseUrl}/api/web/conversations`, {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    assert.equal(createWithoutOrigin.status, 401);
+  } finally {
+    await running.close();
+  }
+});
+
+test('CONVERSATIONS: an installation that only ever had the old linear history sees it migrated into a real, reopenable conversation', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-conversations-legacy-migration-'));
+  try {
+    // Simulate a pre-existing installation: converse over the plain Bearer
+    // route, which never supplies a conversationId, exactly like every
+    // caller did before this feature existed.
+    const legacyApp = createOnlineSebastianApplication(silentLogger, undefined, dataDir);
+    const legacyRegistry = createConversationRegistryForDataDir(dataDir);
+    const legacy = await startServer(legacyApp, silentLogger, undefined, undefined, undefined, legacyRegistry);
+    await converse(legacy.baseUrl, 'Quais são minhas tarefas?');
+    await legacy.close();
+
+    const migratedApp = createOnlineSebastianApplication(silentLogger, undefined, dataDir);
+    const migratedRegistry = createConversationRegistryForDataDir(dataDir);
+    const migrated = await startServer(migratedApp, silentLogger, undefined, undefined, undefined, migratedRegistry);
+    try {
+      const cookie = await createWebSession(migrated.baseUrl);
+      const list = await listWebConversations(migrated.baseUrl, cookie);
+      assert.equal(list.length, 1);
+      assert.equal(list[0]!.id, 'conversation-1');
+
+      const loaded = await getWebConversation(migrated.baseUrl, cookie, 'conversation-1');
+      assert.equal(loaded.status, 200);
+      const messages = (await loaded.json() as { messages: readonly { content: string }[] }).messages;
+      assert.ok(messages.some((message) => message.content === 'Quais são minhas tarefas?'));
+    } finally {
+      await migrated.close();
+    }
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
