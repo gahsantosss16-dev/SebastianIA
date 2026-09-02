@@ -164,3 +164,32 @@ Segurança, integridade dos dados e requisitos funcionais não podem ser sacrifi
 Em resumo:
 
 resolver o problema da forma mais simples que funcione corretamente; investigar somente o necessário; parar quando a investigação deixar de ser proporcional; e pedir autorização antes de transformar uma tarefa pequena em uma tarefa grande.
+
+---
+
+## Tag Obrigatória Após Homologação
+
+Toda alteração funcional, correção ou conjunto coerente de alterações que tenha sido:
+
+* commitado;
+* enviado ao repositório remoto com `git push`;
+* homologado com sucesso;
+
+deve receber tag de homologação obrigatoriamente, apontando exatamente para o commit/HEAD homologado.
+
+A tag deve ser criada somente após a homologação, nunca apenas porque houve um commit.
+
+Quando houver vários commits intermediários antes da homologação, criar uma tag no estado final homologado, não uma tag para cada commit.
+
+Regras:
+
+* nome descritivo e data quando apropriado;
+* apontar exatamente para o commit homologado;
+* executar `git push origin <tag>`;
+* nunca mover, sobrescrever ou reutilizar tag de homologação anterior;
+* preservar todas as tags anteriores;
+* se a homologação falhar, não criar tag.
+
+Fluxo permanente:
+
+alteração → validação técnica → commit → push → homologação → tag → push da tag.
