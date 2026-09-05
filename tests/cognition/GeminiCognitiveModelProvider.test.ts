@@ -24,13 +24,19 @@ function response(status: number, body: string): FakeResponse {
   return { ok: status >= 200 && status < 300, status, text: async () => body };
 }
 
-function provider(fetchImpl: FetchHandler, timeoutMs = 8_000, respondTimeoutMs?: number): GeminiCognitiveModelProvider {
+function provider(
+  fetchImpl: FetchHandler,
+  timeoutMs = 8_000,
+  respondTimeoutMs?: number,
+  synthesizeTimeoutMs?: number,
+): GeminiCognitiveModelProvider {
   return new GeminiCognitiveModelProvider({
     apiKey: API_KEY,
     model: MODEL,
     timeoutMs,
     fetchImpl,
     ...(respondTimeoutMs === undefined ? {} : { respondTimeoutMs }),
+    ...(synthesizeTimeoutMs === undefined ? {} : { synthesizeTimeoutMs }),
   });
 }
 
@@ -63,6 +69,10 @@ test('SPEC-050: Gemini provider validates credentials, model and timeout without
   );
   assert.throws(
     () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, respondTimeoutMs: 30_000 }),
+    InvalidCognitiveModelProviderInputError,
+  );
+  assert.throws(
+    () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, synthesizeTimeoutMs: 30_000 }),
     InvalidCognitiveModelProviderInputError,
   );
 });
@@ -124,6 +134,43 @@ test('operational synthesis rejects evidence not present in the successful obser
     requestedAt: '2026-08-28T00:00:00.000Z',
   });
   assert.equal(result?.outcome, 'invalidResponse');
+});
+
+test('the synthesis instruction generically covers quantity, subset/selection, order and format/detail-level constraints - not just quantity/singular/semantic', async () => {
+  let capturedBody = '';
+  const cognitive = provider(async (_url, init) => {
+    capturedBody = String(init.body);
+    return response(200, geminiEnvelope({ answer: 'ok', evidence: ['ok'] }));
+  });
+  await cognitive.synthesize?.({
+    objective: 'qualquer objetivo',
+    observations: [{ stepId: '1', toolId: 'any.tool', outcome: 'ok', summary: 'ok' }],
+    requestedAt: '2026-08-28T00:00:00.000Z',
+  });
+  for (const concept of ['quantidade', 'recorte', 'ordem', 'formato', 'nível de detalhe']) {
+    assert.equal(capturedBody.includes(concept), true, `synthesis instruction must mention "${concept}" generically`);
+  }
+});
+
+test('a synthesize call slower than the old shared 8s decide timeout, but within the dedicated synthesize timeout, still succeeds - regression for the "últimos 3 commits" case where a large observation made synthesis time out and fall back to the raw dump', async () => {
+  const cognitive = provider(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 8_200));
+    return response(200, geminiEnvelope({
+      answer: '78702c46, 2c27fafb e 1d8cb396.',
+      evidence: ['78702c464f99', '2c27fafbcee2', '1d8cb3961bf9'],
+    }));
+  });
+
+  const result = await cognitive.synthesize?.({
+    objective: 'me mostra os últimos 3 commits no github',
+    observations: [{
+      stepId: '1', toolId: 'github.listCommits', outcome: 'ok',
+      summary: '10 commit(s) recentes:\n78702c464f99 fix: a\n2c27fafbcee2 fix: b\n1d8cb3961bf9 fix: c\n(mais 7 commits omitidos aqui)',
+    }],
+    requestedAt: '2026-08-28T00:00:00.000Z',
+  });
+
+  assert.deepEqual(result, { outcome: 'synthesized', answer: '78702c46, 2c27fafb e 1d8cb396.' });
 });
 
 test('Gemini conversation payload includes bounded recent context without granting tools or authority', async () => {
