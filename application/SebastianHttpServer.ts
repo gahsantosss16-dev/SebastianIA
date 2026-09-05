@@ -6,7 +6,12 @@ import { dirname } from 'node:path';
 import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { Logger } from '../core/logger.js';
-import { DEFAULT_GEMINI_RESPOND_TIMEOUT_MS } from '../core/cognition/index.js';
+import {
+  DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS,
+  DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS,
+  MAX_OPERATIONAL_DECISIONS,
+} from '../core/cognition/index.js';
+import { DEFAULT_GITHUB_TIMEOUT_MS } from '../core/tool/index.js';
 import {
   deriveConversationTitle,
   isValidConversationIdFormat,
@@ -23,7 +28,26 @@ export const DEFAULT_ONLINE_PORT = 3000;
 export const MAX_HTTP_BODY_BYTES = 16 * 1024;
 export const MAX_CONVERSE_MESSAGE_CHARS = 4_000;
 export const HTTP_BODY_TIMEOUT_MS = 10_000;
-export const HTTP_EXECUTION_TIMEOUT_MS = DEFAULT_GEMINI_RESPOND_TIMEOUT_MS + 1_000;
+/**
+ * One converse request may run a single `respond` call, OR the operational
+ * cognitive loop: up to `MAX_OPERATIONAL_DECISIONS` sequential `decide` calls
+ * (each possibly followed by a real Tool invocation before the next `decide`)
+ * and, on a successful conclusion, exactly one final `synthesize` call. Each
+ * individual call already has its own generous, independently-authorized
+ * timeout - this ceiling must never fire before the slowest legitimate chain
+ * of those calls could finish, or it silently truncates a still-in-budget
+ * `synthesize` (or `decide`) call, which then cascades into a false "no
+ * capability" answer instead of the real one. Computed from the same actual
+ * budgets/limits enforced elsewhere (not an arbitrary large number) plus a
+ * fixed margin for non-Gemini overhead (JSON parsing, memory I/O, response
+ * writing) shared with every other request.
+ */
+export const HTTP_EXECUTION_TIMEOUT_MS =
+  DEFAULT_GITHUB_TIMEOUT_MS + // the deterministic pre-fetch Tool call, before `decide` is ever consulted
+  MAX_OPERATIONAL_DECISIONS * DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS + // every `decide` call in the loop
+  (MAX_OPERATIONAL_DECISIONS - 1) * DEFAULT_GITHUB_TIMEOUT_MS + // a Tool call between each pair of `decide` calls
+  DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS + // the final synthesis of a successful conclusion
+  2_000; // margin for non-Gemini overhead; `respond`'s single-call budget is already well under this ceiling
 export const WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
 /**
  * "Manter-me conectado neste dispositivo" (checked by default in the unlock

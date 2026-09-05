@@ -214,7 +214,7 @@ export class CognitiveOperationalOrchestrator {
       return primaryContext !== undefined &&
         deterministic.immediateContext?.objectivePattern.test(objective) === true &&
         deterministic.immediateContext.contextPattern.test(primaryContext) === true;
-    });
+    }) ?? this.findUniqueCapabilityMatchRoute(objective);
     if (!route?.deterministicIntent) {
       return { toolCalls: 0 };
     }
@@ -261,6 +261,32 @@ export class CognitiveOperationalOrchestrator {
       ? undefined
       : await this.synthesizeOrFallback(objective, context, [successfulObservation], fallbackAnswer);
     return { toolCalls: 1, ...(answer === undefined ? {} : { answer }) };
+  }
+
+  /**
+   * Generalizes deterministic pre-fetch beyond a per-entry literal `pattern`
+   * regex: when the objective's meaningful terms overlap exactly one
+   * deterministic-capable catalog entry's own id/description (the same
+   * capability-driven term matching `hasApplicableToolCandidate` already
+   * uses to decide whether the operational engine is even worth trying),
+   * that single entry is the answer regardless of the specific wording used
+   * - e.g. "quais os últimos 3 commits?" never says "github", but "commits"
+   * uniquely names `github.listCommits` among configured capabilities. Never
+   * fires on an ambiguous (more than one matching entry) or empty overlap,
+   * so it only ever resolves cases a human reading the catalog would call
+   * unambiguous - anything murkier still goes through `decide`.
+   */
+  private findUniqueCapabilityMatchRoute(objective: string): OperationalToolPolicyEntry | undefined {
+    const objectiveTerms = this.catalogTerms(objective);
+    if (objectiveTerms.size === 0) {
+      return undefined;
+    }
+    const candidates = this.catalog.filter((entry) => {
+      if (!entry.deterministicIntent) return false;
+      const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
+      return [...objectiveTerms].some((term) => capabilityTerms.has(term));
+    });
+    return candidates.length === 1 ? candidates[0] : undefined;
   }
 
   private async synthesizeOrFallback(

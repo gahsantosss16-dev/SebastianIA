@@ -210,6 +210,52 @@ test('evidence synthesis is proportional for singular, plural and explicit quant
   }
 });
 
+test('an objective naming only "commits" - never the literal word "github", on a first turn with no prior context - still deterministically routes to github.listCommits via generic capability matching, respecting the requested quantity', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-generic-capability-match-'));
+  try {
+    let decideCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => { decideCalls += 1; return { outcome: 'unavailable', reason: 'must not be called' }; },
+      synthesize: async (request) => {
+        assert.match(request.observations[0]?.summary ?? '', /78702c464f99/);
+        return { outcome: 'synthesized', answer: '78702c46, 2c27fafb e 1d8cb396.' };
+      },
+    };
+    const { app, invoked } = buildApp(provider, multipleCommitsFetchImpl(), root);
+    const result = await app.executeCommand(input('quais os últimos 3 commits?', 50));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(decideCalls, 0, 'a capability that unambiguously matches must never depend on the model to discover it exists');
+    assert.match(String(result.output.message), /78702c46/);
+    assert.match(String(result.output.message), /2c27fafb/);
+    assert.match(String(result.output.message), /1d8cb396/);
+    assert.doesNotMatch(String(result.output.message), /debb0a1a/);
+    assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the exact same wording, with no GitHub capability configured at all, never invents access and never calls a model that would have to guess', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-no-github-capability-'));
+  try {
+    const provider: CognitiveModelProvider = {
+      decide: async () => { throw new Error('no configured capability should ever reach a cognitive decision for this objective'); },
+      respond: async () => ({ outcome: 'responded', answer: 'Não tenho uma ferramenta configurada para consultar commits agora.' }),
+    };
+    const app = createSebastianApplication({
+      logger, dataDir: root, authorizedCommands: [],
+      cognitiveModelProvider: provider, cognitiveOperationalTools: [],
+    });
+    const result = await app.executeCommand(input('quais os últimos 3 commits?', 51));
+
+    assert.match(String(result.output.message), /não tenho uma ferramenta configurada/i);
+    assert.doesNotMatch(String(result.output.message), /consigo acessar|tenho acesso ao github|78702c46/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a semantic GitHub question uses observed commits instead of dumping the collection', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-github-semantic-synthesis-'));
   try {
@@ -233,6 +279,41 @@ test('a semantic GitHub question uses observed commits instead of dumping the co
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
     assert.match(String(result.output.message), /preservou a continuidade/i);
     assert.doesNotMatch(String(result.output.message), /2c27fafb|1d8cb396|debb0a1a/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('decide() failing right after a real successful Tool call never produces a false permanent "no access" claim - it surfaces the existing honest, temporary-failure answer instead of the tool-blind conversational fallback', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-decide-failure-honesty-'));
+  try {
+    let decideCalls = 0;
+    let respondCalls = 0;
+    const provider: CognitiveModelProvider = {
+      // "me fale sobre o projeto" overlaps BOTH github.getProject and
+      // github.listCommits by the shared term "projeto" - ambiguous, so the
+      // deterministic capability-match route (Fix A) intentionally does not
+      // intercept it, and a real decide() call is genuinely required.
+      decide: async () => {
+        decideCalls += 1;
+        if (decideCalls === 1) {
+          return { outcome: 'decided', decision: decision({
+            intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress',
+            toolId: GITHUB_LIST_COMMITS_TOOL_ID, toolArguments: { projectId: DEFAULT_PROJECT_ID },
+          }) };
+        }
+        return { outcome: 'unavailable', reason: 'simulated transient outage on the second call' };
+      },
+      respond: async () => { respondCalls += 1; return { outcome: 'responded', answer: 'Não tenho acesso a nenhuma ferramenta.' }; },
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+    const result = await app.executeCommand(input('me fale sobre o projeto', 60));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID], 'the real Tool call must have actually happened before decide() failed');
+    assert.equal(decideCalls, 2);
+    assert.equal(respondCalls, 0, 'a demonstrably-working operational attempt must never fall back to the tool-blind "no access" conversational path');
+    assert.match(String(result.output.message), /não consegui concluir|tente novamente/i);
+    assert.doesNotMatch(String(result.output.message), /não tenho acesso a nenhuma ferramenta/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

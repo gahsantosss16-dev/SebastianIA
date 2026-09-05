@@ -7,6 +7,7 @@ import type { CapabilityResult } from '../../core/capability/index.js';
 import type { CommandProcessingInput } from '../../core/command/index.js';
 import type { Logger } from '../../core/logger.js';
 import type { CognitiveModelProvider } from '../../core/cognition/index.js';
+import { GIT_STATUS_TOOL_ID } from '../../core/tool/index.js';
 import { ConversationRegistry, FileCommandContextHydrator, FileMemoryStore, resolveMemoryFilePath } from '../../core/memory/index.js';
 import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import {
@@ -609,6 +610,126 @@ test('SPEC-049: an execution timeout aborts work and immediately releases the co
   }
 });
 
+test('BUDGET: respond() can use nearly its full authorized timeout without the HTTP layer aborting it early', async () => {
+  const provider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'not expected for ordinary conversation' }),
+    respond: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 19_000));
+      return { outcome: 'responded', answer: 'Resposta entregue dentro do próprio orçamento de respond().' };
+    },
+  };
+  const application = createOnlineSebastianApplication(silentLogger, provider);
+  const running = await startServer(application);
+  try {
+    const response = await converse(running.baseUrl, 'Explique rapidamente o que é fotossíntese.');
+    assert.equal(response.status, 200);
+    const body = await response.json() as { message: string };
+    assert.equal(body.message, 'Resposta entregue dentro do próprio orçamento de respond().');
+  } finally {
+    await running.close();
+  }
+});
+
+test('BUDGET: a decide -> tool -> decide -> synthesize chain fits comfortably inside the HTTP execution budget, using synthesize()\'s full authorized timeout', async () => {
+  let decideCalls = 0;
+  const provider: CognitiveModelProvider = {
+    decide: async () => {
+      decideCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 7_500));
+      if (decideCalls === 1) {
+        return {
+          outcome: 'decided',
+          decision: {
+            intent: 'investigate', goal: 'consultar estado do repositório', reasoningSummary: 'preciso de evidência',
+            nextAction: 'invokeTool', toolId: GIT_STATUS_TOOL_ID, toolArguments: {},
+            requiresAuthorization: false, expectedEvidence: 'status', completionState: 'inProgress', confidence: 0.9,
+          },
+        };
+      }
+      return {
+        outcome: 'decided',
+        decision: {
+          intent: 'conclude', goal: 'consultar estado do repositório', reasoningSummary: 'evidência suficiente',
+          nextAction: 'concludeCompleted', requiresAuthorization: false, expectedEvidence: 'status',
+          completionState: 'completed', confidence: 0.95,
+        },
+      };
+    },
+    synthesize: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 15_000));
+      return { outcome: 'synthesized', answer: 'Síntese concluída dentro do orçamento completo da cadeia.' };
+    },
+  };
+  const application = createOnlineSebastianApplication(silentLogger, provider);
+  const running = await startServer(application);
+  try {
+    const startedAt = Date.now();
+    const response = await converse(running.baseUrl, 'qual é o estado do repositório?');
+    const durationMs = Date.now() - startedAt;
+    assert.equal(response.status, 200);
+    const body = await response.json() as { message: string };
+    assert.equal(body.message, 'Síntese concluída dentro do orçamento completo da cadeia.');
+    assert.equal(decideCalls, 2);
+    assert.ok(durationMs >= 29_000, `expected the full ~30s chain to run uninterrupted, got ${durationMs}ms`);
+  } finally {
+    await running.close();
+  }
+});
+
+test('BUDGET: a genuinely stuck cognitive call is still aborted by an explicit HTTP execution timeout, independent of the default budget', async () => {
+  let aborted = false;
+  const provider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'not expected for ordinary conversation' }),
+    respond: async (request) => {
+      await new Promise<void>((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new Error('aborted'));
+        }, { once: true });
+      });
+      return { outcome: 'responded', answer: 'nunca deveria chegar aqui' };
+    },
+  };
+  const application = createOnlineSebastianApplication(silentLogger, provider);
+  // Deliberately much smaller than any real budget (but still generous
+  // enough for the real interpret/memory pipeline to reach `respond()` and
+  // attach its own abort listener before the deadline fires) - proves the
+  // abort mechanism itself still works correctly, regardless of what the
+  // default HTTP_EXECUTION_TIMEOUT_MS is tuned to.
+  const running = await startServer(application, silentLogger, 300);
+  try {
+    const response = await converse(running.baseUrl, 'Me conte uma curiosidade qualquer.');
+    assert.equal(response.status, 504);
+    const body = await response.json() as { error: { code: string } };
+    assert.equal(body.error.code, 'EXECUTION_TIMEOUT');
+    assert.equal(aborted, true);
+  } finally {
+    await running.close();
+  }
+});
+
+test('BUDGET: a tone/register preference request reaches the real cognitive respond() and gets naturally adapted - no lexical detector was needed once the HTTP layer stopped starving it', async () => {
+  const provider: CognitiveModelProvider = {
+    decide: async () => ({ outcome: 'unavailable', reason: 'not expected for a plain register preference' }),
+    respond: async ({ text }) => ({
+      outcome: 'responded',
+      answer: text.includes('despojado')
+        ? 'Combinado, vou soltar mais a linguagem com você.'
+        : 'resposta genérica inesperada',
+    }),
+  };
+  const application = createOnlineSebastianApplication(silentLogger, provider);
+  const running = await startServer(application);
+  try {
+    const response = await converse(running.baseUrl, 'vc pode ser mais despojado comigo? sem ser com respostas robóticas?');
+    assert.equal(response.status, 200);
+    const body = await response.json() as { message: string };
+    assert.equal(body.message, 'Combinado, vou soltar mais a linguagem com você.');
+  } finally {
+    await running.close();
+  }
+});
+
 test('SPEC-049: internal failures are generic and neither token nor exception details reach response or logs', async () => {
   const logged: Array<{ message: string; metadata?: Record<string, unknown> }> = [];
   const logger: Logger = {
@@ -676,7 +797,13 @@ test('SPEC-050: real online application uses remote cognition only for unknown t
   const cognitiveModelProvider: CognitiveModelProvider = {
     decide: async () => ({ outcome: 'unavailable', reason: 'unused' }),
     respond: async (request) => {
-      requests.push(request);
+      // The real HTTP abort signal must reach cognitive requests (it did not
+      // used to - `structuredClone` silently destroyed it in Core - see
+      // core/core.ts). Verified here and stripped before the deepEqual
+      // fixtures below, which only ever cared about the other fields.
+      assert.ok(request.signal instanceof AbortSignal, 'a real AbortSignal must reach respond()');
+      const { signal: _signal, ...withoutSignal } = request;
+      requests.push(withoutSignal);
       if (request.text.includes('arquivo')) {
         toolLikeRequestCount += 1;
       }

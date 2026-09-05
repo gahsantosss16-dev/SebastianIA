@@ -171,10 +171,22 @@ export class SebastianCore {
       );
     }
 
-    const handoffPayload = structuredClone({
-      commandInput: input,
+    // `structuredClone` cannot clone an `AbortSignal` - it silently replaces
+    // it with an inert plain object (no `.aborted`, no `.addEventListener`),
+    // which would make every downstream cancellation check and cognitive
+    // call believe no signal was ever provided, defeating the HTTP layer's
+    // own abort-on-timeout mechanism for every real cognitive request. The
+    // signal is excluded from the clone and reattached by reference
+    // afterward; every other field still gets the same defensive deep copy.
+    const { signal, ...clonableInput } = input;
+    const clonedPayload = structuredClone({
+      commandInput: clonableInput,
       commandResult: result,
-    }) as Readonly<Record<string, unknown>>;
+    }) as { commandInput: Record<string, unknown>; commandResult: unknown };
+    const handoffPayload = {
+      ...clonedPayload,
+      commandInput: { ...clonedPayload.commandInput, ...(signal === undefined ? {} : { signal }) },
+    } as Readonly<Record<string, unknown>>;
 
     const handoffResult = await specializedAgent.handoff({
       responsibilityId: `capability.execute.${input.type}`,
