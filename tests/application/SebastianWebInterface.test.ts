@@ -42,6 +42,42 @@ test('"Manter-me conectado neste dispositivo" is checked by default, sent with t
   }
 });
 
+test('a new entry into the system (login, or opening the app fresh) always starts a new chat instead of reopening the most recently active conversation', () => {
+  // The old behaviour this replaces picked conversations[0] (the most
+  // recently active one) unconditionally; that function and its selection
+  // logic must be fully gone, not just bypassed.
+  assert.doesNotMatch(SEBASTIAN_WEB_SCRIPT, /ensureActiveConversation/);
+  assert.doesNotMatch(SEBASTIAN_WEB_SCRIPT, /conversations\[0\]/);
+
+  // Login always opens a brand new conversation, regardless of any
+  // conversation id still sitting in the address bar from an earlier tab session.
+  assert.match(
+    SEBASTIAN_WEB_SCRIPT,
+    /showChat\(\);\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*await createConversation\(\);/,
+  );
+
+  // Opening the app fresh restores whatever conversation the URL names, and
+  // only falls back to a brand new chat when none is named there.
+  assert.match(SEBASTIAN_WEB_SCRIPT, /const restoreActiveConversation = async \(\) => \{/);
+  assert.match(
+    SEBASTIAN_WEB_SCRIPT,
+    /if \(requestedId && \(await openConversation\(requestedId\)\)\) return;\s*await createConversation\(\);/,
+  );
+  assert.match(SEBASTIAN_WEB_SCRIPT, /showChat\(\);\s*await restoreActiveConversation\(\);/);
+});
+
+test('the active conversation is tracked only in the URL query string, never in any browser storage API - a same-tab reload re-requests the same conversation id', () => {
+  assert.match(SEBASTIAN_WEB_SCRIPT, /new URLSearchParams\(window\.location\.search\)\.get\(CONVERSATION_QUERY_PARAM\)/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /window\.history\.replaceState\(null, '', url\)/);
+  // Every path that lands on a conversation (opening one, creating one) keeps
+  // the URL in sync, so a plain reload of that same URL lands back on it.
+  assert.match(SEBASTIAN_WEB_SCRIPT, /activeConversationId = id;\s*syncConversationIdToUrl\(id\);/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /activeConversationId = body\.conversation\.id;\s*syncConversationIdToUrl\(activeConversationId\);/);
+  // Logging out clears it, so a stale conversation id never lingers in the
+  // address bar once the session backing it is gone.
+  assert.match(SEBASTIAN_WEB_SCRIPT, /syncConversationIdToUrl\(null\);\s*showUnlock\('Sessão encerrada com segurança\.'\);/);
+});
+
 test('execution and error states are accessible, clear and do not expose internal diagnostics', () => {
   assert.match(SEBASTIAN_WEB_SCRIPT, /setAttribute\('aria-busy', 'true'\)/);
   assert.match(SEBASTIAN_WEB_SCRIPT, /removeAttribute\('aria-busy'\)/);

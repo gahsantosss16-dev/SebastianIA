@@ -413,23 +413,50 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     }
   };
 
+  // Which conversation is open is reflected only in the URL (?c=<id>) -
+  // never in any browser-side storage API, per this interface's homologated
+  // contract that no client-side storage of any kind holds session/app
+  // state. The query string survives a same-tab reload but not closing the
+  // browser and opening a fresh tab, which is exactly the distinction
+  // "reload stays in the same conversation" vs "a new entry starts a new
+  // chat" needs.
+  const CONVERSATION_QUERY_PARAM = 'c';
+
+  const readConversationIdFromUrl = () => {
+    const id = new URLSearchParams(window.location.search).get(CONVERSATION_QUERY_PARAM);
+    return id && id.trim() !== '' ? id : null;
+  };
+
+  const syncConversationIdToUrl = (id) => {
+    const url = new URL(window.location.href);
+    if (id) {
+      url.searchParams.set(CONVERSATION_QUERY_PARAM, id);
+    } else {
+      url.searchParams.delete(CONVERSATION_QUERY_PARAM);
+    }
+    window.history.replaceState(null, '', url);
+  };
+
   const openConversation = async (id) => {
     try {
       const response = await fetch('/api/web/conversations/' + encodeURIComponent(id), {
         credentials: 'same-origin',
         cache: 'no-store'
       });
-      if (!response.ok) return;
+      if (!response.ok) return false;
       const body = await response.json();
       activeConversationId = id;
+      syncConversationIdToUrl(id);
       showConversationMessages(body.messages);
       input.value = '';
       input.style.height = 'auto';
       input.focus();
       await refreshConversationList();
+      return true;
     } catch {
       // Leave the previously active conversation visible rather than
       // clearing the screen on a transient failure to reopen another one.
+      return false;
     }
   };
 
@@ -439,6 +466,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       if (!response.ok) return;
       const body = await response.json();
       activeConversationId = body.conversation.id;
+      syncConversationIdToUrl(activeConversationId);
       showConversationMessages([]);
       input.value = '';
       input.style.height = 'auto';
@@ -449,19 +477,13 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     }
   };
 
-  const ensureActiveConversation = async () => {
-    try {
-      const response = await fetch('/api/web/conversations', { credentials: 'same-origin', cache: 'no-store' });
-      const body = response.ok ? await response.json() : { conversations: [] };
-      const conversations = Array.isArray(body.conversations) ? body.conversations : [];
-      if (conversations.length > 0) {
-        await openConversation(conversations[0].id);
-        return;
-      }
-      await createConversation();
-    } catch {
-      renderConversationList([]);
-    }
+  // A fresh entry (login, or opening the app with no conversation in the
+  // URL) always starts a new chat; it deliberately never falls back to the
+  // most recently active conversation just because one exists.
+  const restoreActiveConversation = async () => {
+    const requestedId = readConversationIdFromUrl();
+    if (requestedId && (await openConversation(requestedId))) return;
+    await createConversation();
   };
 
   if (newConversationButton) {
@@ -477,6 +499,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       try {
         await fetch('/api/web/session', { method: 'DELETE', credentials: 'same-origin' });
       } finally {
+        syncConversationIdToUrl(null);
         showUnlock('Sessão encerrada com segurança.');
       }
     });
@@ -502,7 +525,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       const response = await fetch('/api/web/session', { credentials: 'same-origin', cache: 'no-store' });
       if (response.ok && (await response.json()).authenticated === true) {
         showChat();
-        await ensureActiveConversation();
+        await restoreActiveConversation();
       } else {
         showUnlock();
       }
@@ -532,7 +555,10 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
         return;
       }
       showChat();
-      await ensureActiveConversation();
+      // A successful login is always a new entry into the system, never a
+      // reload - it must open a fresh chat even if the address bar still
+      // carries a conversation id from an earlier session in this tab.
+      await createConversation();
     } catch {
       tokenInput.value = '';
       unlockError.textContent = 'Não foi possível estabelecer uma sessão segura.';
@@ -577,6 +603,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       thinking.remove();
       if (!response.ok) {
         if (response.status === 401) {
+          syncConversationIdToUrl(null);
           showUnlock('Sua sessão expirou. Informe o acesso novamente.');
           return;
         }
