@@ -17,6 +17,16 @@ const MAX_OBSERVATION_CHARS = 2_000;
 
 export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
   readonly requiredStringArguments: readonly string[];
+  /**
+   * Small, typed, backward-compatible extension: operation-only integer
+   * knobs (e.g. a result-count `limit`) a deterministic route - or, if it
+   * chooses to, the model itself via `decide` - may supply alongside the
+   * required string arguments. Omitted entirely by default, so every
+   * existing catalog entry keeps behaving exactly as before. Deliberately
+   * narrow (named, whitelisted keys only, each still validated as a real
+   * integer) rather than a general "any extra argument goes" escape hatch.
+   */
+  readonly optionalNumberArguments?: readonly string[];
   readonly validationToolId?: string;
   readonly risk?: string;
   /**
@@ -39,14 +49,46 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
     readonly pattern: RegExp;
     /** Optional narrow continuation route evaluated only against the primary (immediately previous) context. */
     readonly immediateContext?: { readonly objectivePattern: RegExp; readonly contextPattern: RegExp };
-    readonly buildArguments: (objective: string) => Readonly<Record<string, string>>;
+    readonly buildArguments: (objective: string) => Readonly<Record<string, string | number>>;
     /**
      * A deterministic route may already satisfy the user's full read-only
      * intent. This formatter is the safe fallback if evidence-only cognitive
      * synthesis is absent or fails; rejected/failed Tool outcomes never use it.
      */
     readonly answerFromSuccessfulObservation?: (observation: CognitiveObservationRecord) => string;
+    /**
+     * Opt-in, per-route escape hatch from the otherwise-unconditional
+     * `synthesize()` call this formatter's answer would normally go through.
+     * Omitted (the default) preserves the exact current behavior - every
+     * existing route keeps calling `synthesize()` unconditionally. Return
+     * `false` only when, for this specific objective, the deterministic
+     * route's own arguments already fully resolved quantity/order/content
+     * (e.g. an explicit, in-range commit count), so the Tool's structured
+     * result needs no further LLM transformation - never for a route whose
+     * observation is free-form or content the caller does not fully control
+     * (this must never be set for a knowledge-retrieval-style route: recovered
+     * documents are evidence, not a pre-validated final answer).
+     */
+    readonly requiresSynthesis?: (objective: string) => boolean;
   };
+  /**
+   * Opt-in, generic escape from the literal id/description term-overlap
+   * fallback in `hasApplicableToolCandidate` for a capability whose own
+   * description is necessarily broad (e.g. `knowledge.search`: "busca
+   * trechos relevantes em bibliotecas de conhecimento configuradas" shares
+   * no term with a concrete objective like "o que é X segundo Y"). When
+   * present, this predicate is consulted the same way a `deterministicIntent`
+   * pattern is - but it is deliberately NOT `deterministicIntent`: it never
+   * triggers a pre-model Tool call and never produces an answer on its own.
+   * It only widens (a) whether the operational engine is worth entering at
+   * all, and (b) which untried capability the orchestrator may attempt once,
+   * as evidence, if the model concludes with zero observations despite an
+   * applicable capability existing (see `findRecoveryRoute`). The composing
+   * application must derive this from its own real, already-configured data
+   * (e.g. a cheap relevance probe against an actual indexed corpus) - never
+   * from a curated per-topic keyword/phrase list.
+   */
+  readonly broadApplicabilityProbe?: (objective: string) => boolean;
 }
 
 export type CognitiveOperationalResult =
@@ -72,22 +114,94 @@ export class CognitiveOperationalOrchestrator {
    * capability-driven (the catalog is the source), not a phrase/topic list.
    */
   public hasApplicableToolCandidate(objective: string, immediateContext?: string): boolean {
-    if (this.catalog.some((entry) => entry.deterministicIntent?.pattern.test(objective) === true)) return true;
-    if (immediateContext !== undefined && this.catalog.some((entry) =>
+    return this.catalog.some((entry) => this.isBroadlyApplicable(entry, objective, immediateContext));
+  }
+
+  /**
+   * Per-entry applicability check shared by `hasApplicableToolCandidate` (the
+   * pre-model gate) and `findRecoveryRoute` (the in-loop safeguard): an exact
+   * deterministic pattern/continuation match, the entry's own opt-in
+   * `broadApplicabilityProbe`, or - the original, narrower fallback - at
+   * least one meaningful objective term occurring in the entry's own
+   * id/description.
+   */
+  private isBroadlyApplicable(entry: OperationalToolPolicyEntry, objective: string, immediateContext?: string): boolean {
+    if (entry.deterministicIntent?.pattern?.test(objective) === true) return true;
+    if (immediateContext !== undefined &&
       entry.deterministicIntent?.immediateContext?.objectivePattern.test(objective) === true &&
-      entry.deterministicIntent.immediateContext.contextPattern.test(immediateContext),
-    )) return true;
+      entry.deterministicIntent.immediateContext.contextPattern.test(immediateContext) === true) return true;
+    if (entry.broadApplicabilityProbe?.(objective) === true) return true;
     const objectiveTerms = this.catalogTerms(objective);
     if (objectiveTerms.size === 0) return false;
-    return this.catalog.some((entry) => {
-      const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
-      return [...objectiveTerms].some((term) => capabilityTerms.has(term));
+    const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
+    return [...objectiveTerms].some((term) => capabilityTerms.has(term));
+  }
+
+  /**
+   * Bounded, schema-driven safety net for a model that concludes with zero
+   * observations despite an applicable, never-tried capability (see the
+   * `execute` `concludeCompleted` branch). Deliberately narrow: it only ever
+   * auto-invokes a catalog entry whose own declared shape needs no argument
+   * guessing (`requiredStringArguments` is empty, or exactly `['query']`,
+   * which the objective itself safely fills) - never a write-authorized
+   * entry, and never when more than one such entry is applicable (ambiguity
+   * is left to `decide`, exactly like `findUniqueCapabilityMatchRoute`).
+   * Whatever this recovers is still just one more observation fed back into
+   * the ordinary loop - it never produces an answer directly and never
+   * skips `synthesize()`.
+   */
+  private findRecoveryRoute(objective: string, immediateContext?: string): OperationalToolPolicyEntry | undefined {
+    const candidates = this.catalog.filter((entry) => {
+      if (entry.requiresAuthorization) return false;
+      const shape = entry.requiredStringArguments;
+      const invokableWithoutGuessing = shape.length === 0 || (shape.length === 1 && shape[0] === 'query');
+      if (!invokableWithoutGuessing) return false;
+      return this.isBroadlyApplicable(entry, objective, immediateContext);
     });
+    return candidates.length === 1 ? candidates[0] : undefined;
+  }
+
+  private async attemptRecoveryObservation(
+    objective: string,
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly immediateContext?: string },
+    observations: CognitiveObservationRecord[],
+  ): Promise<boolean> {
+    const route = this.findRecoveryRoute(objective, context.immediateContext);
+    if (!route) return false;
+    const args = route.requiredStringArguments.length === 0 ? {} : { query: objective };
+    const invocation = await this.tool.invoke({
+      toolId: route.toolId,
+      executionId: context.executionId,
+      responsibilityId: context.responsibilityId,
+      requestedAt: context.requestedAt,
+      payload: args,
+    });
+    if (invocation.status !== 'completed') {
+      observations.push({ stepId: 'operational:recovery', toolId: route.toolId, outcome: 'failed', summary: 'A ferramenta de recuperação não concluiu.' });
+      return true;
+    }
+    const message = typeof invocation.output.message === 'string'
+      ? invocation.output.message.slice(0, MAX_OBSERVATION_CHARS)
+      : 'A ferramenta concluiu sem uma mensagem descritiva.';
+    observations.push({
+      stepId: 'operational:recovery',
+      toolId: route.toolId,
+      outcome: invocation.output.outcome === 'ok' ? 'ok' : 'rejected',
+      summary: message,
+    });
+    return true;
   }
 
   private catalogTerms(text: string): ReadonlySet<string> {
     const ignored = new Set(['para', 'como', 'qual', 'quais', 'esse', 'essa', 'isso', 'uma', 'por', 'com', 'sem']);
-    return new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 4 && !ignored.has(term)));
+    const tokens = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 4 && !ignored.has(term));
+    // Lightweight singular/plural normalization (strip one trailing "s" from
+    // a term longer than 4 characters) - not real stemming, just enough that
+    // an objective phrased in the singular ("commit") still matches a
+    // catalog description phrased in the plural ("commits"), on either side
+    // of the comparison, since both the objective and the capability text
+    // are tokenized through this same method.
+    return new Set(tokens.map((term) => (term.length > 4 && term.endsWith('s') ? term.slice(0, -1) : term)));
   }
 
   public async execute(
@@ -128,6 +242,17 @@ export class CognitiveOperationalOrchestrator {
           const evidenceFallback = successfulObservations.map((observation) => observation.summary).join('\n');
           const answer = await this.synthesizeOrFallback(objective, context, successfulObservations, evidenceFallback);
           return this.finish({ outcome: 'answered', answer, toolCalls });
+        }
+        // A conclusion with literally zero attempts, while a real capability
+        // remains applicable and untried, is never accepted at face value -
+        // see `findRecoveryRoute`. This spends at most one extra Tool call
+        // and one extra `decide` turn (still within `maxDecisions`), and only
+        // when unambiguous; a genuinely ambiguous or ordinary "nothing
+        // applies" conclusion is unaffected.
+        if (observations.length === 0 && attempt < this.maxDecisions - 1 &&
+          await this.attemptRecoveryObservation(objective, context, observations)) {
+          toolCalls += 1;
+          continue;
         }
         return this.finish(
           decision.finalAnswer
@@ -257,10 +382,19 @@ export class CognitiveOperationalOrchestrator {
     const fallbackAnswer = toolOutcome === 'ok'
       ? route.deterministicIntent.answerFromSuccessfulObservation?.(successfulObservation)
       : undefined;
-    const answer = fallbackAnswer === undefined
-      ? undefined
-      : await this.synthesizeOrFallback(objective, context, [successfulObservation], fallbackAnswer);
-    return { toolCalls: 1, ...(answer === undefined ? {} : { answer }) };
+    if (fallbackAnswer === undefined) {
+      return { toolCalls: 1 };
+    }
+    // Opt-in fast path (see `requiresSynthesis` on `deterministicIntent`):
+    // skip the LLM round-trip entirely when this specific objective's
+    // deterministic arguments already fully resolved quantity/order/content,
+    // so the Tool's own structured, already-correct result is the answer.
+    if (route.deterministicIntent.requiresSynthesis?.(objective) === false) {
+      this.logger?.info('Cognitive operational synthesis completed.', { outcome: 'skippedDeterministic', fallbackUsed: false });
+      return { toolCalls: 1, answer: fallbackAnswer };
+    }
+    const answer = await this.synthesizeOrFallback(objective, context, [successfulObservation], fallbackAnswer);
+    return { toolCalls: 1, answer };
   }
 
   /**
@@ -418,8 +552,11 @@ export class CognitiveOperationalOrchestrator {
   }
 
   private argumentsMatchPolicy(policy: OperationalToolPolicyEntry, args: Readonly<Record<string, unknown>>): boolean {
+    const optionalNumberArguments = policy.optionalNumberArguments ?? [];
     return policy.requiredStringArguments.every((name) => typeof args[name] === 'string') &&
-      Object.keys(args).every((name) => policy.requiredStringArguments.includes(name));
+      Object.keys(args).every((name) =>
+        policy.requiredStringArguments.includes(name) ||
+        (optionalNumberArguments.includes(name) && typeof args[name] === 'number' && Number.isInteger(args[name])));
   }
 
   /**

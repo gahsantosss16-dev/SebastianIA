@@ -1,13 +1,18 @@
 import { InvalidCognitiveModelProviderInputError } from './CognitiveModelProviderErrors.js';
 import { parseCognitiveDecision } from './CognitiveDecisionValidator.js';
+import { MAX_GEMINI_CONVERSATION_ANSWER_CHARS, SYNTHESIS_SYSTEM_INSTRUCTION } from './GeminiCognitiveModelProvider.js';
 import type {
   CognitiveDecisionRequest,
   CognitiveDecisionResult,
   CognitiveModelProvider,
+  CognitiveSynthesisRequest,
+  CognitiveSynthesisResult,
 } from './CognitiveModelProviderContract.js';
 
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:11434';
 const DEFAULT_TIMEOUT_MS = 30_000;
+/** `synthesize` composes a final answer from potentially large Tool observations - same rationale as `GeminiCognitiveModelProvider`'s dedicated, larger `synthesizeTimeoutMs`. */
+const DEFAULT_SYNTHESIZE_TIMEOUT_MS = 60_000;
 
 type FetchLike = (input: string, init: Readonly<Record<string, unknown>>) => Promise<{
   readonly ok: boolean;
@@ -24,6 +29,8 @@ export interface OllamaCognitiveModelProviderOptions {
   readonly timeoutMs?: number;
   /** Injectable for tests - avoids any real network call when a fake HTTP client is supplied. Defaults to the global `fetch`. */
   readonly fetchImpl?: FetchLike;
+  /** Timeout for `synthesize` only; independent of `timeoutMs` (which continues to bound only `decide`) - see `DEFAULT_SYNTHESIZE_TIMEOUT_MS`. */
+  readonly synthesizeTimeoutMs?: number;
 }
 
 const SYSTEM_PROMPT = `Você é SebastianIA, um assistente pessoal generalista com capacidades operacionais. Converse naturalmente e use conhecimento geral e raciocínio em qualquer assunto legítimo. Acompanhe o idioma, o grau de informalidade e abreviações do usuário sem caricaturar, perder precisão ou forçar gírias e emojis. Responda direto, sem aberturas genéricas de atendimento nem repetição de contexto óbvio; use leve humor e personalidade quando couber e mantenha profissionalismo quando o assunto exigir. Ferramentas, memória e ações entram somente quando necessárias; não restrinja sua identidade a programação, tarefas técnicas ou produtividade. A mensagem atual define a intenção, e memória anterior só deve ser usada quando semanticamente relacionada ou necessária para resolver uma referência ou continuação.
@@ -58,6 +65,7 @@ export class OllamaCognitiveModelProvider implements CognitiveModelProvider {
   private readonly model: string;
   private readonly endpoint: string;
   private readonly timeoutMs: number;
+  private readonly synthesizeTimeoutMs: number;
   private readonly fetchImpl: FetchLike;
 
   public constructor(options: OllamaCognitiveModelProviderOptions) {
@@ -77,6 +85,7 @@ export class OllamaCognitiveModelProvider implements CognitiveModelProvider {
     this.model = options.model;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.synthesizeTimeoutMs = options.synthesizeTimeoutMs ?? DEFAULT_SYNTHESIZE_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   }
 
@@ -130,6 +139,90 @@ export class OllamaCognitiveModelProvider implements CognitiveModelProvider {
       return { outcome: 'unavailable', reason: this.describeUnavailability(error) };
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Mirrors `GeminiCognitiveModelProvider.synthesize` exactly - same shared
+   * `SYNTHESIS_SYSTEM_INSTRUCTION`, same evidence-grounding rule (every
+   * `evidence` entry must be a literal substring of some observation's
+   * `summary`, or the result is rejected as ungrounded) - only the HTTP
+   * transport differs (local Ollama chat API instead of Gemini). Optional on
+   * `CognitiveModelProvider`, exactly like Gemini's.
+   */
+  public async synthesize(request: CognitiveSynthesisRequest): Promise<CognitiveSynthesisResult> {
+    if (
+      !request || typeof request !== 'object' || typeof request.objective !== 'string' || request.objective.trim() === '' ||
+      !Array.isArray(request.observations) || request.observations.length === 0 ||
+      request.observations.some((observation) => observation.outcome !== 'ok' || typeof observation.summary !== 'string' || observation.summary.trim() === '')
+    ) {
+      return { outcome: 'invalidResponse', reason: 'Requisição de síntese cognitiva inválida.' };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.synthesizeTimeoutMs);
+    const abortFromCaller = (): void => controller.abort();
+    if (request.signal?.aborted === true) controller.abort();
+    else request.signal?.addEventListener('abort', abortFromCaller, { once: true });
+
+    try {
+      const response = await this.fetchImpl(`${this.endpoint}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: this.model,
+          stream: false,
+          format: 'json',
+          messages: [
+            { role: 'system', content: SYNTHESIS_SYSTEM_INSTRUCTION },
+            { role: 'user', content: JSON.stringify({ objective: request.objective, observations: request.observations, requestedAt: request.requestedAt }) },
+          ],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        return { outcome: 'unavailable', reason: `Ollama respondeu com status HTTP ${response.status}.` };
+      }
+
+      const body = (await response.json()) as { readonly message?: { readonly content?: unknown } };
+      const content = body?.message?.content;
+      if (typeof content !== 'string' || content.trim() === '') {
+        return { outcome: 'invalidResponse', reason: 'Resposta do Ollama não trouxe conteúdo de mensagem.' };
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        return { outcome: 'invalidResponse', reason: 'Síntese cognitiva não é JSON válido.' };
+      }
+
+      const answer = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as { readonly answer?: unknown }).answer
+        : undefined;
+      const evidence = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as { readonly evidence?: unknown }).evidence
+        : undefined;
+      const summaries = request.observations.map((observation) => observation.summary);
+      if (
+        typeof answer !== 'string' || answer.trim() === '' || answer.length > MAX_GEMINI_CONVERSATION_ANSWER_CHARS ||
+        !Array.isArray(evidence) || evidence.length === 0 ||
+        evidence.some((excerpt) => typeof excerpt !== 'string' || excerpt.trim() === '' || !summaries.some((summary) => summary.includes(excerpt))) ||
+        !parsed || typeof parsed !== 'object' || Object.keys(parsed).some((key) => key !== 'answer' && key !== 'evidence')
+      ) {
+        return { outcome: 'invalidResponse', reason: 'Síntese cognitiva não está ancorada nas observações.' };
+      }
+
+      return { outcome: 'synthesized', answer: answer.trim() };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        return { outcome: 'timeout' };
+      }
+      return { outcome: 'unavailable', reason: this.describeUnavailability(error) };
+    } finally {
+      clearTimeout(timer);
+      request.signal?.removeEventListener('abort', abortFromCaller);
     }
   }
 

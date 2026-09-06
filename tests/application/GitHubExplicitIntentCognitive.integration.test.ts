@@ -14,6 +14,7 @@ import {
   OnlineReadOnlyTool,
   type SpecializedToolInvocationInput,
 } from '../../core/tool/index.js';
+import { GITHUB_COMMIT_NOUN_PATTERN, extractRequestedQuantity } from '../../application/OnlineSebastianApplication.js';
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -29,18 +30,41 @@ const githubCatalog = [
     },
   },
   {
-    toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
+    toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], optionalNumberArguments: ['limit'],
     deterministicIntent: {
       pattern: /^(?=.*\bgithub\b)(?=.*\bcommits?\b)/i,
       immediateContext: {
         objectivePattern: /(?:último|ultimo|recentes?|mais\s+recente)(?:(?!\n).)*\bcommits?\b|\bcommits?\b(?:(?!\n).)*(?:último|ultimo|recentes?|mais\s+recente)/i,
         contextPattern: /\bgithub\b/i,
       },
-      buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }),
+      buildArguments: (objective: string) => {
+        const quantity = extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN);
+        return quantity === undefined ? { projectId: DEFAULT_PROJECT_ID } : { projectId: DEFAULT_PROJECT_ID, limit: quantity };
+      },
       answerFromSuccessfulObservation: (observation: { readonly summary: string }) => `Commits recentes no GitHub:\n${observation.summary}`,
+      requiresSynthesis: (objective: string) => extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN) === undefined,
     },
   },
 ] as const;
+
+/**
+ * 25 distinct, deterministically-ordered synthetic commits - enough to
+ * exercise quantities up to 10 and past the tool's own safe maximum (20).
+ * Honors `per_page` exactly like the real GitHub API would, so a test can
+ * verify that a `limit` argument actually reached the Tool/API call, not
+ * just that the Tool ran.
+ */
+function manyCommitsFetchImpl(count = 25) {
+  return async (url: string) => {
+    if (!url.includes('/commits')) throw new Error(`unexpected fetch: ${url}`);
+    const perPage = Number(new URL(url).searchParams.get('per_page') ?? count);
+    const commits = Array.from({ length: count }, (_, index) => ({
+      sha: `commit${String(index).padStart(2, '0')}sha000000000000000000000000`,
+      commit: { message: `fix: change number ${index}`, author: { name: 'Gabriel', date: `2026-08-${String(28 - Math.floor(index / 4)).padStart(2, '0')}T00:00:00Z` } },
+    })).slice(0, perPage);
+    return { ok: true, status: 200, text: async () => JSON.stringify(commits) };
+  };
+}
 
 function input(text: string, second: number) {
   return { type: 'converse', input: { text }, generatedAt: `2026-08-28T15:00:${String(second).padStart(2, '0')}.000Z` };
@@ -170,18 +194,28 @@ test('an explicit GitHub request for recent commits calls github.listCommits and
 test('evidence synthesis is proportional for singular, plural and explicit quantity requests', async () => {
   const cases = [
     {
+      // Singular, explicit quantity (1) - now fully resolved by the
+      // deterministic route's own `limit` argument (see the commits-quantity
+      // fix): synthesize() is deliberately skipped, the Tool's own
+      // already-bounded result is the answer directly.
       objective: 'qual foi o último commit no github?',
-      answer: 'O último foi o 78702c46 — fix: preserve GitHub continuity and log build SHA.',
-      included: ['78702c46'], excluded: ['2c27fafb', '1d8cb396'],
+      expectSynthesize: false,
+      included: ['78702c46'], excluded: ['2c27fafb', '1d8cb396', 'debb0a1a'],
     },
     {
+      // Plural, no explicit number - still ambiguous, still fully routed
+      // through synthesize() exactly as before this fix.
       objective: 'quais foram os últimos commits no github?',
+      expectSynthesize: true,
       answer: 'Os últimos foram 78702c46, 2c27fafb, 1d8cb396 e debb0a1a.',
       included: ['78702c46', '2c27fafb'], excluded: [],
     },
     {
+      // Explicit quantity (3) - also fully resolved deterministically now;
+      // synthesize() skipped, Tool result bounded to exactly 3 by the same
+      // `limit` argument.
       objective: 'me mostra os últimos 3 commits no github',
-      answer: '78702c46, 2c27fafb e 1d8cb396.',
+      expectSynthesize: false,
       included: ['78702c46', '2c27fafb', '1d8cb396'], excluded: ['debb0a1a'],
     },
   ] as const;
@@ -189,19 +223,19 @@ test('evidence synthesis is proportional for singular, plural and explicit quant
   for (const [index, scenario] of cases.entries()) {
     const root = mkdtempSync(join(tmpdir(), `sebastian-github-synthesis-${index}-`));
     try {
-      let synthesisObservations = 0;
+      let synthesizeCalls = 0;
       const provider: CognitiveModelProvider = {
         decide: async () => { throw new Error('deterministic completion must not call decide'); },
         synthesize: async (request) => {
-          synthesisObservations = request.observations.length;
+          synthesizeCalls += 1;
           assert.match(request.observations[0]?.summary ?? '', /78702c464f99/);
-          return { outcome: 'synthesized', answer: scenario.answer };
+          return { outcome: 'synthesized', answer: 'answer' in scenario ? scenario.answer : 'não deveria ser usado' };
         },
       };
       const { app, invoked } = buildApp(provider, multipleCommitsFetchImpl(), root);
       const result = await app.executeCommand(input(scenario.objective, 20 + index));
       assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
-      assert.equal(synthesisObservations, 1);
+      assert.equal(synthesizeCalls, scenario.expectSynthesize ? 1 : 0, `synthesize() call mismatch for "${scenario.objective}"`);
       for (const value of scenario.included) assert.match(String(result.output.message), new RegExp(value));
       for (const value of scenario.excluded) assert.doesNotMatch(String(result.output.message), new RegExp(value));
     } finally {
@@ -251,6 +285,109 @@ test('the exact same wording, with no GitHub capability configured at all, never
 
     assert.match(String(result.output.message), /não tenho uma ferramenta configurada/i);
     assert.doesNotMatch(String(result.output.message), /consigo acessar|tenho acesso ao github|78702c46/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('explicit commit quantities resolve to exactly that many commits, with no decide() and no synthesize() calls at all', async () => {
+  const cases = [
+    { objective: 'qual o último commit?', expectedShaIndexes: [0] },
+    { objective: 'quais os últimos 2 commits?', expectedShaIndexes: [0, 1] },
+    { objective: 'quais os últimos 3 commits?', expectedShaIndexes: [0, 1, 2] },
+    { objective: 'me mostra os últimos 5 commits', expectedShaIndexes: [0, 1, 2, 3, 4] },
+    { objective: 'últimos 10 commits no github', expectedShaIndexes: Array.from({ length: 10 }, (_, index) => index) },
+  ] as const;
+
+  for (const [index, scenario] of cases.entries()) {
+    const root = mkdtempSync(join(tmpdir(), `sebastian-github-commit-quantity-${index}-`));
+    try {
+      let decideCalls = 0;
+      let synthesizeCalls = 0;
+      const provider: CognitiveModelProvider = {
+        decide: async () => { decideCalls += 1; throw new Error('decide() must never be called for an explicit, in-range commit quantity'); },
+        synthesize: async () => { synthesizeCalls += 1; return { outcome: 'synthesized', answer: 'não deveria ser usado' }; },
+      };
+      const { app, invoked } = buildApp(provider, manyCommitsFetchImpl(), root);
+      const result = await app.executeCommand(input(scenario.objective, 60 + index));
+
+      assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+      assert.equal(decideCalls, 0, 'the deterministic route must resolve this without ever consulting decide()');
+      assert.equal(synthesizeCalls, 0, 'an explicit, fully-resolved quantity must skip synthesize() entirely');
+      const message = String(result.output.message);
+      for (const shaIndex of scenario.expectedShaIndexes) {
+        assert.match(message, new RegExp(`commit${String(shaIndex).padStart(2, '0')}sha`), `expected commit index ${shaIndex} in the answer for "${scenario.objective}"`);
+      }
+      const excludedIndex = scenario.expectedShaIndexes.length;
+      assert.doesNotMatch(message, new RegExp(`commit${String(excludedIndex).padStart(2, '0')}sha`), `commit index ${excludedIndex} must NOT appear for "${scenario.objective}" (exactly ${scenario.expectedShaIndexes.length} requested)`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('no explicit quantity preserves the current default (10) and still goes through synthesize() as before', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-commit-no-quantity-'));
+  try {
+    let synthesizeCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => { throw new Error('must not be called'); },
+      synthesize: async (request) => {
+        synthesizeCalls += 1;
+        return { outcome: 'synthesized', answer: `síntese com ${request.observations[0]?.summary.split('\n').length ?? 0} linhas de evidência` };
+      },
+    };
+    const { app, invoked } = buildApp(provider, manyCommitsFetchImpl(), root);
+    const result = await app.executeCommand(input('quais os commits mais recentes no github?', 70));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(synthesizeCalls, 1, 'an ambiguous quantity must still go through synthesize(), exactly like before this fix');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a quantity beyond the Tool\'s own safe maximum is rejected by the existing Tool contract, not silently clamped or invented', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-commit-over-limit-'));
+  try {
+    let decideCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async (request) => {
+        decideCalls += 1;
+        return { outcome: 'decided', decision: decision({ finalAnswer: `Só consigo trazer um número limitado de commits de uma vez: ${request.recentObservations[0]?.summary ?? 'evidência indisponível'}` }) };
+      },
+    };
+    const { app, invoked } = buildApp(provider, manyCommitsFetchImpl(), root);
+    const result = await app.executeCommand(input('quais os últimos 25 commits no github?', 71));
+
+    // The deterministic route attempted the Tool (with limit=25), the Tool's
+    // own existing contract rejected it (25 > MAX_COMMITS), so this falls
+    // through to the normal decide() loop exactly like any other rejected
+    // deterministic attempt - no new clamping logic, no invented behavior.
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.ok(decideCalls >= 1, 'an out-of-range quantity must fall through to the normal decide() loop, not silently succeed');
+    assert.doesNotMatch(String(result.output.message), /commit00sha|commit24sha/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an unrelated number elsewhere in the sentence is never mistaken for the requested commit quantity', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-commit-irrelevant-number-'));
+  try {
+    let synthesizeCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => { throw new Error('must not be called'); },
+      synthesize: async () => { synthesizeCalls += 1; return { outcome: 'synthesized', answer: 'evidência completa retornada' }; },
+    };
+    const { app, invoked } = buildApp(provider, manyCommitsFetchImpl(), root);
+    // "2026" and "16" are both numbers in this sentence, but neither is
+    // adjacent to "commits" or to a quantity word ("últimos"/"top"/etc.) -
+    // the extractor must not treat either as the requested count.
+    const result = await app.executeCommand(input('em 2026, na build 16, quais foram os commits recentes no github?', 72));
+
+    assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
+    assert.equal(synthesizeCalls, 1, 'no explicit quantity was actually expressed, so this must still be treated as ambiguous and go through synthesize()');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -367,15 +504,19 @@ test('GitHub project access concludes from getProject and an immediate commit fo
     assert.equal(synthesisCalls, 1);
     assert.match(String(project.output.message), /SebastianIA|gahsantosss16-dev\/SebastianIA/);
 
+    // "último commit" (singular, quantity=1) is now a fully-resolved
+    // deterministic quantity - see the commits-quantity fix - so synthesize()
+    // is deliberately skipped for both of these calls; synthesisCalls stays
+    // at 1 (from the getProject call above), it does not increment further.
     const commit = await app.executeCommand(input('qual foi o último commit do projeto que vc tem acesso?', 11));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
     assert.equal(decideCalls, 0, 'the immediate GitHub continuation must remain deterministic');
-    assert.equal(synthesisCalls, 2);
+    assert.equal(synthesisCalls, 1, 'an explicit singular commit quantity is fully resolved by the Tool result alone');
     assert.match(String(commit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
 
     const shorterCommit = await app.executeCommand(input('qual foi o último commit?', 14));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
-    assert.equal(synthesisCalls, 3);
+    assert.equal(synthesisCalls, 1, 'still fully resolved deterministically - synthesize() remains unused');
     assert.match(String(shorterCommit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
   } finally {
     rmSync(root, { recursive: true, force: true });

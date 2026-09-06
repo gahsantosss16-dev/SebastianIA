@@ -230,7 +230,13 @@ export class GitHubReadOnlyTool implements SpecializedTool {
     if ('rejected' in result) return result.rejected;
 
     const body = Array.isArray(result.body) ? result.body : [];
-    const commits = body.slice(0, MAX_COMMITS).map((entry) => {
+    // Defensive client-side bound: never trust the remote API alone to
+    // honor `per_page` - always re-apply the caller's own requested `limit`
+    // (already validated above as an integer within [1, MAX_COMMITS]),
+    // falling back to the same default used in the request, and never
+    // exceeding MAX_COMMITS either way.
+    const effectiveLimit = Math.min(limit ?? DEFAULT_COMMITS_LIMIT, MAX_COMMITS);
+    const commits = body.slice(0, effectiveLimit).map((entry) => {
       const record = entry as Record<string, unknown>;
       const commit = (record.commit as Record<string, unknown> | undefined) ?? {};
       const author = (commit.author as Record<string, unknown> | undefined) ?? {};

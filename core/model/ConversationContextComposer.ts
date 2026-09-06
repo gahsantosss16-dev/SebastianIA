@@ -1,4 +1,5 @@
 import type { RecentExchangeRecord, RememberedFactRecord } from '../memory/index.js';
+import { significantTokens as sharedSignificantTokens } from '../knowledge/LexicalTokenizer.js';
 import { InvalidModelInterpretationRequestError } from './ModelProviderContractErrors.js';
 
 /**
@@ -58,20 +59,7 @@ const INTERROGATIVE_STARTERS: readonly string[] = [
   'o que',
 ];
 
-/**
- * Small, deliberately short stopword list - just enough that common
- * connectors don't create false relevance overlap between unrelated
- * sentences. Not a linguistic component, just a practical filter.
- */
-const STOPWORDS: ReadonlySet<string> = new Set([
-  'a', 'o', 'as', 'os', 'de', 'do', 'da', 'dos', 'das', 'que', 'e', 'é', 'um', 'uma', 'uns', 'umas',
-  'para', 'com', 'em', 'no', 'na', 'nos', 'nas', 'por', 'ao', 'aos', 'à', 'às', 'se', 'sua', 'seu',
-  'suas', 'seus', 'isso', 'você', 'voce', 'eu', 'me', 'meu', 'minha', 'meus', 'minhas', 'este', 'esta',
-  'esse', 'essa', 'sobre', 'ainda', 'já', 'tem', 'têm', 'vai', 'vamos', 'muito', 'sebastian', 'ontem',
-]);
-
 const MAX_RELEVANT_MEMORIES = 3;
-const MIN_TOKEN_LENGTH = 3;
 /**
  * A message this short rarely names its own subject when it is also phrased
  * as a question or built around a bare demonstrative - it is almost always
@@ -198,11 +186,7 @@ export class ConversationContextComposer {
   }
 
   private significantTokens(text: string): ReadonlySet<string> {
-    const tokens = text
-      .toLowerCase()
-      .split(/[^\p{L}\p{N}]+/u)
-      .filter((token) => token.length >= MIN_TOKEN_LENGTH && !STOPWORDS.has(token));
-    return new Set(tokens);
+    return sharedSignificantTokens(text);
   }
 
   private overlapScore(query: ReadonlySet<string>, candidate: ReadonlySet<string>): number {

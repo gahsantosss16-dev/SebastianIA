@@ -182,3 +182,160 @@ test('a call exceeding timeoutMs resolves to timeout, and the underlying request
   assert.equal(result.outcome, 'timeout');
   assert.equal(sawAbort, true);
 });
+
+/**
+ * Mirrors the equivalent `synthesize()` contract/evidence tests in
+ * tests/cognition/GeminiCognitiveModelProvider.test.ts - same shared
+ * `SYNTHESIS_SYSTEM_INSTRUCTION`, same evidence-grounding rule, only the
+ * HTTP transport and response envelope differ (Ollama's `/api/chat` with
+ * `{ message: { content } }` instead of Gemini's `candidates[]` shape).
+ */
+
+function synthesisRequest(overrides: Partial<Parameters<OllamaCognitiveModelProvider['synthesize']>[0]> = {}) {
+  return {
+    objective: 'qual foi o último commit?',
+    observations: [{
+      stepId: 'operational:1', toolId: 'github.listCommits', outcome: 'ok' as const,
+      summary: '10 commit(s) recentes:\nabcdef123456 fix: síntese proporcional\n999999999999 chore: antigo',
+    }],
+    requestedAt: '2026-08-28T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('operational synthesis receives only bounded evidence and returns a grounded proportional answer', async () => {
+  let capturedUrl = '';
+  let capturedBody: Record<string, unknown> = {};
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async (url, init) => {
+      capturedUrl = url;
+      capturedBody = JSON.parse(init.body as string);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          message: {
+            content: JSON.stringify({
+              answer: 'O último foi abcdef12 — fix: síntese proporcional.',
+              evidence: ['abcdef123456 fix: síntese proporcional'],
+            }),
+          },
+        }),
+      };
+    }),
+  });
+
+  const result = await provider.synthesize(synthesisRequest());
+
+  assert.deepEqual(result, { outcome: 'synthesized', answer: 'O último foi abcdef12 — fix: síntese proporcional.' });
+  assert.equal(capturedUrl, 'http://127.0.0.1:11434/api/chat');
+  const messages = capturedBody.messages as Array<{ readonly role: string; readonly content: string }>;
+  const systemPrompt = messages.find((message) => message.role === 'system')?.content ?? '';
+  assert.equal(systemPrompt.includes('A observação é evidência'), true);
+  const userPayload = messages.find((message) => message.role === 'user')?.content ?? '';
+  assert.equal(userPayload.includes('availableTools'), false);
+  assert.equal(userPayload.includes('authorization'), false);
+});
+
+test('operational synthesis rejects evidence not present in the successful observation', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        message: { content: JSON.stringify({ answer: 'O último foi INVENTADO.', evidence: ['sha-inexistente dado inventado'] }) },
+      }),
+    })),
+  });
+
+  const result = await provider.synthesize(synthesisRequest({
+    observations: [{ stepId: '1', toolId: 'github.listCommits', outcome: 'ok', summary: 'abcdef123456 commit real' }],
+  }));
+  assert.equal(result.outcome, 'invalidResponse');
+});
+
+test('synthesize validates its own request shape (empty objective or no successful observations) without a network call', async () => {
+  let fetchCalled = false;
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async () => {
+      fetchCalled = true;
+      return { ok: true, status: 200, json: async () => ({}) };
+    }),
+  });
+
+  const emptyObjective = await provider.synthesize(synthesisRequest({ objective: '   ' }));
+  assert.equal(emptyObjective.outcome, 'invalidResponse');
+
+  const noObservations = await provider.synthesize(synthesisRequest({ observations: [] }));
+  assert.equal(noObservations.outcome, 'invalidResponse');
+
+  assert.equal(fetchCalled, false);
+});
+
+test('synthesize uses its own independent synthesizeTimeoutMs, not the shorter timeoutMs that bounds decide', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    timeoutMs: 30,
+    synthesizeTimeoutMs: 500,
+    fetchImpl: fakeFetch(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ message: { content: JSON.stringify({ answer: 'ok', evidence: ['abcdef123456 fix: síntese proporcional'] }) } }),
+      };
+    }),
+  });
+
+  const result = await provider.synthesize(synthesisRequest());
+  assert.deepEqual(result, { outcome: 'synthesized', answer: 'ok' });
+});
+
+test('a synthesize call slower than synthesizeTimeoutMs resolves to timeout, and the underlying request is aborted', async () => {
+  let sawAbort = false;
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    synthesizeTimeoutMs: 30,
+    fetchImpl: fakeFetch(
+      (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = init.signal as AbortSignal;
+          signal.addEventListener('abort', () => {
+            sawAbort = true;
+            const error = new Error('The operation was aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        }),
+    ),
+  });
+
+  const result = await provider.synthesize(synthesisRequest());
+  assert.equal(result.outcome, 'timeout');
+  assert.equal(sawAbort, true);
+});
+
+test('a non-OK HTTP status on synthesize resolves to unavailable, never a throw', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async () => ({ ok: false, status: 500, json: async () => ({}) })),
+  });
+
+  const result = await provider.synthesize(synthesisRequest());
+  assert.equal(result.outcome, 'unavailable');
+});
+
+test('a rejected fetch on synthesize (connection refused / runtime not running) resolves to unavailable', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:11434');
+    }),
+  });
+
+  const result = await provider.synthesize(synthesisRequest());
+  assert.equal(result.outcome, 'unavailable');
+});

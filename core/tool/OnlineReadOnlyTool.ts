@@ -7,6 +7,7 @@ import { canonicalizeAllowedRoot } from './LocalFilesystemPathGuard.js';
 import { GIT_DIFF_TOOL_ID, GIT_STATUS_TOOL_ID, LocalGitInspectionTool } from './LocalGitInspectionTool.js';
 import { RestrictedOnlineTool } from './RestrictedOnlineTool.js';
 import type { SpecializedTool, SpecializedToolInvocationInput, SpecializedToolInvocationResult } from './SpecializedToolInvocationContract.js';
+import { KNOWLEDGE_SEARCH_TOOL_ID } from '../knowledge/KnowledgeSearchTool.js';
 
 export const PROJECT_SEARCH_TEXT_TOOL_ID = 'fs.searchText';
 const GITHUB_TOOL_ID_PREFIX = 'github.';
@@ -30,17 +31,20 @@ export class OnlineReadOnlyTool implements SpecializedTool {
   private readonly validations: LocalAuthorizedCommandTool;
   private readonly restricted = new RestrictedOnlineTool();
   private readonly github: SpecializedTool | undefined;
+  private readonly knowledge: SpecializedTool | undefined;
 
   public constructor(
     allowedRoot: string,
     commands: readonly AuthorizedCommandDefinition[] = [],
     githubTool?: SpecializedTool,
+    knowledgeTool?: SpecializedTool,
   ) {
     this.root = canonicalizeAllowedRoot(allowedRoot);
     this.git = new LocalGitInspectionTool(this.root);
     this.filesystem = new LocalFilesystemInspectionTool(this.root);
     this.validations = new LocalAuthorizedCommandTool(this.root, commands);
     this.github = githubTool;
+    this.knowledge = knowledgeTool;
   }
 
   public invoke(
@@ -56,6 +60,9 @@ export class OnlineReadOnlyTool implements SpecializedTool {
       return this.filesystem.invoke(input);
     }
     if (input.toolId === PROJECT_SEARCH_TEXT_TOOL_ID) return this.search(input);
+    if (input.toolId === KNOWLEDGE_SEARCH_TOOL_ID) {
+      return this.knowledge ? this.knowledge.invoke(input) : this.restricted.invoke(input);
+    }
     if (input.toolId.startsWith('validation.')) {
       return Object.keys(input.payload).length === 0 ? this.validations.invoke(input) : this.invalidPayload(input.toolId);
     }
