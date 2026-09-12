@@ -488,3 +488,67 @@ test('Gemini diagnostics distinguish safe technical outcomes without logging cre
   assert.equal(serialized.includes(secretPrompt), false);
   assert.equal(serialized.includes('raw remote body'), false);
 });
+
+// --- Etapa 4: classify() ---
+
+const CLASSIFICATION_REQUEST = {
+  text: 'então corrige',
+  projectDisplayName: 'Neuro Hub Pro',
+  taskStatus: 'completed',
+  taskRequestSummary: 'diagnostica o grafico do BDEFS',
+  taskResultSummary: 'o corte acontece por overflow no card',
+  requestedAt: '2026-09-12T00:00:00.000Z',
+};
+
+test('Etapa 4: classify() aceita uma resposta bem formada e devolve a categoria', async () => {
+  const cognitive = provider(async () => response(200, geminiEnvelope({ category: 'write', reasoningSummary: 'continuação do diagnóstico', confidence: 0.9 })));
+  const result = await cognitive.classify?.(CLASSIFICATION_REQUEST);
+  assert.deepEqual(result, { outcome: 'classified', category: 'write', reasoningSummary: 'continuação do diagnóstico', confidence: 0.9 });
+});
+
+test('Etapa 4: classify() rejeita uma categoria fora do conjunto fechado', async () => {
+  const cognitive = provider(async () => response(200, geminiEnvelope({ category: 'deleteEverything', reasoningSummary: 'x', confidence: 0.9 })));
+  const result = await cognitive.classify?.(CLASSIFICATION_REQUEST);
+  assert.equal(result?.outcome, 'invalidResponse');
+});
+
+test('Etapa 4: classify() rebaixa "write"/"closeAll" com baixa confiança para "ambiguous" (defesa em profundidade, mesmo se o modelo ignorar a instrução)', async () => {
+  const write = provider(async () => response(200, geminiEnvelope({ category: 'write', reasoningSummary: 'pouco confiante', confidence: 0.2 })));
+  const writeResult = await write.classify?.(CLASSIFICATION_REQUEST);
+  assert.equal(writeResult?.outcome, 'classified');
+  assert.equal((writeResult as { readonly category?: string })?.category, 'ambiguous');
+
+  const closeAll = provider(async () => response(200, geminiEnvelope({ category: 'closeAll', reasoningSummary: 'pouco confiante', confidence: 0.59 })));
+  const closeAllResult = await closeAll.classify?.(CLASSIFICATION_REQUEST);
+  assert.equal((closeAllResult as { readonly category?: string })?.category, 'ambiguous');
+
+  // Confiança baixa em categorias de baixo risco (analyze/homologate/ordinary/ambiguous) não é rebaixada - só write/closeAll são de alto risco.
+  const analyze = provider(async () => response(200, geminiEnvelope({ category: 'analyze', reasoningSummary: 'pouco confiante', confidence: 0.1 })));
+  const analyzeResult = await analyze.classify?.(CLASSIFICATION_REQUEST);
+  assert.equal((analyzeResult as { readonly category?: string })?.category, 'analyze');
+});
+
+test('Etapa 4: classify() nunca rejeita a Promise em timeout - resolve outcome timeout', async () => {
+  const cognitive = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY,
+    model: MODEL,
+    classifyTimeoutMs: 5,
+    fetchImpl: async (_url, init) =>
+      new Promise<FakeResponse>((_resolve, reject) => {
+        (init.signal as AbortSignal).addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      }),
+  });
+  const result = await cognitive.classify?.(CLASSIFICATION_REQUEST);
+  assert.deepEqual(result, { outcome: 'timeout' });
+});
+
+test('Etapa 4: classify() valida classifyTimeoutMs no construtor, mesma faixa do timeoutMs de decide', () => {
+  assert.throws(
+    () => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, classifyTimeoutMs: 15_000 }),
+    InvalidCognitiveModelProviderInputError,
+  );
+});

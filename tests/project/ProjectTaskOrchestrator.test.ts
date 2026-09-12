@@ -14,6 +14,43 @@ import type {
   ProjectTaskExecutor,
 } from '../../core/project/ProjectTaskExecutor.js';
 import type { ActiveProject } from '../../core/project/ProjectConversationContext.js';
+import type {
+  CognitiveClassificationRequest,
+  CognitiveClassificationResult,
+  CognitiveDecisionRequest,
+  CognitiveDecisionResult,
+  CognitiveModelProvider,
+} from '../../core/cognition/index.js';
+
+/**
+ * Etapa 4: a controllable `CognitiveModelProvider` that only ever implements
+ * `classify` - `decide` is present only because the interface requires it,
+ * and every test asserts it is never actually invoked by this orchestrator
+ * (the contextual layer never uses the operational decision loop). Never
+ * makes a real network/model call.
+ */
+class FakeCognitiveModelProvider implements CognitiveModelProvider {
+  public readonly classifyCalls: CognitiveClassificationRequest[] = [];
+  public nextResult: CognitiveClassificationResult = {
+    outcome: 'classified',
+    category: 'ambiguous',
+    reasoningSummary: 'fake',
+    confidence: 0.9,
+  };
+  public delayMs = 0;
+
+  public async decide(_request: CognitiveDecisionRequest): Promise<CognitiveDecisionResult> {
+    throw new Error('FakeCognitiveModelProvider.decide must never be called by ProjectTaskOrchestrator.');
+  }
+
+  public async classify(request: CognitiveClassificationRequest): Promise<CognitiveClassificationResult> {
+    this.classifyCalls.push(request);
+    if (this.delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    }
+    return this.nextResult;
+  }
+}
 
 const GENERIC_MESSAGES = [
   'Não consegui concluir essa consulta agora; tente novamente em instantes.',
@@ -58,6 +95,7 @@ interface FixtureOptions {
   readonly neuroValidations?: readonly { readonly id: string; readonly executable: string; readonly args: readonly string[] }[];
   readonly neuroClose?: { readonly enabled: boolean; readonly tagging?: 'auto' | 'disabled' };
   readonly neuroMigrationPaths?: readonly string[];
+  readonly cognitiveModelProvider?: CognitiveModelProvider;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -100,7 +138,7 @@ function fixture(options: FixtureOptions = {}) {
   const memoryFile = join(root, 'memory.json');
   const store = new FileMemoryStore(memoryFile);
   const executor = new FakeExecutor();
-  const orchestrator = new ProjectTaskOrchestrator(registry, store, executor, 'test');
+  const orchestrator = new ProjectTaskOrchestrator(registry, store, executor, 'test', undefined, options.cognitiveModelProvider);
   return { root, memoryFile, entries, registry, store, executor, orchestrator, remotesByProjectId };
 }
 
@@ -272,15 +310,19 @@ test('variações de frase autorizam o fechamento: "pode fechar" e "homologado, 
   }
 });
 
-test('uma frase ambígua isolada ("homologado" sozinho, sem menção a fechar) não autoriza fechamento', async () => {
+test('feedback isolado ("homologado" sozinho, sem menção a fechar) registra homologação mas nunca autoriza fechamento (Etapa 4)', async () => {
   const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
   const neuro = entries[0]!;
-  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const before = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const beforeTask = orchestrator.currentTask('c1')!;
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'isso está homologado e funcionando bem', 'e2', NOW);
   const task = orchestrator.currentTask('c1')!;
-  assert.equal(task.status, 'awaitingHomologation', 'sem menção explícita a fechar, a tarefa deve continuar aguardando homologação');
-  assert.match(task.requestText, /Ajuste solicitado agora pelo usuário/, 'deve ter sido tratado como continuação, não como fechamento');
-  void reply;
+  assert.equal(task.status, 'awaitingHomologation', 'feedback isolado, sem menção a fechar, nunca dispara commit/push/tag');
+  assert.equal(task.commitHash, undefined);
+  assert.ok(task.homologatedAt, 'o feedback de aprovação deve ficar registrado');
+  assert.equal(task.taskId, beforeTask.taskId, 'permanece a mesma tarefa, nunca vira uma edição nova');
+  assert.match(reply!.message, /registrei/i);
+  void before;
 });
 
 test('fechamento correto após homologação: FAZ real -> awaitingHomologation -> "fecha tudo" real gera commit e push reais', async () => {
@@ -301,6 +343,235 @@ test('fechamento correto após homologação: FAZ real -> awaitingHomologation -
   const remoteHead = git(remote, ['rev-parse', 'HEAD']).trim();
   assert.equal(localHead, remoteHead);
   assert.equal(localHead, task.commitHash);
+});
+
+// --- Etapa 4: conversa natural, intenção contextual e continuidade de tarefa ---
+
+test('(1) "vê o que está acontecendo" é reconhecido como ANALISA, determinístico, sem chamar o classificador semântico', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  const { entries, executor, orchestrator } = fixture({ cognitiveModelProvider: fake });
+  const neuro = entries[0]!;
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'Esse gráfico do BDEFS está cortando a classificação no celular, vê o que está acontecendo.', 'e1', NOW);
+  assert.equal(executor.calls.length, 1);
+  assert.equal(executor.calls[0]!.authorization, 'readOnly');
+  assert.equal(fake.classifyCalls.length, 0, 'um verbo determinístico não deve gastar chamada semântica');
+  assert.match(reply!.message, /somente leitura/i);
+});
+
+test('(2) após um diagnóstico concluído, "então corrige" abre FAZ usando o diagnóstico anterior como contexto', async () => {
+  const { entries, executor, orchestrator } = fixture();
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+  const analyzed = orchestrator.currentTask('c1')!;
+  assert.equal(analyzed.status, 'completed', 'uma ANALISA bem-sucedida termina completed, não fica em OPEN_STATUSES');
+
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'então corrige', 'e2', NOW);
+  assert.equal(executor.calls.length, 2);
+  assert.equal(executor.calls[1]!.authorization, 'writeAuthorized');
+  assert.match(executor.calls[1]!.instructions, /Tarefa anterior:.*BDEFS/s);
+  assert.match(executor.calls[1]!.instructions, /Ajuste solicitado agora pelo usuário: então corrige/);
+  const task = orchestrator.currentTask('c1')!;
+  assert.notEqual(task.taskId, analyzed.taskId, 'é uma tarefa nova, não uma continuação por status');
+  assert.match(reply!.message, /arquivo/i);
+});
+
+test('(3) "e no celular?" sem verbo-gatilho usa o classificador contextual e mantém o assunto, sem inventar uma tarefa nova desconectada', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  fake.nextResult = { outcome: 'classified', category: 'write', reasoningSummary: 'continuação do mesmo bug', confidence: 0.85 };
+  const { entries, executor, orchestrator } = fixture({ cognitiveModelProvider: fake });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'e no celular?', 'e2', NOW);
+  assert.equal(fake.classifyCalls.length, 1);
+  assert.equal(fake.classifyCalls[0]!.text, 'e no celular?');
+  assert.match(fake.classifyCalls[0]!.taskRequestSummary ?? '', /BDEFS/);
+  assert.equal(executor.calls.length, 2);
+  assert.equal(executor.calls[1]!.authorization, 'writeAuthorized');
+  assert.match(executor.calls[1]!.instructions, /Tarefa anterior:.*BDEFS/s);
+  void reply;
+});
+
+test('(4) "corrige isso também" continua o assunto certo (determinístico + contexto anterior)', async () => {
+  const { entries, executor, orchestrator } = fixture();
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+  await orchestrator.handle('c1', activeOf(neuro), 'corrige isso também', 'e2', NOW);
+  assert.equal(executor.calls.length, 2);
+  assert.match(executor.calls[1]!.instructions, /BDEFS/);
+});
+
+test('(6) "ficou bom, pode fechar" homologa e fecha na mesma mensagem', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'ficou bom, pode fechar', 'e2', NOW);
+  const task = orchestrator.currentTask('c1')!;
+  assert.equal(task.status, 'closed');
+  assert.ok(task.homologatedAt, 'a homologação também deve ter sido registrada');
+  assert.match(reply!.message, /Push: confirmado/);
+});
+
+test('(8) uma correção pedida depois de "ficou bom" invalida a homologação anterior; fechar exige nova homologação/rodada', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  await orchestrator.handle('c1', activeOf(neuro), 'ficou bom', 'e2', NOW);
+  const homologated = orchestrator.currentTask('c1')!;
+  assert.ok(homologated.homologatedAt);
+
+  await orchestrator.handle('c1', activeOf(neuro), 'pera, aumenta um pouco o espaçamento', 'e3', NOW);
+  const afterChange = orchestrator.currentTask('c1')!;
+  assert.equal(afterChange.status, 'awaitingHomologation');
+  assert.equal(afterChange.homologatedAt, undefined, 'a homologação anterior não pode sobreviver a uma nova alteração');
+
+  const closeReply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e4', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  void closeReply;
+});
+
+test('(9) "fecha" sem nenhuma tarefa aberta não toca em Git', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  // Sem tarefa nenhuma, "fecha" nem chega a ser reconhecido como intenção de
+  // fechamento (a confirmação curta só conta com hasCloseEligibleTask) - a
+  // mensagem cai para o resto do pipeline conversacional comum.
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e1', NOW);
+  assert.equal(reply, undefined);
+  assert.equal(commitCount(neuro.workspace!.root), 1);
+});
+
+test('(9b) "fecha" sozinho, sem o estado atual ter sido homologado, é RECUSADO explicitamente (nunca vira edição, nunca fecha)', async () => {
+  const { entries, executor, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const callsBefore = executor.calls.length;
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e2', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'awaitingHomologation', 'sem homologação do estado atual, "fecha" nunca fecha');
+  assert.equal(executor.calls.length, callsBefore, '"fecha" recusado nunca deve virar mais uma instrução de edição');
+  assert.match(reply!.message, /ainda não foi homologado/i);
+  assert.equal(commitCount(neuro.workspace!.root), 1);
+});
+
+test('(9c) "fecha" funciona normalmente depois que o estado atual foi de fato homologado ("ficou bom" antes)', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  await orchestrator.handle('c1', activeOf(neuro), 'ficou bom', 'e2', NOW);
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e3', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.match(reply!.message, /Push: confirmado/);
+});
+
+test('(bug reportado) fluxo completo: homologa -> edita (invalida) -> "fecha" é RECUSADO -> re-homologa -> "fecha" agora funciona', async () => {
+  const { entries, executor, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+
+  // 1. "ficou bom" -> registra homologação da versão atual.
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  await orchestrator.handle('c1', activeOf(neuro), 'ficou bom', 'e2', NOW);
+  assert.ok(orchestrator.currentTask('c1')!.homologatedAt);
+
+  // 2. "pera, muda mais uma coisa" -> FAZ, novo estado, homologação anterior invalidada.
+  const editCallsBefore = executor.calls.length;
+  await orchestrator.handle('c1', activeOf(neuro), 'pera, muda mais uma coisa', 'e3', NOW);
+  const afterEdit = orchestrator.currentTask('c1')!;
+  assert.equal(afterEdit.status, 'awaitingHomologation');
+  assert.equal(afterEdit.homologatedAt, undefined, 'a homologação anterior nunca pode sobreviver a uma nova edição');
+  assert.equal(executor.calls.length, editCallsBefore + 1);
+
+  // 3. "fecha" -> DEVE RECUSAR o fechamento: o estado atual ainda não foi homologado.
+  const closeCallsBefore = executor.calls.length;
+  const refused = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e4', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'awaitingHomologation');
+  assert.equal(orchestrator.currentTask('c1')!.commitHash, undefined, 'nenhum commit pode ter sido criado');
+  assert.equal(executor.calls.length, closeCallsBefore, 'a recusa nunca deve acionar o executor');
+  assert.match(refused!.message, /ainda não foi homologado/i);
+  assert.equal(commitCount(neuro.workspace!.root), 1, 'nenhum commit real deve existir ainda');
+
+  // 4. "agora sim, ficou bom" -> registra nova homologação, agora do estado atual.
+  const reHomologated = await orchestrator.handle('c1', activeOf(neuro), 'agora sim, ficou bom', 'e5', NOW);
+  assert.ok(orchestrator.currentTask('c1')!.homologatedAt);
+  assert.match(reHomologated!.message, /registrei/i);
+
+  // 5. "fecha" -> agora sim executa FECHA TUDO.
+  const closed = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e6', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.match(closed!.message, /Push: confirmado/);
+  assert.equal(commitCount(neuro.workspace!.root), 2, 'exatamente um commit real, criado só na etapa 5');
+});
+
+test('(10) "fecha o modal" nunca é interpretado como FECHA TUDO Git, mesmo com tarefa aguardando homologação', async () => {
+  const { entries, executor, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const callsBefore = executor.calls.length;
+  await orchestrator.handle('c1', activeOf(neuro), 'fecha o modal que fica aberto', 'e2', NOW);
+  const task = orchestrator.currentTask('c1')!;
+  assert.notEqual(task.status, 'closed', '"fecha o modal" nunca deve disparar o fechamento Git');
+  assert.equal(task.commitHash, undefined);
+  assert.equal(executor.calls.length, callsBefore + 1, 'deve ter sido tratado como mais uma instrução de edição, não Git');
+  assert.equal(commitCount(neuro.workspace!.root), 1);
+});
+
+test('(11) trocar de projeto na mesma conversa nunca herda o contexto/tarefa do projeto anterior', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  const { entries, orchestrator } = fixture({ cognitiveModelProvider: fake });
+  const [neuro, lsb] = entries;
+  await orchestrator.handle('c1', activeOf(neuro!), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.projectId, 'neuro-hub-pro');
+
+  // Uma mensagem curta e elíptica no LSB nunca deve ver o resumo do Neuro.
+  const reply = await orchestrator.handle('c1', activeOf(lsb!), 'e essa outra parte?', 'e2', NOW);
+  assert.equal(reply, undefined, 'sem tarefa relacionada no LSB, cai para conversa comum, nunca herda o assunto do Neuro');
+  assert.equal(fake.classifyCalls.length, 0, 'nunca vale a pena classificar sem nenhuma tarefa relacionada ao projeto ativo');
+});
+
+test('(12) uma referência ambígua classificada como tal nunca provoca escrita', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  fake.nextResult = { outcome: 'classified', category: 'ambiguous', reasoningSummary: 'não está claro', confidence: 0.4 };
+  const { entries, executor, orchestrator } = fixture({ cognitiveModelProvider: fake });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+  const callsBefore = executor.calls.length;
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'e essa outra parte?', 'e2', NOW);
+  assert.equal(executor.calls.length, callsBefore, 'ambíguo nunca aciona o executor');
+  assert.match(reply!.message, /confirmar/i);
+});
+
+test('(13) falha do classificador semântico (unavailable) nunca eleva permissão', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  fake.nextResult = { outcome: 'unavailable', reason: 'fora do ar' };
+  const { entries, executor, orchestrator } = fixture({ cognitiveModelProvider: fake });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+  const callsBefore = executor.calls.length;
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'e essa outra parte?', 'e2', NOW);
+  assert.equal(executor.calls.length, callsBefore, 'falha do classificador nunca eleva para FAZ/FECHA');
+  assert.match(reply!.message, /confirmar/i);
+});
+
+test('(14) timeout do classificador semântico nunca eleva permissão', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  fake.nextResult = { outcome: 'timeout' };
+  const { entries, executor, orchestrator } = fixture({ cognitiveModelProvider: fake });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
+  const callsBefore = executor.calls.length;
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'e essa outra parte?', 'e2', NOW);
+  assert.equal(executor.calls.length, callsBefore, 'timeout do classificador nunca eleva para FAZ/FECHA');
+  assert.match(reply!.message, /confirmar/i);
+});
+
+test('(15) uma frase determinística explícita nunca gasta uma chamada semântica, mesmo com provider configurado', async () => {
+  const fake = new FakeCognitiveModelProvider();
+  const { entries, executor, orchestrator } = fixture({ neuroClose: { enabled: true }, cognitiveModelProvider: fake });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  await orchestrator.handle('c1', activeOf(neuro), 'ficou bom, pode fechar', 'e2', NOW);
+  assert.equal(executor.calls.length, 1);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.equal(fake.classifyCalls.length, 0, 'todo o fluxo acima é resolvido deterministicamente, sem custo de modelo');
 });
 
 test('FECHA TUDO detecta migration entre os arquivos da tarefa e interrompe antes de qualquer commit', async () => {

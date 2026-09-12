@@ -1,6 +1,9 @@
 import { InvalidCognitiveModelProviderInputError } from './CognitiveModelProviderErrors.js';
 import { parseCognitiveDecision } from './CognitiveDecisionValidator.js';
 import type {
+  CognitiveClassificationCategory,
+  CognitiveClassificationRequest,
+  CognitiveClassificationResult,
   CognitiveConversationRequest,
   CognitiveConversationResult,
   CognitiveDecisionRequest,
@@ -33,6 +36,12 @@ export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 20_000;
  * own generous default for the same reason `respond` already has one.
  */
 export const DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS = 20_000;
+/**
+ * `classify` (Etapa 4) is a single, small routing decision - closer in shape
+ * and latency to `decide` than to `respond`/`synthesize`, so it shares
+ * `decide`'s tight default budget rather than the more generous ones.
+ */
+export const DEFAULT_GEMINI_CLASSIFY_TIMEOUT_MS = 8_000;
 export const MAX_GEMINI_RESPONSE_BYTES = 64 * 1024;
 export const MAX_GEMINI_GENERATED_JSON_CHARS = 16 * 1024;
 export const MAX_GEMINI_CONVERSATION_ANSWER_CHARS = 8_000;
@@ -52,6 +61,8 @@ export interface GeminiCognitiveModelProviderOptions {
   readonly respondTimeoutMs?: number;
   /** Timeout for `synthesize` only; independent of `timeoutMs` and `respondTimeoutMs`. */
   readonly synthesizeTimeoutMs?: number;
+  /** Timeout for `classify` only; independent of the other three. */
+  readonly classifyTimeoutMs?: number;
   readonly fetchImpl?: FetchLike;
   readonly logger?: Logger;
 }
@@ -82,6 +93,21 @@ const SYNTHESIS_SCHEMA = Object.freeze({
     evidence: { type: 'array', items: { type: 'string' }, minItems: 1 },
   },
   required: ['answer', 'evidence'],
+  additionalProperties: false,
+});
+
+const CLASSIFICATION_CATEGORIES: readonly CognitiveClassificationCategory[] = [
+  'ordinary', 'analyze', 'write', 'homologate', 'closeAll', 'ambiguous',
+];
+
+const CLASSIFICATION_SCHEMA = Object.freeze({
+  type: 'object',
+  properties: {
+    category: { type: 'string', enum: CLASSIFICATION_CATEGORIES as unknown as string[] },
+    reasoningSummary: { type: 'string' },
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
+  },
+  required: ['category', 'reasoningSummary', 'confidence'],
   additionalProperties: false,
 });
 
@@ -142,6 +168,28 @@ const DECISION_SYSTEM_INSTRUCTION =
   'Se availableTools incluir "knowledge.search", use-a para consultar documentação, normas ou referências técnicas quando o objetivo pedir conhecimento documentado; mas se o objetivo for sobre o estado atual DESTE projeto (código, configuração, arquitetura) e uma ferramenta real de inspeção (com prefixo "git.", "fs." ou "github.") também estiver disponível, invoque-a antes de concluir apenas com base em knowledge.search - nunca alegue como fato do projeto algo que só veio de uma referência. ' +
   'Retorne somente o objeto JSON solicitado e uma reasoningSummary curta, nunca raciocínio detalhado.';
 
+/**
+ * Etapa 4. Exported for the same reason `SYNTHESIS_SYSTEM_INSTRUCTION` is:
+ * `OllamaCognitiveModelProvider` reuses this exact text instead of drifting
+ * with a second copy. The instruction is deliberately conservative about
+ * 'write'/'closeAll' - a false positive there would spawn a real paid
+ * executor or touch Git, so the model is told to prefer 'ambiguous' whenever
+ * more than one category is plausible.
+ */
+export const CLASSIFICATION_SYSTEM_INSTRUCTION =
+  'Você é a camada de classificação de intenção do Sebastian para tarefas de projeto (não é a camada que executa nada). ' +
+  'Dada a mensagem atual do usuário e o contexto de uma tarefa de projeto (se houver: status, pedido original, resultado/diagnóstico anterior, trocas recentes), classifique a mensagem em exatamente uma categoria: ' +
+  '"ordinary" - conversa comum, não relacionada a analisar, alterar ou fechar a tarefa do projeto; ' +
+  '"analyze" - pedido de investigação/diagnóstico somente leitura sobre o problema da tarefa; ' +
+  '"write" - pedido de alteração/correção real, relacionado ao contexto da tarefa (ex.: continuação de um diagnóstico anterior); ' +
+  '"homologate" - feedback de aprovação/satisfação sobre o resultado já entregue da tarefa, sem pedir para fechar/publicar; ' +
+  '"closeAll" - autorização explícita e inequívoca para fechar/commitar/publicar a tarefa já entregue; ' +
+  '"ambiguous" - não é possível decidir com segurança entre as categorias acima. ' +
+  'Prefira "ambiguous" sempre que a mensagem permitir mais de uma interpretação plausível que levaria a ações diferentes, especialmente entre "write" e "ordinary", ou entre "closeAll" e conversa comum (ex.: "fecha o modal", "fecha essa aba" nunca são "closeAll" - são "ordinary" ou "write" sobre a interface, nunca fechamento de Git). ' +
+  'Sem uma tarefa de projeto no contexto, "write", "homologate" e "closeAll" quase nunca fazem sentido - prefira "ordinary" ou "ambiguous". ' +
+  'Nunca retorne "write" ou "closeAll" com confidence abaixo de 0.6. reasoningSummary é só para diagnóstico interno, nunca mostrado ao usuário - uma frase curta e objetiva. ' +
+  'Retorne somente o objeto JSON solicitado.';
+
 /** Exported so other local `CognitiveModelProvider` adapters (e.g. `OllamaCognitiveModelProvider`) reuse the exact same synthesis rules instead of drifting with a second copy. */
 export const SYNTHESIS_SYSTEM_INSTRUCTION =
   'Você é a camada de síntese operacional do Sebastian. Responda somente ao objetivo atual usando exclusivamente as observações de ferramentas fornecidas como evidência. ' +
@@ -159,6 +207,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
   private readonly timeoutMs: number;
   private readonly respondTimeoutMs: number;
   private readonly synthesizeTimeoutMs: number;
+  private readonly classifyTimeoutMs: number;
   private readonly fetchImpl: FetchLike;
   private readonly logger: Logger | undefined;
 
@@ -191,11 +240,19 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       );
     }
 
+    const classifyTimeoutMs = options.classifyTimeoutMs ?? DEFAULT_GEMINI_CLASSIFY_TIMEOUT_MS;
+    if (!Number.isInteger(classifyTimeoutMs) || classifyTimeoutMs <= 0 || classifyTimeoutMs >= 15_000) {
+      throw new InvalidCognitiveModelProviderInputError(
+        'Gemini cognitive provider classify timeout must be an integer between 1 and 14999 milliseconds.',
+      );
+    }
+
     this.apiKey = options.apiKey;
     this.model = options.model.trim();
     this.timeoutMs = timeoutMs;
     this.respondTimeoutMs = respondTimeoutMs;
     this.synthesizeTimeoutMs = synthesizeTimeoutMs;
+    this.classifyTimeoutMs = classifyTimeoutMs;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     this.logger = options.logger;
   }
@@ -348,6 +405,69 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     return { outcome: 'synthesized', answer: answer.trim() };
   }
 
+  public async classify(request: CognitiveClassificationRequest): Promise<CognitiveClassificationResult> {
+    if (
+      !request || typeof request !== 'object' ||
+      typeof request.text !== 'string' || request.text.trim() === '' ||
+      typeof request.projectDisplayName !== 'string' || request.projectDisplayName.trim() === '' ||
+      typeof request.requestedAt !== 'string' || request.requestedAt.trim() === ''
+    ) {
+      return { outcome: 'invalidResponse', reason: 'Requisição de classificação cognitiva inválida.' };
+    }
+
+    const safeRequest = {
+      text: request.text,
+      projectDisplayName: request.projectDisplayName,
+      ...(request.taskStatus === undefined ? {} : { taskStatus: request.taskStatus }),
+      ...(request.taskRequestSummary === undefined ? {} : { taskRequestSummary: request.taskRequestSummary }),
+      ...(request.taskResultSummary === undefined ? {} : { taskResultSummary: request.taskResultSummary }),
+      ...(request.recentExchanges === undefined ? {} : { recentExchanges: request.recentExchanges }),
+      requestedAt: request.requestedAt,
+    };
+    const result = await this.generateStructured(
+      CLASSIFICATION_SYSTEM_INSTRUCTION,
+      JSON.stringify(safeRequest),
+      CLASSIFICATION_SCHEMA,
+      this.classifyTimeoutMs,
+      request.signal,
+    );
+    if (result.outcome !== 'generated') {
+      this.logOutcome('classify', result.outcome, result);
+      return result.outcome === 'timeout' ? { outcome: 'timeout' } : { outcome: result.outcome, reason: result.reason };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.content) as unknown;
+    } catch {
+      this.logOutcome('classify', 'invalidResponse', result, 'invalidStructuredJson');
+      return { outcome: 'invalidResponse', reason: 'Resposta de classificação não é JSON válido.' };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.logOutcome('classify', 'invalidResponse', result, 'schemaMismatch');
+      return { outcome: 'invalidResponse', reason: 'Resposta de classificação não corresponde ao schema.' };
+    }
+    const { category, reasoningSummary, confidence } = parsed as {
+      readonly category?: unknown;
+      readonly reasoningSummary?: unknown;
+      readonly confidence?: unknown;
+    };
+    const validShape =
+      typeof category === 'string' && (CLASSIFICATION_CATEGORIES as readonly string[]).includes(category) &&
+      typeof reasoningSummary === 'string' && reasoningSummary.trim() !== '' &&
+      typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 &&
+      Object.keys(parsed).every((key) => key === 'category' || key === 'reasoningSummary' || key === 'confidence');
+    if (!validShape) {
+      this.logOutcome('classify', 'invalidResponse', result, 'schemaMismatch');
+      return { outcome: 'invalidResponse', reason: 'Resposta de classificação não corresponde ao schema.' };
+    }
+    // Defense in depth: never trust a high-stakes category at low confidence, even if the model ignored the instruction.
+    const safeCategory: CognitiveClassificationCategory =
+      (category === 'write' || category === 'closeAll') && confidence < 0.6 ? 'ambiguous' : (category as CognitiveClassificationCategory);
+    this.logOutcome('classify', 'responded', result);
+    return { outcome: 'classified', category: safeCategory, reasoningSummary: reasoningSummary.trim().slice(0, 300), confidence };
+  }
+
   private async generateStructured(
     systemInstruction: string,
     userContent: string,
@@ -451,7 +571,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
   }
 
   private logOutcome(
-    operation: 'respond' | 'decide' | 'synthesize',
+    operation: 'respond' | 'decide' | 'synthesize' | 'classify',
     outcome: 'responded' | 'unavailable' | 'timeout' | 'invalidResponse',
     diagnostic: GeminiTechnicalDiagnostic,
     errorCategory = diagnostic.errorCategory,

@@ -1,6 +1,7 @@
 import {
   DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS,
   GeminiCognitiveModelProvider,
+  OllamaCognitiveModelProvider,
   type CognitiveModelProvider,
 } from '../core/cognition/index.js';
 import type { Logger } from '../core/logger.js';
@@ -9,6 +10,8 @@ export const SEBASTIAN_COGNITIVE_PROVIDER_ENV_VAR = 'SEBASTIAN_COGNITIVE_PROVIDE
 export const SEBASTIAN_COGNITIVE_API_KEY_ENV_VAR = 'SEBASTIAN_COGNITIVE_API_KEY';
 export const SEBASTIAN_COGNITIVE_MODEL_ENV_VAR = 'SEBASTIAN_COGNITIVE_MODEL';
 export const SEBASTIAN_COGNITIVE_TIMEOUT_MS_ENV_VAR = 'SEBASTIAN_COGNITIVE_TIMEOUT_MS';
+/** Ollama-only, optional: local runtime address. Never applies to Gemini. */
+export const SEBASTIAN_COGNITIVE_OLLAMA_ENDPOINT_ENV_VAR = 'SEBASTIAN_COGNITIVE_OLLAMA_ENDPOINT';
 
 export function createOnlineCognitiveModelProvider(
   env: NodeJS.ProcessEnv = process.env,
@@ -20,6 +23,7 @@ export function createOnlineCognitiveModelProvider(
     SEBASTIAN_COGNITIVE_API_KEY_ENV_VAR,
     SEBASTIAN_COGNITIVE_MODEL_ENV_VAR,
     SEBASTIAN_COGNITIVE_TIMEOUT_MS_ENV_VAR,
+    SEBASTIAN_COGNITIVE_OLLAMA_ENDPOINT_ENV_VAR,
   ].some((name) => env[name] !== undefined);
 
   if (!hasAnyCognitiveConfiguration) {
@@ -36,6 +40,27 @@ export function createOnlineCognitiveModelProvider(
     });
     return undefined;
   }
+
+  if (provider === 'ollama') {
+    const model = env[SEBASTIAN_COGNITIVE_MODEL_ENV_VAR];
+    if (typeof model !== 'string' || model.trim() === '') {
+      throw new Error('Online Ollama cognitive configuration is incomplete.');
+    }
+    const endpoint = env[SEBASTIAN_COGNITIVE_OLLAMA_ENDPOINT_ENV_VAR];
+    if (endpoint !== undefined && endpoint.trim() === '') {
+      throw new Error('Online Ollama cognitive endpoint configuration is invalid.');
+    }
+    logger?.info('Online cognitive provider configuration resolved.', {
+      provider: 'ollama',
+      model: model.trim(),
+      outcome: 'configured',
+    });
+    return new OllamaCognitiveModelProvider({
+      model,
+      ...(endpoint === undefined ? {} : { endpoint }),
+    });
+  }
+
   if (provider !== 'gemini') {
     throw new Error('Online cognitive provider configuration is invalid or unsupported.');
   }

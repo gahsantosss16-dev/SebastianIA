@@ -1,7 +1,10 @@
 import { InvalidCognitiveModelProviderInputError } from './CognitiveModelProviderErrors.js';
 import { parseCognitiveDecision } from './CognitiveDecisionValidator.js';
-import { MAX_GEMINI_CONVERSATION_ANSWER_CHARS, SYNTHESIS_SYSTEM_INSTRUCTION } from './GeminiCognitiveModelProvider.js';
+import { CLASSIFICATION_SYSTEM_INSTRUCTION, MAX_GEMINI_CONVERSATION_ANSWER_CHARS, SYNTHESIS_SYSTEM_INSTRUCTION } from './GeminiCognitiveModelProvider.js';
 import type {
+  CognitiveClassificationCategory,
+  CognitiveClassificationRequest,
+  CognitiveClassificationResult,
   CognitiveDecisionRequest,
   CognitiveDecisionResult,
   CognitiveModelProvider,
@@ -13,6 +16,11 @@ const DEFAULT_ENDPOINT = 'http://127.0.0.1:11434';
 const DEFAULT_TIMEOUT_MS = 30_000;
 /** `synthesize` composes a final answer from potentially large Tool observations - same rationale as `GeminiCognitiveModelProvider`'s dedicated, larger `synthesizeTimeoutMs`. */
 const DEFAULT_SYNTHESIZE_TIMEOUT_MS = 60_000;
+/** `classify` (Etapa 4) is one small routing decision - a shorter default than `decide`, but still generous for a local runtime that may be running on modest hardware. */
+const DEFAULT_CLASSIFY_TIMEOUT_MS = 15_000;
+const CLASSIFICATION_CATEGORIES: readonly CognitiveClassificationCategory[] = [
+  'ordinary', 'analyze', 'write', 'homologate', 'closeAll', 'ambiguous',
+];
 
 type FetchLike = (input: string, init: Readonly<Record<string, unknown>>) => Promise<{
   readonly ok: boolean;
@@ -31,6 +39,8 @@ export interface OllamaCognitiveModelProviderOptions {
   readonly fetchImpl?: FetchLike;
   /** Timeout for `synthesize` only; independent of `timeoutMs` (which continues to bound only `decide`) - see `DEFAULT_SYNTHESIZE_TIMEOUT_MS`. */
   readonly synthesizeTimeoutMs?: number;
+  /** Timeout for `classify` only; independent of the other two. */
+  readonly classifyTimeoutMs?: number;
 }
 
 const SYSTEM_PROMPT = `Você é SebastianIA, um assistente pessoal generalista com capacidades operacionais. Converse naturalmente e use conhecimento geral e raciocínio em qualquer assunto legítimo. Acompanhe o idioma, o grau de informalidade e abreviações do usuário sem caricaturar, perder precisão ou forçar gírias e emojis. Responda direto, sem aberturas genéricas de atendimento nem repetição de contexto óbvio; use leve humor e personalidade quando couber e mantenha profissionalismo quando o assunto exigir. Ferramentas, memória e ações entram somente quando necessárias; não restrinja sua identidade a programação, tarefas técnicas ou produtividade. A mensagem atual define a intenção, e memória anterior só deve ser usada quando semanticamente relacionada ou necessária para resolver uma referência ou continuação.
@@ -66,6 +76,7 @@ export class OllamaCognitiveModelProvider implements CognitiveModelProvider {
   private readonly endpoint: string;
   private readonly timeoutMs: number;
   private readonly synthesizeTimeoutMs: number;
+  private readonly classifyTimeoutMs: number;
   private readonly fetchImpl: FetchLike;
 
   public constructor(options: OllamaCognitiveModelProviderOptions) {
@@ -86,6 +97,7 @@ export class OllamaCognitiveModelProvider implements CognitiveModelProvider {
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.synthesizeTimeoutMs = options.synthesizeTimeoutMs ?? DEFAULT_SYNTHESIZE_TIMEOUT_MS;
+    this.classifyTimeoutMs = options.classifyTimeoutMs ?? DEFAULT_CLASSIFY_TIMEOUT_MS;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   }
 
@@ -215,6 +227,98 @@ export class OllamaCognitiveModelProvider implements CognitiveModelProvider {
       }
 
       return { outcome: 'synthesized', answer: answer.trim() };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        return { outcome: 'timeout' };
+      }
+      return { outcome: 'unavailable', reason: this.describeUnavailability(error) };
+    } finally {
+      clearTimeout(timer);
+      request.signal?.removeEventListener('abort', abortFromCaller);
+    }
+  }
+
+  /**
+   * Etapa 4. Mirrors `GeminiCognitiveModelProvider.classify` - same shared
+   * `CLASSIFICATION_SYSTEM_INSTRUCTION`, same closed category set, same
+   * defense-in-depth downgrade of a low-confidence "write"/"closeAll" to
+   * "ambiguous" - only the HTTP transport differs.
+   */
+  public async classify(request: CognitiveClassificationRequest): Promise<CognitiveClassificationResult> {
+    if (
+      !request || typeof request !== 'object' ||
+      typeof request.text !== 'string' || request.text.trim() === '' ||
+      typeof request.projectDisplayName !== 'string' || request.projectDisplayName.trim() === '' ||
+      typeof request.requestedAt !== 'string' || request.requestedAt.trim() === ''
+    ) {
+      return { outcome: 'invalidResponse', reason: 'Requisição de classificação cognitiva inválida.' };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.classifyTimeoutMs);
+    const abortFromCaller = (): void => controller.abort();
+    if (request.signal?.aborted === true) controller.abort();
+    else request.signal?.addEventListener('abort', abortFromCaller, { once: true });
+
+    try {
+      const safeRequest = {
+        text: request.text,
+        projectDisplayName: request.projectDisplayName,
+        ...(request.taskStatus === undefined ? {} : { taskStatus: request.taskStatus }),
+        ...(request.taskRequestSummary === undefined ? {} : { taskRequestSummary: request.taskRequestSummary }),
+        ...(request.taskResultSummary === undefined ? {} : { taskResultSummary: request.taskResultSummary }),
+        ...(request.recentExchanges === undefined ? {} : { recentExchanges: request.recentExchanges }),
+        requestedAt: request.requestedAt,
+      };
+      const response = await this.fetchImpl(`${this.endpoint}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: this.model,
+          stream: false,
+          format: 'json',
+          messages: [
+            { role: 'system', content: CLASSIFICATION_SYSTEM_INSTRUCTION },
+            { role: 'user', content: JSON.stringify(safeRequest) },
+          ],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        return { outcome: 'unavailable', reason: `Ollama respondeu com status HTTP ${response.status}.` };
+      }
+
+      const body = (await response.json()) as { readonly message?: { readonly content?: unknown } };
+      const content = body?.message?.content;
+      if (typeof content !== 'string' || content.trim() === '') {
+        return { outcome: 'invalidResponse', reason: 'Resposta do Ollama não trouxe conteúdo de mensagem.' };
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        return { outcome: 'invalidResponse', reason: 'Resposta de classificação não é JSON válido.' };
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return { outcome: 'invalidResponse', reason: 'Resposta de classificação não corresponde ao schema.' };
+      }
+      const { category, reasoningSummary, confidence } = parsed as {
+        readonly category?: unknown;
+        readonly reasoningSummary?: unknown;
+        readonly confidence?: unknown;
+      };
+      const validShape =
+        typeof category === 'string' && (CLASSIFICATION_CATEGORIES as readonly string[]).includes(category) &&
+        typeof reasoningSummary === 'string' && reasoningSummary.trim() !== '' &&
+        typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1;
+      if (!validShape) {
+        return { outcome: 'invalidResponse', reason: 'Resposta de classificação não corresponde ao schema.' };
+      }
+      const safeCategory: CognitiveClassificationCategory =
+        (category === 'write' || category === 'closeAll') && confidence < 0.6 ? 'ambiguous' : (category as CognitiveClassificationCategory);
+      return { outcome: 'classified', category: safeCategory, reasoningSummary: reasoningSummary.trim().slice(0, 300), confidence };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         return { outcome: 'timeout' };

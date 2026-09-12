@@ -26,7 +26,7 @@ async function startOnlineServer(): Promise<void> {
     const cognitiveModelProvider = createOnlineCognitiveModelProvider(process.env, logger);
     const dataDir = resolveSebastianDataDirectory();
     const projectContext = createConfiguredProjectContext(dataDir);
-    const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir);
+    const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir, process.env, undefined, cognitiveModelProvider);
     const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env, projectContext, projectTaskOrchestrator);
     // A second reader over the same memory.json document - safe by
     // FileMemoryStore's own design (every read re-parses from disk, no

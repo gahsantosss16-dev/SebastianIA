@@ -147,6 +147,44 @@ export type CognitiveSynthesisResult =
   | { readonly outcome: 'invalidResponse'; readonly reason: string };
 
 /**
+ * Etapa 4: the closed set of routing categories a classification call may
+ * return. Deliberately not domain-specific naming (no "FAZ"/"ANALISA" here) -
+ * this is a generic cognition-layer seam any orchestrator can reuse, and
+ * `ProjectTaskContextualIntent` (core/project/) is the one caller today that
+ * maps these onto its own vocabulary. `'ambiguous'` exists precisely so a
+ * classification is never forced into a wrong bucket: the caller turns it
+ * into a plain confirmation question, never into a guess.
+ */
+export type CognitiveClassificationCategory = 'ordinary' | 'analyze' | 'write' | 'homologate' | 'closeAll' | 'ambiguous';
+
+/**
+ * Bounded, already-summarized context for a single classification call -
+ * never the raw conversation, never the whole task history. `taskStatus`/
+ * `taskRequestSummary`/`taskResultSummary` describe at most one task (the
+ * caller's own state machine decides which, if any, is relevant) - this seam
+ * only ever classifies, it never receives enough to decide or act on its own.
+ */
+export interface CognitiveClassificationRequest {
+  readonly text: string;
+  readonly projectDisplayName: string;
+  readonly taskStatus?: string;
+  readonly taskRequestSummary?: string;
+  readonly taskResultSummary?: string;
+  readonly recentExchanges?: readonly {
+    readonly requestText: string;
+    readonly summary: string;
+  }[];
+  readonly requestedAt: string;
+  readonly signal?: AbortSignal;
+}
+
+export type CognitiveClassificationResult =
+  | { readonly outcome: 'classified'; readonly category: CognitiveClassificationCategory; readonly reasoningSummary: string; readonly confidence: number }
+  | { readonly outcome: 'unavailable'; readonly reason: string }
+  | { readonly outcome: 'timeout' }
+  | { readonly outcome: 'invalidResponse'; readonly reason: string };
+
+/**
  * Substitutable boundary for the general cognitive engine (SPEC-048) -
  * mirrors `ModelProvider`'s role as a seam Core/Tool/GoalExecutionOrchestrator
  * never depend on by concrete name. A `CognitiveModelProvider` only ever
@@ -161,4 +199,12 @@ export interface CognitiveModelProvider {
   respond?(request: CognitiveConversationRequest): Promise<CognitiveConversationResult>;
   /** Optional evidence-only presentation seam; it cannot select or invoke a Tool or change authorization. */
   synthesize?(request: CognitiveSynthesisRequest): Promise<CognitiveSynthesisResult>;
+  /**
+   * Optional, retrocompatible (Etapa 4): classifies one message into a
+   * closed routing category. Purely advisory - it never grants a
+   * capability; the caller's own deterministic state (active project, task
+   * status/policy) still decides whether the returned category is actually
+   * actionable.
+   */
+  classify?(request: CognitiveClassificationRequest): Promise<CognitiveClassificationResult>;
 }

@@ -4,12 +4,41 @@ import type { ProjectRegistry } from './ProjectRegistry.js';
 import type { ProjectDescriptor } from './ProjectTypes.js';
 import type { ActiveProject, ProjectReply } from './ProjectConversationContext.js';
 import { resolveValidatedWorkspaceRoot } from './ProjectWorkspacePolicy.js';
-import { classifyProjectTaskIntent } from './ProjectTaskIntent.js';
+import { classifyProjectTaskIntent, detectHomologationFeedback, isShortCloseConfirmation } from './ProjectTaskIntent.js';
+import { resolveContextualIntent } from './ProjectTaskContextualIntent.js';
 import type { ProjectTaskExecutor, ProjectTaskExecutionResult } from './ProjectTaskExecutor.js';
 import type { GoalAuthorization } from '../development/GoalExecutionContract.js';
+import type { CognitiveModelProvider } from '../cognition/index.js';
 import { runGitCommand } from '../tool/LocalGitCommandRunner.js';
 import { runProjectValidations, type ProjectValidationOutcome } from './ProjectValidationRunner.js';
 import { GitCloseOrchestrator, type GitCloseResult } from './GitCloseOrchestrator.js';
+
+/**
+ * Free-standing messages returned by the contextual layer - kept as named
+ * constants so tests can assert on them without hardcoding Portuguese prose
+ * inline, and so the wording only lives in one place.
+ */
+const HOMOLOGATION_ACKNOWLEDGED_MESSAGE =
+  'Entendido! Registrei que você aprovou o resultado. Quando quiser, é só pedir para eu fechar.';
+const AMBIGUOUS_INTENT_MESSAGE =
+  'Não tenho certeza se você quer que eu analise isso ou já aplique uma correção relacionada à tarefa. Pode confirmar?';
+const CURRENT_STATE_NOT_HOMOLOGATED_MESSAGE =
+  'O estado atual da tarefa ainda não foi homologado (houve uma alteração desde a última aprovação). Confirme que ficou bom antes de pedir para fechar, ou aprove e feche na mesma mensagem (ex.: "ficou bom, pode fechar").';
+/** Below this many words, a message with no explicit verb is treated as elliptical (depends on the prior task's context) rather than a self-contained new request - see `looksElliptical`. */
+const ELLIPTICAL_MESSAGE_MAX_WORDS = 8;
+
+/**
+ * Heuristic distinguishing "então corrige"/"e no celular?" (depends on the
+ * prior task to mean anything) from "corrige o typo no README" (a
+ * self-contained request that should never silently inherit an unrelated
+ * task's context just because one happens to exist). Word count only - no
+ * model call, no extra latency, and a false negative here just means a
+ * self-contained-looking message does not get prior-task context it may
+ * still not have needed.
+ */
+function looksElliptical(text: string): boolean {
+  return text.trim().split(/\s+/).filter((word) => word !== '').length <= ELLIPTICAL_MESSAGE_MAX_WORDS;
+}
 
 const TASKS = 'project-tasks';
 const MAX_DIFF_CHARS = 4_000;
@@ -41,6 +70,16 @@ export interface ProjectTaskRecord {
   readonly commitHash?: string;
   /** Set once FECHA TUDO successfully creates and publishes a tag (Etapa 3). */
   readonly tagName?: string;
+  /**
+   * Etapa 4: set when natural positive feedback ("ficou bom") was recognized
+   * while this task was `awaitingHomologation`. Purely informational/UX - it
+   * never gates FECHA TUDO by itself (Etapa 3's close already never required
+   * a prior homologation message) and it is never carried over into a new
+   * record after a further edit, which is exactly what invalidates it
+   * without any extra logic: every persisted record after a real edit is
+   * built from scratch, never spread from the previous one.
+   */
+  readonly homologatedAt?: string;
 }
 
 /**
@@ -76,6 +115,14 @@ export class ProjectTaskOrchestrator {
     private readonly executor: ProjectTaskExecutor,
     private readonly environmentId: string,
     private readonly gitCloseOrchestrator: GitCloseOrchestrator = new GitCloseOrchestrator(),
+    /**
+     * Etapa 4, optional and retrocompatible: powers the contextual
+     * classification layer only. Every deterministic behavior (Etapas 1-3)
+     * is identical whether or not this is provided - its absence simply
+     * means ambiguous/cross-status messages fall back to a confirmation
+     * question instead of a model-assisted guess.
+     */
+    private readonly cognitiveModelProvider?: CognitiveModelProvider,
   ) {}
 
   public currentTask(conversationId: string): ProjectTaskRecord | undefined {
@@ -97,17 +144,70 @@ export class ProjectTaskOrchestrator {
     if (!project) return undefined;
 
     const existing = this.currentTask(conversationId);
+    const sameProjectExisting = existing?.projectId === project.id ? existing : undefined;
+
+    // Etapa 4: natural positive feedback is recognized independently of (and
+    // alongside) a close intent in the same message - "ficou bom, fecha"
+    // both records homologation AND triggers the close below, in one turn.
+    // Never authorizes anything by itself - see `ProjectTaskRecord.homologatedAt`.
+    let existingAfterHomologation = sameProjectExisting;
+    let homologatedJustNow = false;
+    if (detectHomologationFeedback(text) && sameProjectExisting?.status === 'awaitingHomologation') {
+      existingAfterHomologation = { ...sameProjectExisting, homologatedAt: requestedAt, updatedAt: requestedAt };
+      this.persist(existingAfterHomologation);
+      homologatedJustNow = true;
+    }
+
+    // Etapa 4 fix: a bare "fecha" must reflect approval of the CURRENT
+    // state, never merely "some close-eligible status exists". A task
+    // `committedPendingPush` already had its close explicitly authorized
+    // earlier (the commit exists; this is only a push retry), so it stays
+    // eligible on status alone. A task still `awaitingHomologation`,
+    // though, is only eligible for the bare/short confirmation once
+    // `homologatedAt` reflects THIS state - never a homologation left over
+    // from a version that was since edited away (persisting a new edit
+    // never carries the old `homologatedAt` forward - see the write path
+    // below - so this can never go stale on its own).
+    const hasCloseEligibleTask =
+      existingAfterHomologation !== undefined &&
+      (existingAfterHomologation.status === 'committedPendingPush' ||
+        (existingAfterHomologation.status === 'awaitingHomologation' && existingAfterHomologation.homologatedAt !== undefined));
 
     // Intent is classified on every message BEFORE any continuation decision.
     // Without this, a task left `awaitingHomologation` would swallow the very
     // next message as "keep editing" and FECHA TUDO would never be reachable
     // through natural conversation - see GitCloseOrchestrator/handleClose.
-    const intent = classifyProjectTaskIntent(text);
-    if (intent === 'closeAll') {
-      return this.handleClose(project, activeProject, existing, executionId, requestedAt);
+    // `hasCloseEligibleTask` is what lets a bare "fecha"/"encerra" ever mean
+    // Git at all - see SHORT_CLOSE_CONFIRMATION_PATTERN in ProjectTaskIntent.ts.
+    // Explicit, self-contained phrases ("fecha tudo", "pode fechar") are
+    // unaffected - they are their own authorization for whatever state
+    // exists right now, exactly like Etapa 3 already tested.
+    const deterministicIntent = classifyProjectTaskIntent(text, { hasCloseEligibleTask });
+    if (deterministicIntent === 'closeAll') {
+      return this.handleClose(project, activeProject, existingAfterHomologation, executionId, requestedAt);
     }
 
-    const continuing = existing !== undefined && existing.projectId === project.id && OPEN_STATUSES.includes(existing.status);
+    // The message structurally looks like a bare close confirmation but was
+    // not honored above only because the current state lacks homologation -
+    // refuse explicitly. Never fall through silently into "continuing" below,
+    // which would misread "fecha" as yet another edit instruction sent to
+    // the executor.
+    if (
+      existingAfterHomologation?.status === 'awaitingHomologation' &&
+      existingAfterHomologation.homologatedAt === undefined &&
+      isShortCloseConfirmation(text)
+    ) {
+      return { project: activeProject, message: CURRENT_STATE_NOT_HOMOLOGATED_MESSAGE };
+    }
+
+    // A homologation-only message ("ficou bom" with no close intent
+    // alongside) just acknowledges and stops here - the FAZ →
+    // awaitingHomologation → FECHA TUDO separation from Etapa 3 is preserved.
+    if (homologatedJustNow) {
+      return { project: activeProject, message: HOMOLOGATION_ACKNOWLEDGED_MESSAGE };
+    }
+
+    const continuing = existingAfterHomologation !== undefined && OPEN_STATUSES.includes(existingAfterHomologation.status);
 
     let authorization: GoalAuthorization;
     let instructions: string;
@@ -115,25 +215,67 @@ export class ProjectTaskOrchestrator {
     let createdAt: string;
 
     if (continuing) {
-      const openTask = existing!;
+      const openTask = existingAfterHomologation!;
       authorization = openTask.authorization;
       instructions = `Tarefa anterior: ${openTask.requestText}\nResultado anterior: ${openTask.summary}\nAjuste solicitado agora pelo usuário: ${text}`;
       taskId = openTask.taskId;
       createdAt = openTask.createdAt;
     } else {
-      if (intent === undefined) return undefined;
-      authorization = intent === 'write' ? 'writeAuthorized' : 'readOnly';
+      let effectiveIntent = deterministicIntent;
+      // A short, elliptical message ("então corrige", "e no celular?") with a
+      // related task from this project - even one no longer "open" by status
+      // (e.g. a finished ANALISA) - offers that task's context to the new
+      // one. A long, self-contained request never inherits unrelated history.
+      const offerPriorTaskContext = sameProjectExisting !== undefined && looksElliptical(text);
+
+      if (effectiveIntent === undefined && offerPriorTaskContext) {
+        const resolved = await resolveContextualIntent(this.cognitiveModelProvider, {
+          text,
+          projectDisplayName: project.displayName,
+          relatedTask: {
+            status: sameProjectExisting!.status,
+            requestText: sameProjectExisting!.requestText,
+            summary: sameProjectExisting!.summary,
+          },
+          hasCloseEligibleTask,
+          requestedAt,
+          ...(signal === undefined ? {} : { signal }),
+        });
+
+        if (resolved === 'closeAll') {
+          return this.handleClose(project, activeProject, existingAfterHomologation, executionId, requestedAt);
+        }
+        if (resolved === 'homologate') {
+          if (sameProjectExisting!.status === 'awaitingHomologation') {
+            this.persist({ ...sameProjectExisting!, homologatedAt: requestedAt, updatedAt: requestedAt });
+            return { project: activeProject, message: HOMOLOGATION_ACKNOWLEDGED_MESSAGE };
+          }
+          return undefined;
+        }
+        if (resolved === 'ambiguous') {
+          return { project: activeProject, message: AMBIGUOUS_INTENT_MESSAGE };
+        }
+        if (resolved === 'ordinary') {
+          return undefined;
+        }
+        effectiveIntent = resolved;
+      }
+
+      if (effectiveIntent === undefined) return undefined;
+      authorization = effectiveIntent === 'write' ? 'writeAuthorized' : 'readOnly';
       if (authorization === 'writeAuthorized' && project.workspace?.localWrite?.enabled !== true) {
         return {
           project: activeProject,
           message: `Escrita não está habilitada para o projeto ${project.displayName} nesta configuração. Posso analisar (somente leitura), mas não posso aplicar alterações aqui.`,
         };
       }
-      instructions = text;
+      instructions = offerPriorTaskContext
+        ? `Tarefa anterior: ${sameProjectExisting!.requestText}\nResultado anterior: ${sameProjectExisting!.summary}\nAjuste solicitado agora pelo usuário: ${text}`
+        : text;
       taskId = randomUUID();
       createdAt = requestedAt;
-      if (existing?.projectId === project.id && existing.status === 'committedPendingPush') {
-        instructions = `${instructions}\n\n(Aviso interno: havia um commit local (${existing.commitHash ?? '?'}) ainda pendente de push de uma tarefa anterior; o rastreamento conversacional dessa tarefa foi substituído por esta nova, mas o commit pendente continua existindo localmente.)`;
+      if (existingAfterHomologation?.status === 'committedPendingPush') {
+        instructions = `${instructions}\n\n(Aviso interno: havia um commit local (${existingAfterHomologation.commitHash ?? '?'}) ainda pendente de push de uma tarefa anterior; o rastreamento conversacional dessa tarefa foi substituído por esta nova, mas o commit pendente continua existindo localmente.)`;
       }
     }
 

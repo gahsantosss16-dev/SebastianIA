@@ -339,3 +339,59 @@ test('a rejected fetch on synthesize (connection refused / runtime not running) 
   const result = await provider.synthesize(synthesisRequest());
   assert.equal(result.outcome, 'unavailable');
 });
+
+// --- Etapa 4: classify() ---
+
+const CLASSIFICATION_REQUEST = {
+  text: 'então corrige',
+  projectDisplayName: 'Neuro Hub Pro',
+  taskStatus: 'completed',
+  taskRequestSummary: 'diagnostica o grafico do BDEFS',
+  taskResultSummary: 'o corte acontece por overflow no card',
+  requestedAt: '2026-09-12T00:00:00.000Z',
+};
+
+test('a valid Ollama classify() response round-trips into a classified result', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: { content: JSON.stringify({ category: 'write', reasoningSummary: 'continuação', confidence: 0.8 }) } }),
+    })),
+  });
+  const result = await provider.classify?.(CLASSIFICATION_REQUEST);
+  assert.deepEqual(result, { outcome: 'classified', category: 'write', reasoningSummary: 'continuação', confidence: 0.8 });
+});
+
+test('Ollama classify() also downgrades a low-confidence write/closeAll to ambiguous', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    fetchImpl: fakeFetch(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: { content: JSON.stringify({ category: 'closeAll', reasoningSummary: 'pouco confiante', confidence: 0.1 }) } }),
+    })),
+  });
+  const result = await provider.classify?.(CLASSIFICATION_REQUEST);
+  assert.equal((result as { readonly category?: string })?.category, 'ambiguous');
+});
+
+test('Ollama classify() times out without throwing when the runtime never responds', async () => {
+  const provider = new OllamaCognitiveModelProvider({
+    model: 'llama3.1:8b',
+    classifyTimeoutMs: 5,
+    fetchImpl: fakeFetch(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init.signal as AbortSignal).addEventListener('abort', () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        }),
+    ),
+  });
+  const result = await provider.classify?.(CLASSIFICATION_REQUEST);
+  assert.deepEqual(result, { outcome: 'timeout' });
+});

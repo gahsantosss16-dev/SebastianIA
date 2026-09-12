@@ -5,6 +5,7 @@ import { ProjectConversationContext } from '../core/project/ProjectConversationC
 import { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
 import { ClaudeCliProjectTaskExecutor } from '../core/project/ClaudeCliProjectTaskExecutor.js';
 import type { ProjectTaskExecutor } from '../core/project/ProjectTaskExecutor.js';
+import type { CognitiveModelProvider } from '../core/cognition/index.js';
 import { FileMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js';
 import { createGitHubProjectRegistry } from './GitHubProjectRegistryConfiguration.js';
 import { loadProjectPolicies } from '../core/project/ProjectWorkspacePolicy.js';
@@ -56,11 +57,16 @@ export function createConfiguredProjectContext(dataDir: string, env: NodeJS.Proc
  * project selection - just a different namespace, never a separate,
  * competing persistence mechanism. `executor` is overridable purely for
  * tests; production always gets the real `ClaudeCliProjectTaskExecutor`.
+ * `cognitiveModelProvider` (Etapa 4) is the same instance the rest of the
+ * application already builds (or `undefined` when no provider is
+ * configured) - passed straight through, never a second one constructed
+ * here, and every deterministic behavior is identical without it.
  */
 export function createConfiguredProjectTaskOrchestrator(
   dataDir: string,
   env: NodeJS.ProcessEnv = process.env,
   executor: ProjectTaskExecutor = new ClaudeCliProjectTaskExecutor(),
+  cognitiveModelProvider?: CognitiveModelProvider,
 ): ProjectTaskOrchestrator | undefined {
   if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
   return new ProjectTaskOrchestrator(
@@ -68,6 +74,8 @@ export function createConfiguredProjectTaskOrchestrator(
     new FileMemoryStore(resolveMemoryFilePath(dataDir)),
     executor,
     env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server',
+    undefined,
+    cognitiveModelProvider,
   );
 }
 
