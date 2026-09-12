@@ -19,10 +19,13 @@ export interface GitHubRemoteRepository {
 }
 
 /**
- * Declared access level for a project. Only `read-only` is supported this
- * round - no write, branch-creation, commit, push, PR or workflow-dispatch
- * capability exists anywhere in this codebase yet, so there is deliberately
- * no broader value to choose here.
+ * Declared access level for the GitHub API surface (`GitHubReadOnlyTool`).
+ * Only `read-only` is supported - no branch-creation, PR or workflow-dispatch
+ * capability exists anywhere in this codebase, so there is deliberately no
+ * broader value to choose here. This is unrelated to `workspace.close`
+ * below: a local `git commit`/`push`/tag against an already-checked-out
+ * repository uses the operator's own pre-configured Git/SSH credentials on
+ * this machine, never the GitHub API/token this field gates.
  */
 export interface ProjectPermissions {
   readonly access: 'read-only';
@@ -67,5 +70,30 @@ export interface ProjectDescriptor {
      * implicitly because an executor happens to be available.
      */
     readonly localWrite?: { readonly enabled: boolean };
+    /**
+     * Explicit, per-project opt-in for FECHA TUDO (commit/push/tag of a
+     * homologated task). Separate from `localWrite`: writing files locally
+     * and pushing to a remote are different blast radii, each opted into on
+     * its own. `remoteName` defaults to `'origin'`, `allowedBranch` defaults
+     * to `remoteRepository.defaultBranch` above (reused, never duplicated).
+     * `tagging: 'auto'` creates a deterministic tag after a successful push;
+     * `'disabled'` (the default) never tags automatically - a project's own
+     * policy about when a checkpoint deserves a tag is set once, here, by a
+     * human, rather than inferred from the loaded policy documents' prose.
+     */
+    readonly close?: {
+      readonly enabled: boolean;
+      readonly remoteName?: string;
+      readonly allowedBranch?: string;
+      readonly tagging?: 'auto' | 'disabled';
+    };
+    /**
+     * Relative path prefixes that identify a migration file for this
+     * project (e.g. `"supabase/migrations/"`). Absent or empty means the
+     * project has no migration concept and the close flow's migration gate
+     * always passes. Never a glob engine - plain prefix matching only, kept
+     * deliberately simple.
+     */
+    readonly migrations?: { readonly paths: readonly string[] };
   };
 }

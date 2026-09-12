@@ -23,7 +23,9 @@
           { "path": "CLAUDE.md", "required": true, "topics": [] }
         ],
         "validations": [],
-        "localWrite": { "enabled": false }
+        "localWrite": { "enabled": false },
+        "close": { "enabled": false, "remoteName": "origin", "tagging": "disabled" },
+        "migrations": { "paths": [] }
       }
     }
   ]

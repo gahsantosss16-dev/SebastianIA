@@ -34,12 +34,19 @@ class FakeExecutor implements ProjectTaskExecutor {
   }
 }
 
-function initGitRepo(dir: string): void {
-  execFileSync('git', ['init', '-q'], { cwd: dir });
-  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
-  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
-  execFileSync('git', ['add', '-A'], { cwd: dir });
-  execFileSync('git', ['commit', '-q', '-m', 'initial'], { cwd: dir });
+function git(cwd: string, args: readonly string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' }).toString();
+}
+
+function initGitRepoWithRemote(checkout: string, remote: string): void {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: checkout });
+  git(checkout, ['config', 'user.email', 'test@example.com']);
+  git(checkout, ['config', 'user.name', 'Test']);
+  git(checkout, ['add', '-A']);
+  git(checkout, ['commit', '-q', '-m', 'initial']);
+  execFileSync('git', ['init', '--bare', '-q', '-b', 'main', remote]);
+  git(checkout, ['remote', 'add', 'origin', remote]);
+  git(checkout, ['push', '-q', '-u', 'origin', 'main']);
 }
 
 function commitCount(dir: string): number {
@@ -49,6 +56,8 @@ function commitCount(dir: string): number {
 interface FixtureOptions {
   readonly neuroLocalWrite?: boolean;
   readonly neuroValidations?: readonly { readonly id: string; readonly executable: string; readonly args: readonly string[] }[];
+  readonly neuroClose?: { readonly enabled: boolean; readonly tagging?: 'auto' | 'disabled' };
+  readonly neuroMigrationPaths?: readonly string[];
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -57,18 +66,21 @@ function fixture(options: FixtureOptions = {}) {
     { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro'], localWrite: options.neuroLocalWrite ?? true },
     { id: 'lsb-service', displayName: 'LSB Service', aliases: ['LSB'], localWrite: false },
   ];
+  const remotesByProjectId = new Map<string, string>();
   const entries: ProjectDescriptor[] = specs.map((spec) => {
     const checkout = join(root, spec.id);
+    const remote = join(root, `${spec.id}-remote.git`);
     mkdirSync(checkout);
     writeFileSync(join(checkout, 'CLAUDE.md'), `# ${spec.id}`);
     writeFileSync(join(checkout, 'AGENTS.md'), `# ${spec.id} agents`);
-    initGitRepo(checkout);
+    initGitRepoWithRemote(checkout, remote);
+    remotesByProjectId.set(spec.id, remote);
     return {
       id: spec.id,
       displayName: spec.displayName,
       aliases: spec.aliases,
       resourceKind: 'github-repository',
-      remoteRepository: { owner: 'test', repository: spec.id, defaultBranch: 'main' },
+      remoteRepository: { owner: 'test', repository: `${spec.id}-remote`, defaultBranch: 'main' },
       permissions: { access: 'read-only' },
       workspace: {
         root: checkout,
@@ -79,6 +91,8 @@ function fixture(options: FixtureOptions = {}) {
         ],
         validations: spec.id === 'neuro-hub-pro' ? options.neuroValidations ?? [] : [],
         localWrite: { enabled: spec.localWrite },
+        ...(spec.id === 'neuro-hub-pro' && options.neuroClose ? { close: { enabled: options.neuroClose.enabled, tagging: options.neuroClose.tagging ?? 'disabled' } } : {}),
+        ...(spec.id === 'neuro-hub-pro' && options.neuroMigrationPaths ? { migrations: { paths: options.neuroMigrationPaths } } : {}),
       },
     };
   });
@@ -87,7 +101,7 @@ function fixture(options: FixtureOptions = {}) {
   const store = new FileMemoryStore(memoryFile);
   const executor = new FakeExecutor();
   const orchestrator = new ProjectTaskOrchestrator(registry, store, executor, 'test');
-  return { root, memoryFile, entries, registry, store, executor, orchestrator };
+  return { root, memoryFile, entries, registry, store, executor, orchestrator, remotesByProjectId };
 }
 
 function activeOf(entry: ProjectDescriptor, policyStatus: 'loaded' | 'unavailable' = 'loaded'): ActiveProject {
@@ -222,4 +236,96 @@ test('reopening with a new orchestrator instance over the same store preserves t
   assert.equal(after?.taskId, before.taskId);
   assert.equal(after?.status, before.status);
   assert.equal(after?.projectId, before.projectId);
+});
+
+test('FECHA TUDO sem tarefa aguardando homologação é recusado, sem tocar em Git', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e1', NOW);
+  assert.match(reply!.message, /não há tarefa aguardando homologação/i);
+  assert.equal(commitCount(neuro.workspace!.root), 1);
+});
+
+test('FECHA TUDO ("fecha tudo") nunca é engolido pela continuação de uma tarefa awaitingHomologation', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const afterFaz = orchestrator.currentTask('c1')!;
+  assert.equal(afterFaz.status, 'awaitingHomologation');
+
+  const closeReply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
+  assert.doesNotMatch(closeReply!.message, /Ajuste solicitado agora pelo usuário/, 'não pode ser tratado como uma edição de continuação');
+  const afterClose = orchestrator.currentTask('c1')!;
+  assert.equal(afterClose.status, 'closed');
+  assert.ok(afterClose.commitHash);
+});
+
+test('variações de frase autorizam o fechamento: "pode fechar" e "homologado, fecha"', async () => {
+  for (const phrase of ['pode fechar', 'homologado, fecha']) {
+    const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+    const neuro = entries[0]!;
+    await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+    const closeReply = await orchestrator.handle('c1', activeOf(neuro), phrase, 'e2', NOW);
+    const task = orchestrator.currentTask('c1')!;
+    assert.equal(task.status, 'closed', `frase "${phrase}" deveria autorizar o fechamento`);
+    assert.match(closeReply!.message, /Push: confirmado/);
+  }
+});
+
+test('uma frase ambígua isolada ("homologado" sozinho, sem menção a fechar) não autoriza fechamento', async () => {
+  const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'isso está homologado e funcionando bem', 'e2', NOW);
+  const task = orchestrator.currentTask('c1')!;
+  assert.equal(task.status, 'awaitingHomologation', 'sem menção explícita a fechar, a tarefa deve continuar aguardando homologação');
+  assert.match(task.requestText, /Ajuste solicitado agora pelo usuário/, 'deve ter sido tratado como continuação, não como fechamento');
+  void reply;
+});
+
+test('fechamento correto após homologação: FAZ real -> awaitingHomologation -> "fecha tudo" real gera commit e push reais', async () => {
+  const { entries, orchestrator, remotesByProjectId } = fixture({ neuroClose: { enabled: true, tagging: 'auto' } });
+  const neuro = entries[0]!;
+  const remote = remotesByProjectId.get('neuro-hub-pro')!;
+
+  const fazReply = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  assert.match(fazReply!.message, /aguardando sua homologação/i);
+
+  const closeReply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
+  const task = orchestrator.currentTask('c1')!;
+  assert.equal(task.status, 'closed');
+  assert.match(closeReply!.message, /Push: confirmado/);
+  assert.match(closeReply!.message, /Tag: neuro-hub-pro-homologado-.*publicada/);
+
+  const localHead = git(neuro.workspace!.root, ['rev-parse', 'HEAD']).trim();
+  const remoteHead = git(remote, ['rev-parse', 'HEAD']).trim();
+  assert.equal(localHead, remoteHead);
+  assert.equal(localHead, task.commitHash);
+});
+
+test('FECHA TUDO detecta migration entre os arquivos da tarefa e interrompe antes de qualquer commit', async () => {
+  const { entries, registry, root } = fixture({ neuroClose: { enabled: true }, neuroMigrationPaths: ['migrations/'] });
+  const neuro = entries[0]!;
+  // Executor dedicado, que escreve diretamente dentro de migrations/ (o FakeExecutor padrão não simula isso).
+  const migrationOrchestrator = new ProjectTaskOrchestrator(
+    registry,
+    new FileMemoryStore(join(root, 'memory-migration.json')),
+    {
+      async execute(request) {
+        mkdirSync(join(request.workspaceRoot, 'migrations'), { recursive: true });
+        writeFileSync(join(request.workspaceRoot, 'migrations', '0001_new_table.sql'), 'create table x();');
+        return { outcome: 'completed', summary: 'Migration criada.' };
+      },
+    },
+    'test',
+  );
+  await migrationOrchestrator.handle('c1', activeOf(neuro), 'Sebastian, cria uma tabela nova', 'e1', NOW);
+  const afterFaz = migrationOrchestrator.currentTask('c1')!;
+  assert.equal(afterFaz.status, 'awaitingHomologation');
+
+  const closeReply = await migrationOrchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
+  assert.match(closeReply!.message, /migration/i);
+  const afterClose = migrationOrchestrator.currentTask('c1')!;
+  assert.equal(afterClose.status, 'awaitingHomologation', 'migration detectada deve manter a tarefa aberta, sem avançar para closed');
+  assert.equal(commitCount(neuro.workspace!.root), 1);
 });

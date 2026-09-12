@@ -16,8 +16,26 @@ const WRITE_INTENT_PATTERN = /\b(?:faca|facam|fazer|corrige|corrija|corrigir|imp
 /** ANALISA - read-only investigation verbs; never a trigger for FAZ. */
 const ANALYZE_INTENT_PATTERN = /\b(?:analisa|analise|analisar|investiga|investigue|investigar|verifica|verifique|verificar)\b|\bveja\s+o\s+que\b/;
 
-/** "fecha tudo" - recognized explicitly so it never collapses into WRITE_AUTHORIZED by accident. */
-const CLOSE_ALL_INTENT_PATTERN = /\bfecha(?:r)?\s+tudo\b/;
+/**
+ * FECHA TUDO - recognized explicitly so it never collapses into
+ * WRITE_AUTHORIZED by accident (it is checked first). Deliberately narrow,
+ * same precision-over-recall rationale as WRITE_INTENT_PATTERN, but here the
+ * stakes are higher (a real commit/push/tag), so an isolated homologation
+ * word or an isolated "pode fechar" alone is not enough - "homologado"/
+ * "aprovado" only counts when it appears near an actual "fech-" verb (either
+ * order), and a bare "pode fechar"/"manda fechar" is still an explicit,
+ * unambiguous imperative on its own. A message like "isso está homologado"
+ * with no mention of closing never matches.
+ */
+const CLOSE_VERB = 'fecha(?:r)?';
+const HOMOLOGATION_WORD = '(?:homologad[oa]|homologo|aprovad[oa])';
+const CLOSE_ALL_INTENT_PATTERN = new RegExp(
+  `\\bfecha(?:r)?\\s+tudo\\b` +
+    `|\\bpode\\s+fechar\\b` +
+    `|\\bmanda(?:r)?\\s+fechar\\b` +
+    `|\\b${HOMOLOGATION_WORD}\\b[^.!?\\n]{0,40}\\b${CLOSE_VERB}\\b` +
+    `|\\b${CLOSE_VERB}\\b[^.!?\\n]{0,40}\\b${HOMOLOGATION_WORD}\\b`,
+);
 
 export type ProjectTaskIntentKind = 'analyze' | 'write' | 'closeAll';
 

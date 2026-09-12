@@ -17,6 +17,24 @@ export function validateWorkspace(workspace: ProjectDescriptor['workspace']): vo
   }
   if (!Array.isArray(workspace.validations) || workspace.validations.some(command => !command.id?.trim() || !command.executable?.trim() || !Array.isArray(command.args) || command.args.some((arg: unknown) => typeof arg !== 'string') || (command.timeoutMs !== undefined && (!Number.isInteger(command.timeoutMs) || command.timeoutMs <= 0)))) throw new TypeError('Invalid validation metadata.');
   if (workspace.localWrite !== undefined && (typeof workspace.localWrite !== 'object' || workspace.localWrite === null || typeof workspace.localWrite.enabled !== 'boolean')) throw new TypeError('Invalid localWrite configuration.');
+  if (workspace.close !== undefined) {
+    const close = workspace.close;
+    const validShape =
+      close && typeof close === 'object' &&
+      typeof close.enabled === 'boolean' &&
+      (close.remoteName === undefined || (typeof close.remoteName === 'string' && close.remoteName.trim() !== '')) &&
+      (close.allowedBranch === undefined || (typeof close.allowedBranch === 'string' && close.allowedBranch.trim() !== '')) &&
+      (close.tagging === undefined || close.tagging === 'auto' || close.tagging === 'disabled');
+    if (!validShape) throw new TypeError('Invalid close configuration.');
+  }
+  if (workspace.migrations !== undefined) {
+    const migrations = workspace.migrations;
+    const validShape =
+      migrations && typeof migrations === 'object' &&
+      Array.isArray(migrations.paths) &&
+      migrations.paths.every((path: unknown) => typeof path === 'string' && path.trim() !== '');
+    if (!validShape) throw new TypeError('Invalid migrations configuration.');
+  }
 }
 
 export interface LoadedProjectPolicy {
