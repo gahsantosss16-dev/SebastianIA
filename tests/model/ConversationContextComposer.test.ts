@@ -53,6 +53,31 @@ test('classifies "e agora?", "como ficou aquilo?" and "onde paramos?" as continu
   }
 });
 
+test('never classifies "e agora" as continuationReference when it is only a substring inside another word ("nele agora")', () => {
+  const composer = new ConversationContextComposer();
+
+  const realFailingMessage =
+    'Sebastian, vamos trabalhar no Neuro Hub Pro.\n' +
+    'Quero que você veja como o projeto está hoje e me diga o que você consegue fazer por mim diretamente nele agora, na prática.\n' +
+    'Não quero explicação de arquitetura, código interno, testes ou como você funciona por trás.\n' +
+    'Quero funcionalidades: coisas que eu posso pedir aqui na conversa e você consegue realmente executar no Neuro para mim.';
+
+  const composed = composer.compose({ text: realFailingMessage, rememberedFacts: [], recentExchanges: [] });
+  assert.notEqual(composed.intent, 'continuationReference');
+
+  // "continua" must not fire as a false boundary inside an accented word
+  // like "continuação" either (JS's built-in \b treats accented letters as
+  // non-word characters, which would otherwise let it through).
+  const insideAccentedWord = composer.compose({ text: 'Escrevi um resumo sobre a continuação do trabalho.', rememberedFacts: [], recentExchanges: [] });
+  assert.notEqual(insideAccentedWord.intent, 'continuationReference');
+
+  // The real markers still fire on their own, as whole words/phrases.
+  for (const text of ['E agora, como fica?', 'Continua de onde parou.', 'Como ficou o relatório?']) {
+    const composed = composer.compose({ text, rememberedFacts: [], recentExchanges: [] });
+    assert.equal(composed.intent, 'continuationReference', `expected "${text}" to still be continuationReference`);
+  }
+});
+
 test('classifies short, referent-dependent follow-ups as ellipticalContinuationReference only when a recent exchange exists', () => {
   const composer = new ConversationContextComposer();
   const recentExchanges = [exchange('e1', 'como eu faço pra criar um site?', 'Você pode usar HTML e CSS.', '2026-08-28T00:00:00.000Z')];

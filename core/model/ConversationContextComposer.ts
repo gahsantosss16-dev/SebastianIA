@@ -40,8 +40,25 @@ export interface ConversationContextComposerInput {
   readonly recentExchanges: readonly RecentExchangeRecord[];
 }
 
-/** Short, generic references to "keep going with whatever we were just doing" - order-agnostic substrings, deliberately few and specific. */
+/** Short, generic references to "keep going with whatever we were just doing" - deliberately few and specific, matched with word-boundary safety (see `buildMarkerPattern`) so none of them can fire merely because it appears as a substring inside an unrelated word. Confirmed false positive this guards against: "e agora" must not match inside "...diretamente nele agora, na prática" - a plain `.includes()` check matched it because "nele agora" contains the raw substring "e agora". */
 const CONTINUATION_MARKERS: readonly string[] = ['continua', 'e agora', 'como ficou', 'onde paramos', 'no que paramos'];
+
+/**
+ * Word characters for the boundary check below, including the accented Latin
+ * letters Portuguese text uses. JS's built-in `\b` only recognizes ASCII
+ * `\w`, so it treats an accented letter as a non-word character and would
+ * still let e.g. "continua" match as a false boundary inside "continuação" -
+ * this explicit class avoids that.
+ */
+const WORD_CHAR_CLASS = 'a-z0-9à-öø-ÿ_';
+
+/** Builds a marker matcher that only fires on a whole-word (or whole-phrase) occurrence, never on a bare substring inside another word. */
+function buildMarkerPattern(marker: string): RegExp {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+');
+  return new RegExp(`(?<![${WORD_CHAR_CLASS}])${escaped}(?![${WORD_CHAR_CLASS}])`);
+}
+
+const CONTINUATION_MARKER_PATTERNS: readonly RegExp[] = CONTINUATION_MARKERS.map(buildMarkerPattern);
 
 /** A resumption reference names a subject ("projeto"/"tarefa"/"trabalho") together with an explicit intent to continue it - distinct from, and checked before, the bare continuation markers above. */
 const RESUMPTION_VERB = 'continuar';
@@ -128,7 +145,7 @@ export class ConversationContextComposer {
   private isContinuationReference(lowerText: string): boolean {
     const trimmed = lowerText.trim();
     if (
-      CONTINUATION_MARKERS.some((marker) => lowerText.includes(marker)) ||
+      CONTINUATION_MARKER_PATTERNS.some((pattern) => pattern.test(lowerText)) ||
       /^(e\s|entao\s|então\s|nesse caso\b|neste caso\b|sobre isso\b|quanto a isso\b)/.test(trimmed) ||
       /\b(disso|nisso)\b/.test(trimmed) ||
       /\b(?:as|os)\s+(?:duas|dois|ambas|ambos)\b/.test(trimmed)

@@ -171,7 +171,18 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
         };
       }
     }
-    if (projectReply) return { status: 'completed', output: { finalResult: projectReply, memoryExtras: { conversationTurn: { requestText: text, summary: projectReply.message, kind: 'projectContext' } } } };
+    // A project reply that only identified/loaded the project
+    // (`taskConnectionPending`) never has its own real answer to give when
+    // the same message also carries a genuine conversational question or
+    // request - e.g. "vamos trabalhar no Neuro Hub Pro... o que você
+    // consegue fazer por mim?". Instead of returning the identification
+    // boilerplate as if it had answered that question, fall through into the
+    // normal conversational pipeline below with the full original text - the
+    // project selection itself was already persisted as a side effect of
+    // `projectContext.handle` above, independent of what happens next.
+    if (projectReply && !projectReply.taskConnectionPending) {
+      return { status: 'completed', output: { finalResult: projectReply, memoryExtras: { conversationTurn: { requestText: text, summary: projectReply.message, kind: 'projectContext' } } } };
+    }
     const rememberedFacts = this.extractRememberedFacts(input);
     const pendingTasks = this.extractPendingTasks(input);
     const recentExchanges = this.extractRecentExchanges(input);

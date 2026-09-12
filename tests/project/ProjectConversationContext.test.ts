@@ -33,6 +33,40 @@ test('all configured exact aliases resolve and unknown or ambiguous aliases neve
   assert.equal(context.active('c'),null);
   assert.match(context.handle('c','Use Neuro e LSB','e','2026-09-12')!.message,/ambíguo/);
 });
+test('recognizes natural selection/switch phrasing ("usa o Neuro", "agora vamos pro LSB") without letting a long natural message misfire on a mid-sentence preposition', () => {
+  const {context} = fixture();
+  const bare1=context.handle('c1','vamos trabalhar no Neuro Hub Pro','e','2026-09-12')!;
+  assert.equal(bare1.project?.id,'neuro-hub-pro');
+  assert.equal(bare1.taskConnectionPending,undefined,'a bare selection with nothing left over must be a final reply');
+  const bare2=context.handle('c2','usa o Neuro','e','2026-09-12')!;
+  assert.equal(bare2.project?.id,'neuro-hub-pro');
+  assert.equal(bare2.taskConnectionPending,undefined);
+  const bare3=context.handle('c3','agora vamos pro LSB','e','2026-09-12')!;
+  assert.equal(bare3.project?.id,'lsb-service');
+  assert.equal(bare3.taskConnectionPending,undefined);
+  const realFailingMessage='Sebastian, vamos trabalhar no Neuro Hub Pro.\nQuero que você veja como o projeto está hoje e me diga o que você consegue fazer por mim diretamente nele agora, na prática.\nNão quero explicação de arquitetura, código interno, testes ou como você funciona por trás.\nQuero funcionalidades: coisas que eu posso pedir aqui na conversa e você consegue realmente executar no Neuro para mim.';
+  const reply=context.handle('c4',realFailingMessage,'e','2026-09-12')!;
+  assert.equal(reply.project?.id,'neuro-hub-pro');
+  assert.doesNotMatch(reply.message,/desconhecido|ambíguo/);
+  assert.equal(reply.taskConnectionPending,true,'a selection followed by a real request must signal the caller to keep processing');
+});
+test('a selection joined by "e" to a trailing request ("usa o Neuro e me explica X") selects the project and flags the remainder for further processing, without misreading the trailing text as a second project name', () => {
+  const {context} = fixture();
+  const reply=context.handle('c1','Usa o Neuro e me explica como funciona a consolidação.','e','2026-09-12')!;
+  assert.equal(reply.project?.id,'neuro-hub-pro');
+  assert.equal(reply.taskConnectionPending,true);
+});
+test('an intentionally ambiguous "X e Y" naming two real projects at once is still refused, never silently resolved to the first one, even with the new "e" handling', () => {
+  const {context} = fixture();
+  assert.match(context.handle('c1','Use Neuro e LSB','e','2026-09-12')!.message,/ambíguo/);
+});
+test('a long natural question ending in an idiom built on "no"/"na" ("...na prática?") never misfires as a project reference', () => {
+  const {context} = fixture();
+  context.handle('c1','vamos trabalhar no Neuro Hub Pro','e1','2026-09-12');
+  const reply=context.handle('c1','o que você consegue fazer por mim diretamente nele agora, na prática?','e2','2026-09-12')!;
+  assert.doesNotMatch(reply.message,/desconhecido|ambíguo/);
+  assert.equal(reply.project?.id,'neuro-hub-pro');
+});
 test('selection, rule hashes and isolated conversation survive a new context instance; switch does not inherit policy', () => {
   const {context,store,registry}=fixture();
   assert.equal(context.handle('c','Sebastian, analisa X no Neuro','e1','2026-09-12')!.project?.id,'neuro-hub-pro');

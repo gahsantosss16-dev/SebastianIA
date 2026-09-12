@@ -9,19 +9,41 @@ const normalize = (text: string): string =>
  * conversation, but a false positive would spawn a real, paid external
  * agent against a project's checkout, so an ambiguous or vague sentence
  * ("isso não resolve", "vamos discutir a correção") is accepted as a known,
- * intentional limitation rather than guessed at.
+ * intentional limitation rather than guessed at. Includes the informal
+ * imperative "faz" (e.g. "faz isso") alongside the formal "faça"/"façam" -
+ * previously missing, so "faz isso"/"faz do jeito que você falou" fell
+ * through to `undefined` instead of being recognized as FAZ.
  */
-const WRITE_INTENT_PATTERN = /\b(?:faca|facam|fazer|corrige|corrija|corrigir|implementa|implemente|implementar|ajusta|ajuste|ajustar|resolve|resolva|resolver|altera|altere|adiciona|adicione|remove|remova|cria|crie)\b/;
+const WRITE_INTENT_PATTERN = /\b(?:faca|facam|faz|fazer|corrige|corrija|corrigir|implementa|implemente|implementar|ajusta|ajuste|ajustar|resolve|resolva|resolver|altera|altere|adiciona|adicione|remove|remova|cria|crie)\b/;
+
+/**
+ * A meta-question about capability ("o que você consegue fazer", "o que você
+ * pode fazer por mim", "que funcionalidades você consegue fazer", "o que
+ * você faz") asks ABOUT doing something - it is never itself an order to do
+ * it. Confirmed false positive: "Quero que você veja... e me diga o que você
+ * consegue fazer por mim..." classified as FAZ purely because it contains
+ * "fazer", spawning a real executor for a question that asked for none.
+ * Checked before `WRITE_INTENT_PATTERN` so the bare presence of "fazer"
+ * inside one of these specific question shapes never counts - real orders
+ * ("faz isso", "pode fazer a correção", "faça do jeito que você falou")
+ * never match this (no "o que"/"que" interrogative immediately before the
+ * modal), so they still fall through to `WRITE_INTENT_PATTERN` unaffected.
+ */
+const CAPABILITY_QUESTION_PATTERN =
+  /\b(?:o\s+que|que)\s+(?:voce\s+)?(?:consegue|pode|sabe|costuma)\s+fazer\b|\bo\s+que\s+voce\s+faz\b|\bque\s+(?:coisas?|funcionalidades?)\s+(?:voce\s+)?(?:consegue|pode)\s+fazer\b/;
 
 /**
  * ANALISA - read-only investigation verbs; never a trigger for FAZ. Etapa 4
  * adds the informal "vê"/"ve" spellings (vs. only "veja") and a few common
  * ways of asking "what's causing this" without an imperative verb at all -
  * still a closed, precision-over-recall list, never a general "sounds like a
- * question" heuristic.
+ * question" heuristic. `\bve(?:ja)?\s+por\s+que\b` (e.g. "vê por que o
+ * gráfico está cortando") is the same "vê"/"veja" shape as "vê o que",
+ * confirmed needed for "Usa o Neuro e vê por que X" to route to ANALISA in
+ * the same turn as the selection.
  */
 const ANALYZE_INTENT_PATTERN =
-  /\b(?:analisa|analise|analisar|investiga|investigue|investigar|verifica|verifique|verificar|descobre|descubra)\b|\bve(?:ja)?\s+o\s+que\b|\bo\s+que\s+esta\s+causando\b|\bpor\s+que\s+esta\s+assim\b|\bisso\s+esta\s+certo\b/;
+  /\b(?:analisa|analise|analisar|investiga|investigue|investigar|verifica|verifique|verificar|descobre|descubra)\b|\bve(?:ja)?\s+(?:o\s+que|por\s+que)\b|\bo\s+que\s+esta\s+causando\b|\bpor\s+que\s+esta\s+assim\b|\bisso\s+esta\s+certo\b/;
 
 /**
  * HOMOLOGA - natural positive feedback on an `awaitingHomologation` task.
@@ -130,7 +152,7 @@ export function classifyProjectTaskIntent(text: string, context: ProjectTaskInte
   if (context.hasCloseEligibleTask === true && SHORT_CLOSE_CONFIRMATION_PATTERN.test(query)) {
     return 'closeAll';
   }
-  if (WRITE_INTENT_PATTERN.test(query)) {
+  if (WRITE_INTENT_PATTERN.test(query) && !CAPABILITY_QUESTION_PATTERN.test(query)) {
     return 'write';
   }
   if (ANALYZE_INTENT_PATTERN.test(query)) {
