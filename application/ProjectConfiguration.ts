@@ -2,6 +2,9 @@ import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { ProjectRegistry } from '../core/project/ProjectRegistry.js';
 import type { ProjectDescriptor } from '../core/project/ProjectTypes.js';
 import { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
+import { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
+import { ClaudeCliProjectTaskExecutor } from '../core/project/ClaudeCliProjectTaskExecutor.js';
+import type { ProjectTaskExecutor } from '../core/project/ProjectTaskExecutor.js';
 import { FileMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js';
 import { createGitHubProjectRegistry } from './GitHubProjectRegistryConfiguration.js';
 import { loadProjectPolicies } from '../core/project/ProjectWorkspacePolicy.js';
@@ -44,6 +47,28 @@ export function loadConfiguredProjects(registry: ProjectRegistry, env: NodeJS.Pr
 export function createConfiguredProjectContext(dataDir: string, env: NodeJS.ProcessEnv = process.env): ProjectConversationContext | undefined {
   if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
   return new ProjectConversationContext(loadConfiguredProjects(createGitHubProjectRegistry(env), env), new FileMemoryStore(resolveMemoryFilePath(dataDir)), env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server');
+}
+
+/**
+ * Etapa 2's real-execution counterpart to `createConfiguredProjectContext`.
+ * Same opt-in gate (`SEBASTIAN_PROJECTS_FILE`), same registry/memory store
+ * shape, so a real task's state lives in the same disk-persisted store as
+ * project selection - just a different namespace, never a separate,
+ * competing persistence mechanism. `executor` is overridable purely for
+ * tests; production always gets the real `ClaudeCliProjectTaskExecutor`.
+ */
+export function createConfiguredProjectTaskOrchestrator(
+  dataDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  executor: ProjectTaskExecutor = new ClaudeCliProjectTaskExecutor(),
+): ProjectTaskOrchestrator | undefined {
+  if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
+  return new ProjectTaskOrchestrator(
+    loadConfiguredProjects(createGitHubProjectRegistry(env), env),
+    new FileMemoryStore(resolveMemoryFilePath(dataDir)),
+    executor,
+    env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server',
+  );
 }
 
 export function inspectProjectConfiguration(env: NodeJS.ProcessEnv = process.env): ProjectConfigurationRuntime {

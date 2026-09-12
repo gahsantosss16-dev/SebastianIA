@@ -22,6 +22,7 @@ import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.j
 import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
 
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
+import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
 
 const WEB_CONVERSATION_SESSION_ID = 'session-1';
 
@@ -50,6 +51,18 @@ export const HTTP_EXECUTION_TIMEOUT_MS =
   (MAX_OPERATIONAL_DECISIONS - 1) * DEFAULT_GITHUB_TIMEOUT_MS + // a Tool call between each pair of `decide` calls
   DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS + // the final synthesis of a successful conclusion
   2_000; // margin for non-Gemini overhead; `respond`'s single-call budget is already well under this ceiling
+/**
+ * A project task (ANALISA/FAZ) runs a real external process (the Claude
+ * Code CLI), not a bounded Gemini call - independently generous, exactly
+ * like `synthesize()` got its own timeout separate from `decide()`, rather
+ * than inflating the ordinary conversational ceiling above for every request.
+ * Only used as the request's ceiling when a project task orchestrator is
+ * actually configured; an ordinary conversational request still just
+ * finishes well under either number. Sized above `ClaudeCliProjectTaskExecutor`'s
+ * own internal timeout (5 minutes) plus room for the post-execution
+ * git status/diff and any registered validations that run afterward.
+ */
+export const PROJECT_TASK_EXECUTION_TIMEOUT_MS = 8 * 60 * 1_000;
 export const WEB_SESSION_TTL_MS = 12 * 60 * 60 * 1_000;
 /**
  * "Manter-me conectado neste dispositivo" (checked by default in the unlock
@@ -70,6 +83,7 @@ interface OnlineCommandExecutor {
 
 export interface SebastianHttpServerOptions {
   readonly projectContext?: ProjectConversationContext;
+  readonly projectTaskOrchestrator?: ProjectTaskOrchestrator;
   readonly application: OnlineCommandExecutor;
   readonly apiToken: string;
   readonly conversationRegistry: ConversationRegistry;
@@ -108,6 +122,7 @@ const silentLogger: Logger = {
 
 export class SebastianHttpServer {
   private readonly projectContext: ProjectConversationContext | undefined;
+  private readonly projectTaskOrchestrator: ProjectTaskOrchestrator | undefined;
   private readonly application: OnlineCommandExecutor;
   private readonly conversationRegistry: ConversationRegistry;
   private readonly expectedTokenDigest: Buffer;
@@ -151,6 +166,7 @@ export class SebastianHttpServer {
 
     this.application = options.application;
     this.projectContext = options.projectContext;
+    this.projectTaskOrchestrator = options.projectTaskOrchestrator;
     this.conversationRegistry = options.conversationRegistry;
     this.expectedTokenDigest = digestToken(apiToken);
     this.webSessionSigningKey = createHmac('sha256', apiToken).update('sebastian-web-session-v1', 'utf8').digest();
@@ -166,7 +182,9 @@ export class SebastianHttpServer {
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
-    this.server.requestTimeout = HTTP_EXECUTION_TIMEOUT_MS + HTTP_BODY_TIMEOUT_MS;
+    this.server.requestTimeout =
+      Math.max(this.executionTimeoutMs, this.projectTaskOrchestrator === undefined ? 0 : PROJECT_TASK_EXECUTION_TIMEOUT_MS) +
+      HTTP_BODY_TIMEOUT_MS;
     this.server.headersTimeout = HTTP_BODY_TIMEOUT_MS;
     this.server.keepAliveTimeout = 5_000;
   }
@@ -475,13 +493,23 @@ export class SebastianHttpServer {
           session: { conversationId, sessionId: WEB_CONVERSATION_SESSION_ID },
         }),
       });
-      const result = await withTimeout(execution, this.executionTimeoutMs, () => controller.abort());
+      const requestTimeoutMs =
+        this.projectTaskOrchestrator === undefined
+          ? this.executionTimeoutMs
+          : Math.max(this.executionTimeoutMs, PROJECT_TASK_EXECUTION_TIMEOUT_MS);
+      const result = await withTimeout(execution, requestTimeoutMs, () => controller.abort());
       const publicMessage = extractPublicMessage(result);
       if (conversationId !== undefined) {
         this.conversationRegistry.touch(conversationId, this.now().toISOString());
         this.conversationRegistry.applyTitleIfPlaceholder(conversationId, deriveConversationTitle(message));
       }
-      this.writeJson(response, 200, { ok: true, message: publicMessage, requestId, ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId ?? 'conversation-1') }) });
+      this.writeJson(response, 200, {
+        ok: true,
+        message: publicMessage,
+        requestId,
+        ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId ?? 'conversation-1') }),
+        ...(this.projectTaskOrchestrator === undefined ? {} : { task: this.projectTaskOrchestrator.currentTask(conversationId ?? 'conversation-1') }),
+      });
     } finally {
       request.off('aborted', abortOnDisconnect);
       response.off('close', abortOnDisconnect);
@@ -514,7 +542,12 @@ export class SebastianHttpServer {
       { role: 'user', content: turn.requestText },
       { role: 'sebastian', content: turn.summary },
     ]);
-    this.writeJson(response, 200, { conversation: this.publicConversationSummary(conversation), messages, ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId) }) });
+    this.writeJson(response, 200, {
+      conversation: this.publicConversationSummary(conversation),
+      messages,
+      ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId) }),
+      ...(this.projectTaskOrchestrator === undefined ? {} : { task: this.projectTaskOrchestrator.currentTask(conversationId) }),
+    });
   }
 
   private publicConversationSummary(conversation: ConversationSummaryRecord): Readonly<Record<string, unknown>> {

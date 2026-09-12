@@ -15,7 +15,8 @@ export function validateWorkspace(workspace: ProjectDescriptor['workspace']): vo
   for (const source of workspace.policySources) {
     if (!source || typeof source.path !== 'string' || !source.path.trim() || win32.isAbsolute(source.path) || posix.isAbsolute(source.path) || source.path.split(/[\\/]/).includes('..') || typeof source.required !== 'boolean' || !Array.isArray(source.topics) || source.topics.some((topic: unknown) => typeof topic !== 'string' || !topic.trim())) throw new TypeError('Invalid policy source.');
   }
-  if (!Array.isArray(workspace.validations) || workspace.validations.some(command => !command.id?.trim() || !command.executable?.trim() || !Array.isArray(command.args) || command.args.some((arg: unknown) => typeof arg !== 'string'))) throw new TypeError('Invalid validation metadata.');
+  if (!Array.isArray(workspace.validations) || workspace.validations.some(command => !command.id?.trim() || !command.executable?.trim() || !Array.isArray(command.args) || command.args.some((arg: unknown) => typeof arg !== 'string') || (command.timeoutMs !== undefined && (!Number.isInteger(command.timeoutMs) || command.timeoutMs <= 0)))) throw new TypeError('Invalid validation metadata.');
+  if (workspace.localWrite !== undefined && (typeof workspace.localWrite !== 'object' || workspace.localWrite === null || typeof workspace.localWrite.enabled !== 'boolean')) throw new TypeError('Invalid localWrite configuration.');
 }
 
 export interface LoadedProjectPolicy {
@@ -24,17 +25,30 @@ export interface LoadedProjectPolicy {
   readonly content: string;
 }
 
-/** Reads canonical configuration only. User text can select topics, never paths or roots. */
-export function loadProjectPolicies(project: ProjectDescriptor, environmentId: string, task: string): readonly LoadedProjectPolicy[] {
+/**
+ * The single gate every consumer that touches a project's local checkout
+ * goes through: same-machine/same-platform match, absolute root, and a real,
+ * on-disk directory (realpath-resolved so a stale symlink or removed
+ * checkout is never silently treated as available). Used both by policy
+ * loading below and by `ProjectTaskOrchestrator` before it ever hands a root
+ * to an executor - one gate, never duplicated.
+ */
+export function resolveValidatedWorkspaceRoot(project: ProjectDescriptor, environmentId: string): string {
   const workspace = project.workspace;
   if (!workspace) throw new Error('Este projeto não tem checkout configurado.');
   if (workspace.environment.id !== environmentId || workspace.environment.platform !== process.platform) throw new Error('Checkout indisponível neste ambiente. Este servidor não acessa o computador cadastrado.');
   if (!isAbsolute(workspace.root)) throw new Error('Raiz incompatível com este ambiente.');
-  let root: string;
   try {
-    root = realpathSync(workspace.root);
+    const root = realpathSync(workspace.root);
     if (!statSync(root).isDirectory()) throw new Error();
+    return root;
   } catch { throw new Error('Checkout configurado ausente ou indisponível; não utilizarei o diretório do servidor como substituto.'); }
+}
+
+/** Reads canonical configuration only. User text can select topics, never paths or roots. */
+export function loadProjectPolicies(project: ProjectDescriptor, environmentId: string, task: string): readonly LoadedProjectPolicy[] {
+  const workspace = project.workspace!;
+  const root = resolveValidatedWorkspaceRoot(project, environmentId);
   const query = task.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   return workspace.policySources.filter(source => source.required || source.topics.some(topic => query.includes(topic.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()))).map(source => {
     const resolved = resolvePathWithinAllowedRoot(root, source.path);

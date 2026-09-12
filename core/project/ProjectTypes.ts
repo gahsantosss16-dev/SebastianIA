@@ -53,6 +53,19 @@ export interface ProjectDescriptor {
     readonly root: string;
     readonly environment: { readonly id: string; readonly platform: 'win32' | 'linux' | 'darwin'; readonly label: string };
     readonly policySources: readonly { readonly path: string; readonly required: boolean; readonly topics: readonly string[] }[];
-    readonly validations: readonly { readonly id: string; readonly executable: string; readonly args: readonly string[] }[];
+    readonly validations: readonly {
+      readonly id: string;
+      readonly executable: string;
+      readonly args: readonly string[];
+      readonly timeoutMs?: number;
+    }[];
+    /**
+     * Explicit, per-project opt-in for FAZ (write-authorized task execution).
+     * Absent or `false` means a "faça"-style request is refused even with a
+     * real executor configured - a project only ever becomes writable by
+     * this being turned on deliberately in its own local configuration, never
+     * implicitly because an executor happens to be available.
+     */
+    readonly localWrite?: { readonly enabled: boolean };
   };
 }

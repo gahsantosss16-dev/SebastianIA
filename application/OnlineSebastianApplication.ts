@@ -21,6 +21,7 @@ import { FileMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js'
 import { createGitHubProjectRegistry, createGitHubReadOnlyTool } from './GitHubProjectRegistryConfiguration.js';
 import { createSebastianApplication } from './SebastianApplication.js';
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
+import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
 
 /**
  * Online composition root. It uses the same SebastianApplication/Core/Agent
@@ -186,6 +187,7 @@ export function createOnlineSebastianApplication(
   dataDir?: string,
   env: NodeJS.ProcessEnv = process.env,
   projectContext?: ProjectConversationContext,
+  projectTaskOrchestrator?: ProjectTaskOrchestrator,
 ) {
   const root = process.cwd();
   const validations: readonly AuthorizedCommandDefinition[] = [
@@ -230,6 +232,7 @@ export function createOnlineSebastianApplication(
 
   return createSebastianApplication({
     ...(projectContext === undefined ? {} : { projectContext }),
+    ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
     ...(logger === undefined ? {} : { logger }),
     authorizedCommands: [],
     specializedTool: new OnlineReadOnlyTool(root, validations, githubTool, knowledgeTool),

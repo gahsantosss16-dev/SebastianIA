@@ -311,7 +311,23 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   let activeConversationId = null;
   let switchingConversation = false;
   const projectLabel = document.querySelector('#active-project');
-  const showProject = (project) => { if (projectLabel) projectLabel.textContent = project ? 'Projeto: ' + project.displayName + (project.policyStatus === 'loaded' ? '' : ' — regras indisponíveis neste ambiente') : ''; };
+  const TASK_STATUS_LABEL = {
+    analyzing: 'analisando',
+    writing: 'executando alteração',
+    awaitingHomologation: 'aguardando sua homologação',
+    completed: 'concluída',
+    failed: 'falhou'
+  };
+  const showProject = (project, task) => {
+    if (!projectLabel) return;
+    if (!project) { projectLabel.textContent = ''; return; }
+    let text = 'Projeto: ' + project.displayName + (project.policyStatus === 'loaded' ? '' : ' — regras indisponíveis neste ambiente');
+    if (task) {
+      const label = TASK_STATUS_LABEL[task.status] || task.status;
+      text += ' · Tarefa: ' + label + (task.filesChanged && task.filesChanged.length ? ' (' + task.filesChanged.length + ' arquivo(s) alterado(s))' : '');
+    }
+    projectLabel.textContent = text;
+  };
 
   const showChat = () => {
     unlock.classList.add('hidden');
@@ -459,7 +475,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       activeConversationId = id;
       syncConversationIdToUrl(id);
       showConversationMessages(body.messages);
-      showProject(body.project);
+      showProject(body.project, body.task);
       input.value = '';
       input.style.height = 'auto';
       input.focus();
@@ -646,7 +662,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       }
       const body = await response.json();
       appendMessage('sebastian', body.message);
-      showProject(body.project);
+      showProject(body.project, body.task);
       void refreshConversationList();
     } catch {
       thinking.remove();

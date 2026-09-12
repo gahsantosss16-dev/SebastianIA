@@ -44,9 +44,19 @@ import { GoalExecutionOrchestrator, MAX_GOAL_EXECUTION_STEPS } from './developme
 import type { CognitiveModelProvider, OperationalToolPolicyEntry } from './cognition/index.js';
 import type { Logger } from './logger.js';
 import type { ProjectConversationContext } from './project/ProjectConversationContext.js';
+import type { ProjectTaskOrchestrator } from './project/ProjectTaskOrchestrator.js';
 
 export interface CorePipelineBootstrapInput {
   readonly projectContext?: ProjectConversationContext;
+  /**
+   * Etapa 2's real-execution counterpart to `projectContext`: identification
+   * still resolves through `projectContext` unchanged; this orchestrator is
+   * only additionally consulted when that resolves an active project, and
+   * only overrides the reply when the message actually carries an
+   * ANALISA/FAZ task intent. Omitted by every composition that has not
+   * opted in (all existing tests included), so its absence changes nothing.
+   */
+  readonly projectTaskOrchestrator?: ProjectTaskOrchestrator;
   readonly providers: readonly CapabilityProvider[];
   readonly bindings: readonly CommandCapabilityBinding[];
   /**
@@ -120,6 +130,7 @@ export interface CorePipelineBootstrapFactories {
     cognitiveOperationalTools: readonly OperationalToolPolicyEntry[] | undefined,
     logger: Logger | undefined,
     projectContext: ProjectConversationContext | undefined,
+    projectTaskOrchestrator: ProjectTaskOrchestrator | undefined,
   ) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
@@ -159,8 +170,8 @@ export class CorePipelineBootstrap {
         ((tool, cognitiveModelProvider) => new GoalExecutionOrchestrator(tool, MAX_GOAL_EXECUTION_STEPS, cognitiveModelProvider)),
       buildSpecializedAgent:
         factories.buildSpecializedAgent ??
-        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger, projectContext) =>
-          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger, projectContext)),
+        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger, projectContext, projectTaskOrchestrator) =>
+          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger, projectContext, projectTaskOrchestrator)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ??
         ((memoryFilePath) =>
@@ -192,6 +203,7 @@ export class CorePipelineBootstrap {
       input.cognitiveOperationalTools,
       input.logger,
       input.projectContext,
+      input.projectTaskOrchestrator,
     );
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
@@ -353,6 +365,7 @@ export class CorePipelineBootstrap {
     cognitiveOperationalTools: readonly OperationalToolPolicyEntry[] | undefined,
     logger: Logger | undefined,
     projectContext: ProjectConversationContext | undefined,
+    projectTaskOrchestrator: ProjectTaskOrchestrator | undefined,
   ): SpecializedAgent {
     try {
       const specializedAgent = this.factories.buildSpecializedAgent(
@@ -363,6 +376,7 @@ export class CorePipelineBootstrap {
         cognitiveOperationalTools,
         logger,
         projectContext,
+        projectTaskOrchestrator,
       );
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');

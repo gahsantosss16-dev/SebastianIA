@@ -15,7 +15,7 @@ import {
 } from './LocalMemoryCapabilityProvider.js';
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { createSebastianApplication } from './SebastianApplication.js';
-import { createConfiguredProjectContext, resolveSebastianWorkspaceRoot } from './ProjectConfiguration.js';
+import { createConfiguredProjectContext, createConfiguredProjectTaskOrchestrator, resolveSebastianWorkspaceRoot } from './ProjectConfiguration.js';
 
 interface CommandExecutor {
   executeCommand(input: CommandProcessingInput): Promise<CapabilityResult>;
@@ -89,7 +89,14 @@ export class LocalCommandInvocationAdapter {
       (() => {
         const dataDir = resolveSebastianDataDirectory();
         const projectContext = createConfiguredProjectContext(dataDir);
-        return createSebastianApplication({ logger: silentLogger, dataDir, allowedFilesystemRoot: resolveSebastianWorkspaceRoot() ?? process.cwd(), ...(projectContext === undefined ? {} : { projectContext }) });
+        const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir);
+        return createSebastianApplication({
+          logger: silentLogger,
+          dataDir,
+          allowedFilesystemRoot: resolveSebastianWorkspaceRoot() ?? process.cwd(),
+          ...(projectContext === undefined ? {} : { projectContext }),
+          ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
+        });
       });
     this.now = dependencies.now ?? (() => new Date());
   }

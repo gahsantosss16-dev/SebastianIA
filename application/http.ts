@@ -14,7 +14,7 @@ import {
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
 import { resolveBuildProvenance } from './BuildProvenance.js';
 
-import { createConfiguredProjectContext, inspectProjectConfiguration } from './ProjectConfiguration.js';
+import { createConfiguredProjectContext, createConfiguredProjectTaskOrchestrator, inspectProjectConfiguration } from './ProjectConfiguration.js';
 const logger = createLogger();
 
 async function startOnlineServer(): Promise<void> {
@@ -26,7 +26,8 @@ async function startOnlineServer(): Promise<void> {
     const cognitiveModelProvider = createOnlineCognitiveModelProvider(process.env, logger);
     const dataDir = resolveSebastianDataDirectory();
     const projectContext = createConfiguredProjectContext(dataDir);
-    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env, projectContext);
+    const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir);
+    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env, projectContext, projectTaskOrchestrator);
     // A second reader over the same memory.json document - safe by
     // FileMemoryStore's own design (every read re-parses from disk, no
     // shared in-process cache) - so the HTTP layer can list/validate/reopen
@@ -40,6 +41,7 @@ async function startOnlineServer(): Promise<void> {
       apiToken,
       conversationRegistry,
       ...(projectContext === undefined ? {} : { projectContext }),
+      ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
       logger,
       webSessionStateFilePath: join(dataDir, 'web-session.json'),
     });

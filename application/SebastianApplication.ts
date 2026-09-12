@@ -6,6 +6,7 @@ import type { SebastianCore } from '../core/core.js';
 import type { CoreConfig } from '../core/config.js';
 import type { Logger } from '../core/logger.js';
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
+import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
 import { resolveMemoryFilePath } from '../core/memory/index.js';
 import {
   VALIDATION_TEST_TOOL_ID,
@@ -35,6 +36,7 @@ import {
 
 export interface SebastianApplicationOptions {
   readonly projectContext?: ProjectConversationContext;
+  readonly projectTaskOrchestrator?: ProjectTaskOrchestrator;
   readonly name?: string;
   readonly config?: Partial<CoreConfig>;
   readonly logger?: Logger;
@@ -98,6 +100,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
   const input: CoreOperationalRuntimeBootstrapInput = {
     composition: {
       ...(options.projectContext === undefined ? {} : { projectContext: options.projectContext }),
+      ...(options.projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator: options.projectTaskOrchestrator }),
       providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider],
       allowedFilesystemRoot,
       authorizedCommands,

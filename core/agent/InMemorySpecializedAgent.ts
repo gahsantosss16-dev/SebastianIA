@@ -68,6 +68,7 @@ import {
 } from '../cognition/index.js';
 import type { Logger } from '../logger.js';
 import type { ProjectConversationContext } from '../project/ProjectConversationContext.js';
+import type { ProjectTaskOrchestrator } from '../project/ProjectTaskOrchestrator.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
@@ -117,6 +118,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     cognitiveOperationalTools?: readonly OperationalToolPolicyEntry[],
     logger?: Logger,
     private readonly projectContext?: ProjectConversationContext,
+    private readonly projectTaskOrchestrator?: ProjectTaskOrchestrator,
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
@@ -151,13 +153,29 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
   ): Promise<SpecializedAgentHandoffResult> {
     const text = this.extractConversationText(input);
     const command = input.payload.commandInput as { conversation?: { conversationId?: string } };
-    const projectReply = this.projectContext?.handle(command.conversation?.conversationId ?? 'conversation-1', text, input.executionId, input.requestedAt);
+    const conversationId = command.conversation?.conversationId ?? 'conversation-1';
+    const abortSignal = this.extractAbortSignal(input);
+    const projectReply = this.projectContext?.handle(conversationId, text, input.executionId, input.requestedAt);
+    if (projectReply && this.projectTaskOrchestrator && projectReply.project) {
+      // Identity/selection/rules handling above never changes because of this: it always
+      // runs and its reply is only overridden below when the same message ALSO carries a
+      // real ANALISA/FAZ task intent (or continues a task already open in this
+      // conversation) - see `ProjectTaskOrchestrator.handle`'s own intent gate.
+      const taskReply = await this.projectTaskOrchestrator.handle(
+        conversationId, projectReply.project, text, input.executionId, input.requestedAt, abortSignal,
+      );
+      if (taskReply) {
+        return {
+          status: 'completed',
+          output: { finalResult: taskReply, memoryExtras: { conversationTurn: { requestText: text, summary: taskReply.message, kind: 'projectTask' } } },
+        };
+      }
+    }
     if (projectReply) return { status: 'completed', output: { finalResult: projectReply, memoryExtras: { conversationTurn: { requestText: text, summary: projectReply.message, kind: 'projectContext' } } } };
     const rememberedFacts = this.extractRememberedFacts(input);
     const pendingTasks = this.extractPendingTasks(input);
     const recentExchanges = this.extractRecentExchanges(input);
     const pendingOperations = this.extractPendingOperations(input);
-    const abortSignal = this.extractAbortSignal(input);
     const immediatePreviousExchange = this.latestExchange(recentExchanges);
     const cognitiveRecentExchanges = this.selectCognitiveRecentExchanges(text, rememberedFacts, recentExchanges);
     const budgetedCognitiveRecentExchanges = this.applyConversationContextBudget(cognitiveRecentExchanges);

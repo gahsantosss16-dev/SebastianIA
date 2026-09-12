@@ -22,7 +22,8 @@
         "policySources": [
           { "path": "CLAUDE.md", "required": true, "topics": [] }
         ],
-        "validations": []
+        "validations": [],
+        "localWrite": { "enabled": false }
       }
     }
   ]
