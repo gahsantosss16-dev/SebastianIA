@@ -21,6 +21,8 @@ import {
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
 
+import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
+
 const WEB_CONVERSATION_SESSION_ID = 'session-1';
 
 export const SEBASTIAN_API_TOKEN_ENV_VAR = 'SEBASTIAN_API_TOKEN';
@@ -67,6 +69,7 @@ interface OnlineCommandExecutor {
 }
 
 export interface SebastianHttpServerOptions {
+  readonly projectContext?: ProjectConversationContext;
   readonly application: OnlineCommandExecutor;
   readonly apiToken: string;
   readonly conversationRegistry: ConversationRegistry;
@@ -104,6 +107,7 @@ const silentLogger: Logger = {
 };
 
 export class SebastianHttpServer {
+  private readonly projectContext: ProjectConversationContext | undefined;
   private readonly application: OnlineCommandExecutor;
   private readonly conversationRegistry: ConversationRegistry;
   private readonly expectedTokenDigest: Buffer;
@@ -146,6 +150,7 @@ export class SebastianHttpServer {
     }
 
     this.application = options.application;
+    this.projectContext = options.projectContext;
     this.conversationRegistry = options.conversationRegistry;
     this.expectedTokenDigest = digestToken(apiToken);
     this.webSessionSigningKey = createHmac('sha256', apiToken).update('sebastian-web-session-v1', 'utf8').digest();
@@ -476,7 +481,7 @@ export class SebastianHttpServer {
         this.conversationRegistry.touch(conversationId, this.now().toISOString());
         this.conversationRegistry.applyTitleIfPlaceholder(conversationId, deriveConversationTitle(message));
       }
-      this.writeJson(response, 200, { ok: true, message: publicMessage, requestId });
+      this.writeJson(response, 200, { ok: true, message: publicMessage, requestId, ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId ?? 'conversation-1') }) });
     } finally {
       request.off('aborted', abortOnDisconnect);
       response.off('close', abortOnDisconnect);
@@ -509,7 +514,7 @@ export class SebastianHttpServer {
       { role: 'user', content: turn.requestText },
       { role: 'sebastian', content: turn.summary },
     ]);
-    this.writeJson(response, 200, { conversation: this.publicConversationSummary(conversation), messages });
+    this.writeJson(response, 200, { conversation: this.publicConversationSummary(conversation), messages, ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId) }) });
   }
 
   private publicConversationSummary(conversation: ConversationSummaryRecord): Readonly<Record<string, unknown>> {

@@ -43,8 +43,10 @@ import { DevelopmentModelProvider, type ModelProvider } from './model/index.js';
 import { GoalExecutionOrchestrator, MAX_GOAL_EXECUTION_STEPS } from './development/index.js';
 import type { CognitiveModelProvider, OperationalToolPolicyEntry } from './cognition/index.js';
 import type { Logger } from './logger.js';
+import type { ProjectConversationContext } from './project/ProjectConversationContext.js';
 
 export interface CorePipelineBootstrapInput {
+  readonly projectContext?: ProjectConversationContext;
   readonly providers: readonly CapabilityProvider[];
   readonly bindings: readonly CommandCapabilityBinding[];
   /**
@@ -117,6 +119,7 @@ export interface CorePipelineBootstrapFactories {
     cognitiveModelProvider: CognitiveModelProvider | undefined,
     cognitiveOperationalTools: readonly OperationalToolPolicyEntry[] | undefined,
     logger: Logger | undefined,
+    projectContext: ProjectConversationContext | undefined,
   ) => SpecializedAgent;
   readonly buildCommandResultMemoryWriter?: (memoryFilePath: string | undefined) => CommandResultMemoryWriter;
 }
@@ -156,8 +159,8 @@ export class CorePipelineBootstrap {
         ((tool, cognitiveModelProvider) => new GoalExecutionOrchestrator(tool, MAX_GOAL_EXECUTION_STEPS, cognitiveModelProvider)),
       buildSpecializedAgent:
         factories.buildSpecializedAgent ??
-        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger) =>
-          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger)),
+        ((tool, modelProvider, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger, projectContext) =>
+          new InMemorySpecializedAgent(tool, modelProvider, undefined, goalExecutionOrchestrator, cognitiveModelProvider, cognitiveOperationalTools, logger, projectContext)),
       buildCommandResultMemoryWriter:
         factories.buildCommandResultMemoryWriter ??
         ((memoryFilePath) =>
@@ -188,6 +191,7 @@ export class CorePipelineBootstrap {
       input.cognitiveModelProvider,
       input.cognitiveOperationalTools,
       input.logger,
+      input.projectContext,
     );
     const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
 
@@ -348,6 +352,7 @@ export class CorePipelineBootstrap {
     cognitiveModelProvider: CognitiveModelProvider | undefined,
     cognitiveOperationalTools: readonly OperationalToolPolicyEntry[] | undefined,
     logger: Logger | undefined,
+    projectContext: ProjectConversationContext | undefined,
   ): SpecializedAgent {
     try {
       const specializedAgent = this.factories.buildSpecializedAgent(
@@ -357,6 +362,7 @@ export class CorePipelineBootstrap {
         cognitiveModelProvider,
         cognitiveOperationalTools,
         logger,
+        projectContext,
       );
       if (!specializedAgent || typeof specializedAgent.handoff !== 'function') {
         throw new TypeError('Core specialized agent must provide handoff.');

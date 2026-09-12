@@ -67,6 +67,7 @@ import {
   type OperationalToolPolicyEntry,
 } from '../cognition/index.js';
 import type { Logger } from '../logger.js';
+import type { ProjectConversationContext } from '../project/ProjectConversationContext.js';
 
 /** Responsibility recognized by this Agent as free-form natural language conversation. */
 export const CONVERSE_COMMAND_TYPE = 'converse';
@@ -115,6 +116,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     cognitiveModelProvider?: CognitiveModelProvider,
     cognitiveOperationalTools?: readonly OperationalToolPolicyEntry[],
     logger?: Logger,
+    private readonly projectContext?: ProjectConversationContext,
   ) {
     this.specializedTool = specializedTool;
     this.modelProvider = modelProvider;
@@ -148,6 +150,9 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     modelProvider: ModelProvider,
   ): Promise<SpecializedAgentHandoffResult> {
     const text = this.extractConversationText(input);
+    const command = input.payload.commandInput as { conversation?: { conversationId?: string } };
+    const projectReply = this.projectContext?.handle(command.conversation?.conversationId ?? 'conversation-1', text, input.executionId, input.requestedAt);
+    if (projectReply) return { status: 'completed', output: { finalResult: projectReply, memoryExtras: { conversationTurn: { requestText: text, summary: projectReply.message, kind: 'projectContext' } } } };
     const rememberedFacts = this.extractRememberedFacts(input);
     const pendingTasks = this.extractPendingTasks(input);
     const recentExchanges = this.extractRecentExchanges(input);

@@ -61,7 +61,7 @@ test('a new entry into the system (login, or opening the app fresh) always start
   assert.match(SEBASTIAN_WEB_SCRIPT, /const restoreActiveConversation = async \(\) => \{/);
   assert.match(
     SEBASTIAN_WEB_SCRIPT,
-    /if \(requestedId && \(await openConversation\(requestedId\)\)\) return;\s*await createConversation\(\);/,
+    /if \(requestedId\) \{[\s\S]*await openConversation\(requestedId\)[\s\S]*return;\s*\}\s*await createConversation\(\);/,
   );
   assert.match(SEBASTIAN_WEB_SCRIPT, /showChat\(\);\s*await restoreActiveConversation\(\);/);
 });

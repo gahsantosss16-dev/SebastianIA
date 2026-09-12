@@ -48,4 +48,11 @@ export interface ProjectDescriptor {
    * again when that capability is built.
    */
   readonly localAgentPath?: string;
+  /** Configuration only: no command is executed by project identification. */
+  readonly workspace?: {
+    readonly root: string;
+    readonly environment: { readonly id: string; readonly platform: 'win32' | 'linux' | 'darwin'; readonly label: string };
+    readonly policySources: readonly { readonly path: string; readonly required: boolean; readonly topics: readonly string[] }[];
+    readonly validations: readonly { readonly id: string; readonly executable: string; readonly args: readonly string[] }[];
+  };
 }

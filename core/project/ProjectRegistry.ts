@@ -1,4 +1,5 @@
 import type { ProjectDescriptor } from './ProjectTypes.js';
+import { validateWorkspace } from './ProjectWorkspacePolicy.js';
 import {
   InvalidProjectRegistrationError,
   ProjectAlreadyRegisteredError,
@@ -138,6 +139,7 @@ export class ProjectRegistry {
     if (!isObject) {
       throw new InvalidProjectRegistrationError('Project descriptor must be an object.');
     }
+    validateWorkspace(descriptor.workspace);
 
     if (typeof descriptor.id !== 'string' || descriptor.id.trim() === '' || descriptor.id !== descriptor.id.trim()) {
       throw new InvalidProjectRegistrationError('Project descriptor id must be a non-empty, untrimmed-safe string.');

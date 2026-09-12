@@ -150,6 +150,8 @@ button { cursor: pointer; }
 .sidebar-status { display: flex; align-items: center; gap: 8px; padding: 8px 6px; color: var(--muted); font-size: 12px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--online); box-shadow: 0 0 8px rgba(95, 191, 136, 0.65); }
 
+#active-project { font-size: 12px; color: var(--muted); grid-column: 1 / -1; }
+#active-project:empty { display: none; }
 .conversation { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; }
 
 .messages { min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 40px 5vw 16px; scroll-behavior: smooth; }
@@ -307,6 +309,9 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   const logoutButton = document.querySelector('#logout-button');
   let pending = false;
   let activeConversationId = null;
+  let switchingConversation = false;
+  const projectLabel = document.querySelector('#active-project');
+  const showProject = (project) => { if (projectLabel) projectLabel.textContent = project ? 'Projeto: ' + project.displayName + (project.policyStatus === 'loaded' ? '' : ' — regras indisponíveis neste ambiente') : ''; };
 
   const showChat = () => {
     unlock.classList.add('hidden');
@@ -438,32 +443,49 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   };
 
   const openConversation = async (id) => {
+    if (switchingConversation) return false;
+    switchingConversation = true;
+    activeConversationId = null;
+    input.disabled = true;
+    send.disabled = true;
+    showProject(null);
     try {
       const response = await fetch('/api/web/conversations/' + encodeURIComponent(id), {
         credentials: 'same-origin',
         cache: 'no-store'
       });
-      if (!response.ok) return false;
+      if (!response.ok) { appendMessage('sebastian', 'Não foi possível reabrir a conversa. Tente novamente ou crie uma nova.', 'error'); return false; }
       const body = await response.json();
       activeConversationId = id;
       syncConversationIdToUrl(id);
       showConversationMessages(body.messages);
+      showProject(body.project);
       input.value = '';
       input.style.height = 'auto';
       input.focus();
       await refreshConversationList();
       return true;
     } catch {
-      // Leave the previously active conversation visible rather than
-      // clearing the screen on a transient failure to reopen another one.
+      appendMessage('sebastian', 'Não foi possível reabrir a conversa. Tente novamente ou crie uma nova.', 'error');
       return false;
+    } finally {
+      switchingConversation = false;
+      input.disabled = !activeConversationId;
+      send.disabled = !activeConversationId;
     }
   };
 
   const createConversation = async () => {
+    if (switchingConversation) return;
+    switchingConversation = true;
+    input.disabled = true;
+    send.disabled = true;
+    activeConversationId = null;
+    syncConversationIdToUrl(null);
+    showProject(null);
     try {
       const response = await fetch('/api/web/conversations', { method: 'POST', credentials: 'same-origin' });
-      if (!response.ok) return;
+      if (!response.ok) throw new Error('create failed');
       const body = await response.json();
       activeConversationId = body.conversation.id;
       syncConversationIdToUrl(activeConversationId);
@@ -473,7 +495,11 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       input.focus();
       await refreshConversationList();
     } catch {
-      // A failed create leaves the previous conversation active and visible.
+      appendMessage('sebastian', 'Não foi possível criar uma nova conversa. Clique em Nova conversa para tentar novamente. Nenhuma mensagem será enviada à conversa anterior.', 'error');
+    } finally {
+      switchingConversation = false;
+      input.disabled = !activeConversationId;
+      send.disabled = !activeConversationId;
     }
   };
 
@@ -482,7 +508,10 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   // most recently active conversation just because one exists.
   const restoreActiveConversation = async () => {
     const requestedId = readConversationIdFromUrl();
-    if (requestedId && (await openConversation(requestedId))) return;
+    if (requestedId) {
+      if (!(await openConversation(requestedId))) { activeConversationId = null; input.disabled = true; send.disabled = true; }
+      return;
+    }
     await createConversation();
   };
 
@@ -582,7 +611,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = input.value.trim();
-    if (!message || pending) return;
+    if (!message || pending || switchingConversation || !activeConversationId) return;
     pending = true;
     conversation.setAttribute('aria-busy', 'true');
     input.value = '';
@@ -617,6 +646,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       }
       const body = await response.json();
       appendMessage('sebastian', body.message);
+      showProject(body.project);
       void refreshConversationList();
     } catch {
       thinking.remove();
@@ -624,8 +654,8 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     } finally {
       pending = false;
       conversation.removeAttribute('aria-busy');
-      input.disabled = false;
-      send.disabled = false;
+      input.disabled = !activeConversationId;
+      send.disabled = !activeConversationId;
       input.focus();
     }
   });
@@ -696,6 +726,7 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
           </div>
         </div>
         <div class="composer-wrap">
+          <div id="active-project" role="status"></div>
           <form class="composer" id="composer-form">
             <textarea id="message-input" maxlength="4000" rows="1" required aria-label="Mensagem para Sebastian" placeholder="Escreva para Sebastian..."></textarea>
             <button class="send" id="send-button" type="submit" aria-label="Enviar mensagem">

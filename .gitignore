@@ -23,3 +23,6 @@ Thumbs.db
 
 # Configuração local do Claude Code (permissões de comandos acumuladas por sessão/máquina)
 .claude/
+
+# Configuração de workspaces por máquina
+config/projects.local.json

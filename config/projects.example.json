@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "sebastiania",
+      "displayName": "SebastianIA",
+      "aliases": ["Sebastian"],
+      "resourceKind": "github-repository",
+      "remoteRepository": {
+        "owner": "YOUR_GITHUB_OWNER",
+        "repository": "SebastianIA",
+        "defaultBranch": "main"
+      },
+      "permissions": { "access": "read-only" },
+      "workspace": {
+        "root": "C:\\PATH\\TO\\SebastianIA",
+        "environment": {
+          "id": "YOUR_ENVIRONMENT_ID",
+          "platform": "win32",
+          "label": "Your Windows environment"
+        },
+        "policySources": [
+          { "path": "CLAUDE.md", "required": true, "topics": [] }
+        ],
+        "validations": []
+      }
+    }
+  ]
+}

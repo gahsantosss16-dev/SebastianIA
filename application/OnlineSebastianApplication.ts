@@ -20,6 +20,7 @@ import { KNOWLEDGE_SEARCH_TOOL_ID, KnowledgeSearchTool, KnowledgeStore } from '.
 import { FileMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js';
 import { createGitHubProjectRegistry, createGitHubReadOnlyTool } from './GitHubProjectRegistryConfiguration.js';
 import { createSebastianApplication } from './SebastianApplication.js';
+import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 
 /**
  * Online composition root. It uses the same SebastianApplication/Core/Agent
@@ -184,6 +185,7 @@ export function createOnlineSebastianApplication(
   cognitiveModelProvider?: CognitiveModelProvider,
   dataDir?: string,
   env: NodeJS.ProcessEnv = process.env,
+  projectContext?: ProjectConversationContext,
 ) {
   const root = process.cwd();
   const validations: readonly AuthorizedCommandDefinition[] = [
@@ -199,7 +201,7 @@ export function createOnlineSebastianApplication(
   let githubTool;
   let defaultGitHubProjectId: string | undefined;
   try {
-    const projectRegistry = createGitHubProjectRegistry(env, logger);
+    const projectRegistry = projectContext?.registry ?? createGitHubProjectRegistry(env, logger);
     const registeredProjects = projectRegistry.listDescriptors();
     // A token without any registered project is not a usable GitHub
     // integration - never expose the Tool/catalog for a registry that has
@@ -227,6 +229,7 @@ export function createOnlineSebastianApplication(
     : new KnowledgeSearchTool(new KnowledgeStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))));
 
   return createSebastianApplication({
+    ...(projectContext === undefined ? {} : { projectContext }),
     ...(logger === undefined ? {} : { logger }),
     authorizedCommands: [],
     specializedTool: new OnlineReadOnlyTool(root, validations, githubTool, knowledgeTool),
