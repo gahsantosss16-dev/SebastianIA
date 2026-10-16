@@ -1,4 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { FileMemoryStore } from '../memory/FileMemoryStore.js';
 import type { ProjectRegistry } from './ProjectRegistry.js';
 import type { ProjectDescriptor } from './ProjectTypes.js';
@@ -291,6 +293,13 @@ export class ProjectTaskOrchestrator {
       return { project: activeProject, message };
     }
 
+    // Snapshot of what was already dirty BEFORE the executor ran, so a
+    // pre-existing change of the user's is never attributed to this task
+    // (and so never later committed by FECHA TUDO, which only includes
+    // `filesChanged`). Files of the task being continued stay task files.
+    const baseline = this.snapshotDirtyFiles(root);
+    const previousTaskFiles = new Set(continuing ? existingAfterHomologation!.filesChanged : []);
+
     this.persist({
       conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
       status: authorization === 'writeAuthorized' ? 'writing' : 'analyzing',
@@ -316,8 +325,12 @@ export class ProjectTaskOrchestrator {
     // `filesChanged` - GitCloseOrchestrator later intersects this list
     // file-by-file against a fresh status of its own.
     const status = runGitCommand(root, ['status', '--porcelain', '--untracked-files=all']);
-    const filesChanged = status.ranAsGitRepo ? this.parseChangedFiles(status.stdout) : [];
-    const diff = filesChanged.length > 0 ? this.gitDiff(root) : '';
+    const filesChanged = status.ranAsGitRepo
+      ? this.parseChangedFiles(status.stdout).filter(
+          (file) => previousTaskFiles.has(file) || !this.unchangedSince(baseline, root, file),
+        )
+      : [];
+    const diff = filesChanged.length > 0 ? this.gitDiff(root, filesChanged) : '';
     const validations = filesChanged.length > 0 ? runProjectValidations(project, root, executionId, requestedAt) : [];
 
     const finalStatus: ProjectTaskStatus =
@@ -348,6 +361,27 @@ export class ProjectTaskOrchestrator {
       .map((line) => line.slice(3).trim());
   }
 
+  /** Dirty files (per `git status`) mapped to a content fingerprint; empty when git is unavailable. */
+  private snapshotDirtyFiles(root: string): ReadonlyMap<string, string | undefined> {
+    const status = runGitCommand(root, ['status', '--porcelain', '--untracked-files=all']);
+    if (!status.ranAsGitRepo) return new Map();
+    return new Map(this.parseChangedFiles(status.stdout).map((file) => [file, this.fingerprint(root, file)]));
+  }
+
+  /** True only when the file was already dirty before and its content is provably identical now; anything unreadable counts as changed (the pre-baseline behavior). */
+  private unchangedSince(baseline: ReadonlyMap<string, string | undefined>, root: string, file: string): boolean {
+    const before = baseline.get(file);
+    return before !== undefined && before === this.fingerprint(root, file);
+  }
+
+  private fingerprint(root: string, file: string): string | undefined {
+    try {
+      return createHash('sha256').update(readFileSync(join(root, file))).digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * `git diff` alone never shows the content of a brand-new, untracked file
    * (there is nothing in the index to diff against) - exactly the case a
@@ -356,9 +390,9 @@ export class ProjectTaskOrchestrator {
    * is git's own standard fix: it makes new files appear as additions in
    * the diff without staging their real content for a commit.
    */
-  private gitDiff(root: string): string {
-    runGitCommand(root, ['add', '--intent-to-add', '--all']);
-    const outcome = runGitCommand(root, ['diff']);
+  private gitDiff(root: string, files: readonly string[]): string {
+    runGitCommand(root, ['add', '--intent-to-add', '--', ...files]);
+    const outcome = runGitCommand(root, ['diff', '--', ...files]);
     if (!outcome.ranAsGitRepo) return '';
     return outcome.stdout.length > MAX_DIFF_CHARS
       ? `${outcome.stdout.slice(0, MAX_DIFF_CHARS)}\n… (diff truncado)`

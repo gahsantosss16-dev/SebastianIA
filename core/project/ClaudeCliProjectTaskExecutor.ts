@@ -25,6 +25,7 @@ interface ClaudeCliJsonResult {
   readonly subtype?: string;
   readonly is_error?: boolean;
   readonly result?: string;
+  readonly errors?: readonly unknown[];
 }
 
 export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
@@ -81,6 +82,21 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
       child.on('error', (error) => {
         clearTimeout(timer);
         request.signal?.removeEventListener('abort', onExternalAbort);
+        // Aborting via `signal` makes Node emit an AbortError here (before
+        // 'close'): a timeout/cancellation must never be misreported as an
+        // unavailable executor.
+        if (cancelled) {
+          resolve({ outcome: 'cancelled', summary: 'Tarefa cancelada antes da conclusão.', rawLog: stderr || stdout });
+          return;
+        }
+        if (timedOut) {
+          resolve({
+            outcome: 'timedOut',
+            summary: `O executor excedeu o tempo limite de ${timeoutMs}ms e foi encerrado.`,
+            rawLog: stderr || stdout,
+          });
+          return;
+        }
         resolve(this.executorUnavailableResult(error));
       });
 
@@ -146,6 +162,13 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
       return { outcome: 'completed', summary: parsed.result, rawLog: stdout };
     }
 
+    // The CLI's error results (e.g. `error_max_budget_usd`, `error_max_turns`,
+    // `error_during_execution`) carry no `result` text. Whatever the exit
+    // code, they are never a completed task, and the stop reason is kept.
+    if (parsed && parsed.type === 'result' && (parsed.is_error === true || (parsed.subtype ?? 'success') !== 'success')) {
+      return { outcome: 'failed', summary: this.describeErrorResult(parsed), rawLog: stdout };
+    }
+
     if (exitCode === 0) {
       return { outcome: 'completed', summary: stdout.trim() || 'Executor concluiu sem retornar um resumo.', rawLog: stdout };
     }
@@ -155,6 +178,19 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
       summary: `O executor terminou com codigo ${exitCode ?? 'desconhecido'} e nao retornou um resultado utilizavel.`,
       rawLog: stderr || stdout,
     };
+  }
+
+  private describeErrorResult(parsed: ClaudeCliJsonResult): string {
+    const details = (parsed.errors ?? []).filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== '');
+    const suffix = details.length > 0 ? ` Detalhes: ${details.join('; ')}` : '';
+    switch (parsed.subtype) {
+      case 'error_max_budget_usd':
+        return `O executor foi interrompido ao atingir o limite de custo configurado para esta tarefa.${suffix}`;
+      case 'error_max_turns':
+        return `O executor foi interrompido ao atingir o limite de turnos.${suffix}`;
+      default:
+        return `O executor terminou com erro (${parsed.subtype ?? 'erro desconhecido'}).${suffix}`;
+    }
   }
 
   private executorUnavailableResult(error: unknown): ProjectTaskExecutionResult {

@@ -263,6 +263,58 @@ test('a completed write task reports files changed, a diff excerpt and validatio
   assert.match(reply!.message, /Validações:/);
 });
 
+test('a change already present in the checkout before FAZ is never attributed to the task, shown in its diff, or committed by FECHA TUDO', async () => {
+  const { entries, orchestrator, remotesByProjectId } = fixture({ neuroClose: { enabled: true, tagging: 'disabled' } });
+  const neuro = entries[0]!;
+  const root = neuro.workspace!.root;
+  writeFileSync(join(root, 'CLAUDE.md'), '# alteração local preexistente do usuário');
+  writeFileSync(join(root, 'user-notes.txt'), 'rascunho do usuário');
+
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  const task = orchestrator.currentTask('c1')!;
+  assert.deepEqual(task.filesChanged, ['changed-1.txt']);
+  assert.doesNotMatch(reply!.message, /CLAUDE\.md|user-notes\.txt|preexistente/);
+
+  await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
+  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  const committed = git(root, ['show', '--name-only', '--format=', 'HEAD']).trim().split('\n');
+  assert.deepEqual(committed, ['changed-1.txt']);
+  assert.equal(git(remotesByProjectId.get('neuro-hub-pro')!, ['rev-parse', 'HEAD']).trim(), git(root, ['rev-parse', 'HEAD']).trim());
+  const remaining = git(root, ['status', '--porcelain']);
+  assert.match(remaining, /^ M CLAUDE\.md$/m, 'the user change must remain untouched and uncommitted');
+  assert.match(remaining, /^\?\? user-notes\.txt$/m, 'the untracked user file must not even be added to the index');
+});
+
+test('ANALISA on a checkout that was already dirty does not raise the "unexpected changes" warning', async () => {
+  const { entries, orchestrator } = fixture();
+  const neuro = entries[0]!;
+  writeFileSync(join(neuro.workspace!.root, 'CLAUDE.md'), '# alteração local preexistente do usuário');
+
+  const reply = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, analisa o estado do projeto', 'e1', NOW);
+  assert.match(reply!.message, /nenhum arquivo foi alterado/i);
+  assert.doesNotMatch(reply!.message, /alterações inesperadas/);
+});
+
+test('a pre-existing file that the FAZ executor then edits is still attributed to the task', async () => {
+  const { entries, executor, orchestrator } = fixture();
+  const neuro = entries[0]!;
+  writeFileSync(join(neuro.workspace!.root, 'changed-1.txt'), 'versão anterior do usuário');
+
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  assert.equal(executor.calls.length, 1);
+  assert.deepEqual(orchestrator.currentTask('c1')!.filesChanged, ['changed-1.txt']);
+});
+
+test('a continuation keeps the files the task itself changed earlier, even when the new round does not touch them again', async () => {
+  const { entries, executor, orchestrator } = fixture();
+  const neuro = entries[0]!;
+  await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
+  executor.writeOnAuthorizedCall = false;
+  await orchestrator.handle('c1', activeOf(neuro), 'ficou muito pequeno, aumenta um pouco', 'e2', NOW);
+
+  assert.deepEqual(orchestrator.currentTask('c1')!.filesChanged, ['changed-1.txt']);
+});
+
 test('reopening with a new orchestrator instance over the same store preserves the task', async () => {
   const { entries, orchestrator, registry, store, executor } = fixture();
   const neuro = entries[0]!;

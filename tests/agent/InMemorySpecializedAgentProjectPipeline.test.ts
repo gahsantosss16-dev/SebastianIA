@@ -23,7 +23,7 @@ import type { ProjectTaskExecutionRequest, ProjectTaskExecutionResult, ProjectTa
  */
 function fixture(options: { executor?: ProjectTaskExecutor } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-agent-pipeline-'));
-  const entries = (JSON.parse(readFileSync(new URL('../../config/projects.local.json', import.meta.url), 'utf8')) as { projects: ProjectDescriptor[] }).projects.map((project) => {
+  const entries = (JSON.parse(readFileSync(new URL('../fixtures/projects.test.json', import.meta.url), 'utf8')) as { projects: ProjectDescriptor[] }).projects.map((project) => {
     const checkout = join(root, project.id);
     mkdirSync(checkout);
     writeFileSync(join(checkout, 'CLAUDE.md'), `# ${project.id}`);
