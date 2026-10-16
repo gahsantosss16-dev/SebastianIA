@@ -484,7 +484,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
 
     try {
       const endpoint = `${GEMINI_API_ORIGIN}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`;
-      const response = await this.fetchImpl(endpoint, {
+      const requestInit = {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -501,7 +501,28 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
           },
         }),
         signal: controller.signal,
-      });
+      };
+      let response: Awaited<ReturnType<FetchLike>>;
+      for (let attempt = 0; ; attempt += 1) {
+        response = await this.fetchImpl(endpoint, requestInit);
+        if (response.ok || (response.status !== 429 && response.status !== 503) || attempt >= 2) break;
+        // Respect the existing request deadline and caller cancellation.
+        const remainingMs = timeoutMs - (Date.now() - startedAt);
+        const delayMs = Math.min(250 * (2 ** attempt), remainingMs - 1);
+        if (delayMs <= 0 || controller.signal.aborted) break;
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            controller.signal.removeEventListener('abort', onAbort);
+            resolve();
+          }, delayMs);
+          const onAbort = (): void => {
+            clearTimeout(timer);
+            resolve();
+          };
+          controller.signal.addEventListener('abort', onAbort, { once: true });
+        });
+        if (controller.signal.aborted) break;
+      }
 
       if (!response.ok) {
         return {
