@@ -156,7 +156,7 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
     }
 
     if (parsed && typeof parsed.result === 'string') {
-      if (parsed.is_error) {
+      if (parsed.is_error || parsed.subtype && parsed.subtype !== 'success' || exitCode !== 0) {
         return { outcome: 'failed', summary: parsed.result, rawLog: stdout };
       }
       return { outcome: 'completed', summary: parsed.result, rawLog: stdout };
@@ -202,10 +202,15 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
   }
 
   private appendCapped(current: string, addition: string): string {
-    if (Buffer.byteLength(current, 'utf8') >= MAX_CAPTURED_OUTPUT_BYTES) {
-      return current;
+    const remainingBytes = MAX_CAPTURED_OUTPUT_BYTES - Buffer.byteLength(current, 'utf8');
+    if (remainingBytes <= 0) return current;
+    const bytes = Buffer.from(addition, 'utf8');
+    if (bytes.length <= remainingBytes) return current + addition;
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    for (let end = remainingBytes; end > 0; end--) {
+      try { return current + decoder.decode(bytes.subarray(0, end)); } catch { /* incomplete UTF-8 suffix */ }
     }
-    return current + addition;
+    return current;
   }
 
   private resolveExecutablePath(): string {
