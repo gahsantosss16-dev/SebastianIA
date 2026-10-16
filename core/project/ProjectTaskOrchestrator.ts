@@ -299,6 +299,17 @@ export class ProjectTaskOrchestrator {
     // `filesChanged`). Files of the task being continued stay task files.
     const baseline = this.snapshotDirtyFiles(root);
     const previousTaskFiles = new Set(continuing ? existingAfterHomologation!.filesChanged : []);
+    const unreadablePreexistingFiles = [...baseline].filter(([, fingerprint]) => fingerprint === undefined).map(([file]) => file);
+    if (unreadablePreexistingFiles.length > 0) {
+      const message = 'Execução bloqueada: não foi possível identificar com segurança alterações preexistentes em: ' +
+        unreadablePreexistingFiles.join(', ') +
+        '. Corrija ou salve essas alterações antes de tentar novamente. Nenhum arquivo foi enviado ao executor.';
+      this.persist({
+        conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
+        status: 'failed', filesChanged: [], validations: [], summary: message, createdAt, updatedAt: requestedAt,
+      });
+      return { project: activeProject, message };
+    }
 
     this.persist({
       conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
