@@ -312,10 +312,22 @@ export class ProjectTaskOrchestrator {
     });
 
     if (result.outcome !== 'completed') {
-      const message = this.describeExecutorFailure(result);
+      const statusAfterFailure = runGitCommand(root, ['status', '--porcelain', '--untracked-files=all']);
+      const changedAfterFailure = statusAfterFailure.ranAsGitRepo
+        ? this.parseChangedFiles(statusAfterFailure.stdout).filter(
+            (file) => previousTaskFiles.has(file) || !this.unchangedSince(baseline, root, file),
+          )
+        : [];
+      const message = this.describeExecutorFailure(result) +
+        (changedAfterFailure.length > 0
+          ? '\nAtenção: a execução deixou alterações parciais no checkout: ' + changedAfterFailure.join(', ') +
+            '. Nenhum fechamento automático está autorizado; revise ou reverta manualmente.'
+          : statusAfterFailure.ranAsGitRepo
+            ? '\nNenhuma alteração nova detectada após a falha.'
+            : '\nNão foi possível verificar se a execução deixou alterações parciais.');
       this.persist({
         conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
-        status: 'failed', filesChanged: [], validations: [], summary: message, createdAt, updatedAt: requestedAt,
+        status: 'failed', filesChanged: changedAfterFailure, validations: [], summary: message, createdAt, updatedAt: requestedAt,
       });
       return { project: activeProject, message };
     }
