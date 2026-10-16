@@ -578,3 +578,17 @@ test('Gemini does not retry permanent authentication failures', async () => {
   assert.equal(result?.outcome, 'unavailable');
   assert.equal(calls, 1);
 });
+
+test('Gemini falls back to an alternate model after three primary 503 responses', async () => {
+  const urls: string[] = [];
+  const cognitive = provider(async (url) => {
+    urls.push(url);
+    return url.includes('gemini-3-flash')
+      ? response(200, geminiEnvelope({ answer: '42.' }))
+      : response(503, 'primary temporarily unavailable');
+  });
+  const result = await cognitive.respond?.({ text: 'Quanto é 15 + 27?', requestedAt: '2026-10-16T00:00:00.000Z' });
+  assert.deepEqual(result, { outcome: 'responded', answer: '42.' });
+  assert.equal(urls.filter((url) => url.includes(MODEL)).length, 3);
+  assert.equal(urls.filter((url) => url.includes('gemini-3-flash')).length, 1);
+});
