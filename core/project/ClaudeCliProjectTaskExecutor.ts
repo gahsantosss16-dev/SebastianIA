@@ -166,10 +166,25 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
   }
 
   private appendCapped(current: string, addition: string): string {
-    if (Buffer.byteLength(current, 'utf8') >= MAX_CAPTURED_OUTPUT_BYTES) {
+    const remainingBytes = MAX_CAPTURED_OUTPUT_BYTES - Buffer.byteLength(current, 'utf8');
+    if (remainingBytes <= 0) {
       return current;
     }
-    return current + addition;
+    const additionBytes = Buffer.from(addition, 'utf8');
+    if (additionBytes.byteLength <= remainingBytes) {
+      return current + addition;
+    }
+    // Avoid splitting a UTF-8 character at the capture boundary.
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let end = remainingBytes;
+    while (end > 0) {
+      try {
+        return current + decoder.decode(additionBytes.subarray(0, end));
+      } catch {
+        end--;
+      }
+    }
+    return current;
   }
 
   private resolveExecutablePath(): string {
