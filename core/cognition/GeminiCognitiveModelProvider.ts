@@ -15,6 +15,7 @@ import type {
 import type { Logger } from '../logger.js';
 
 const GEMINI_API_ORIGIN = 'https://generativelanguage.googleapis.com';
+const GEMINI_FALLBACK_MODEL = 'gemini-3-flash';
 export const DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS = 8_000;
 /**
  * `respond` (the free-form conversational answer) has observed production
@@ -55,6 +56,8 @@ type FetchLike = (input: string, init: Readonly<Record<string, unknown>>) => Pro
 export interface GeminiCognitiveModelProviderOptions {
   readonly apiKey: string;
   readonly model: string;
+  /** Optional alternate model for provider-side 503 outages. */
+  readonly fallbackModel?: string;
   /** Timeout for `decide` only; independent of `respondTimeoutMs` and `synthesizeTimeoutMs`. */
   readonly timeoutMs?: number;
   /** Timeout for `respond` only; independent of `timeoutMs` and `synthesizeTimeoutMs`. */
@@ -204,6 +207,7 @@ export const SYNTHESIS_SYSTEM_INSTRUCTION =
 export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly fallbackModel: string | undefined;
   private readonly timeoutMs: number;
   private readonly respondTimeoutMs: number;
   private readonly synthesizeTimeoutMs: number;
@@ -249,6 +253,8 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
 
     this.apiKey = options.apiKey;
     this.model = options.model.trim();
+    const alternate = options.fallbackModel === undefined ? GEMINI_FALLBACK_MODEL : options.fallbackModel.trim();
+    this.fallbackModel = alternate && alternate !== this.model ? alternate : undefined;
     this.timeoutMs = timeoutMs;
     this.respondTimeoutMs = respondTimeoutMs;
     this.synthesizeTimeoutMs = synthesizeTimeoutMs;
@@ -483,7 +489,9 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     else externalSignal?.addEventListener('abort', abortFromCaller, { once: true });
 
     try {
-      const endpoint = `${GEMINI_API_ORIGIN}/v1beta/models/${encodeURIComponent(this.model)}:generateContent`;
+      const endpointFor = (model: string): string => `${GEMINI_API_ORIGIN}/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+      let activeEndpoint = endpointFor(this.model);
+      let fallbackUsed = false;
       const requestInit = {
         method: 'POST',
         headers: {
@@ -504,7 +512,13 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       };
       let response: Awaited<ReturnType<FetchLike>>;
       for (let attempt = 0; ; attempt += 1) {
-        response = await this.fetchImpl(endpoint, requestInit);
+        response = await this.fetchImpl(activeEndpoint, requestInit);
+        if (response.status === 503 && attempt >= 2 && !fallbackUsed && this.fallbackModel && !controller.signal.aborted) {
+          // Fail over only after exhausting transient retries on the primary model.
+          activeEndpoint = endpointFor(this.fallbackModel);
+          fallbackUsed = true;
+          response = await this.fetchImpl(activeEndpoint, requestInit);
+        }
         if (response.ok || (response.status !== 429 && response.status !== 503) || attempt >= 2) break;
         // Respect the existing request deadline and caller cancellation.
         const remainingMs = timeoutMs - (Date.now() - startedAt);
