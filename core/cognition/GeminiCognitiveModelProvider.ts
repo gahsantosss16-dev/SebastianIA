@@ -15,7 +15,7 @@ import type {
 import type { Logger } from '../logger.js';
 
 const GEMINI_API_ORIGIN = 'https://generativelanguage.googleapis.com';
-const GEMINI_FALLBACK_MODEL = 'gemini-3-flash';
+const GEMINI_FALLBACK_MODEL = 'gemini-3-flash-preview';
 export const DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS = 8_000;
 /**
  * `respond` (the free-form conversational answer) has observed production
@@ -513,11 +513,25 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       let response: Awaited<ReturnType<FetchLike>>;
       for (let attempt = 0; ; attempt += 1) {
         response = await this.fetchImpl(activeEndpoint, requestInit);
+        this.logger?.info('Gemini HTTP attempt completed.', {
+          provider: 'gemini',
+          model: activeEndpoint === endpointFor(this.model) ? this.model : this.fallbackModel,
+          attempt: attempt + 1,
+          httpStatus: response.status,
+          failover: fallbackUsed,
+        });
         if (response.status === 503 && attempt >= 2 && !fallbackUsed && this.fallbackModel && !controller.signal.aborted) {
           // Fail over only after exhausting transient retries on the primary model.
           activeEndpoint = endpointFor(this.fallbackModel);
           fallbackUsed = true;
           response = await this.fetchImpl(activeEndpoint, requestInit);
+          this.logger?.info('Gemini HTTP attempt completed.', {
+            provider: 'gemini',
+            model: this.fallbackModel,
+            attempt: attempt + 2,
+            httpStatus: response.status,
+            failover: true,
+          });
         }
         if (response.ok || (response.status !== 429 && response.status !== 503) || attempt >= 2) break;
         // Respect the existing request deadline and caller cancellation.
