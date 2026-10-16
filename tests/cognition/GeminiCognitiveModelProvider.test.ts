@@ -552,3 +552,29 @@ test('Etapa 4: classify() valida classifyTimeoutMs no construtor, mesma faixa do
     InvalidCognitiveModelProviderInputError,
   );
 });
+
+test('Gemini retries transient 503 and 429 responses and returns the recovered answer', async () => {
+  for (const transientStatus of [429, 503]) {
+    let calls = 0;
+    const cognitive = provider(async () => {
+      calls += 1;
+      return calls < 3
+        ? response(transientStatus, 'temporarily unavailable')
+        : response(200, geminiEnvelope({ answer: 'Agora estou respondendo.' }));
+    });
+    const result = await cognitive.respond?.({ text: 'oi', requestedAt: '2026-10-16T00:00:00.000Z' });
+    assert.deepEqual(result, { outcome: 'responded', answer: 'Agora estou respondendo.' });
+    assert.equal(calls, 3);
+  }
+});
+
+test('Gemini does not retry permanent authentication failures', async () => {
+  let calls = 0;
+  const cognitive = provider(async () => {
+    calls += 1;
+    return response(401, 'unauthorized');
+  });
+  const result = await cognitive.respond?.({ text: 'oi', requestedAt: '2026-10-16T00:00:00.000Z' });
+  assert.equal(result?.outcome, 'unavailable');
+  assert.equal(calls, 1);
+});
