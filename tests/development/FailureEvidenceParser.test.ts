@@ -150,3 +150,15 @@ test('extractImportedRelativePaths deduplicates repeated imports', () => {
 
   assert.deepEqual(paths, ['calc.js']);
 });
+
+test('parseFailureEvidence handles Node 22 TAP absolute location for a root-level test', () => {
+  const evidence = parseFailureEvidence("not ok 1 - calc\n  location: '/tmp/workspace-123/calc.test.js:5:1'\n    actual: 5,\n    expected: 4,\n");
+  assert.equal(evidence.testFilePath, 'calc.test.js');
+  assert.equal(evidence.actualLiteral, '5');
+  assert.equal(evidence.expectedLiteral, '4');
+});
+
+test('parseFailureEvidence retains tests directory under TAP absolute location', () => {
+  const evidence = parseFailureEvidence("not ok 1 - nested\n  location: '/tmp/workspace/tests/unit/calc.test.js:5:1'\n    actual: 5,\n    expected: 4,\n");
+  assert.equal(evidence.testFilePath, 'tests/unit/calc.test.js');
+});

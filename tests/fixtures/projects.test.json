@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "neuro-hub-pro",
+      "displayName": "Neuro Hub Pro",
+      "aliases": [
+        "Neuro",
+        "Neuro Hub"
+      ],
+      "resourceKind": "github-repository",
+      "remoteRepository": {
+        "owner": "example-owner",
+        "repository": "neuro-hub-pro",
+        "defaultBranch": "main"
+      },
+      "permissions": {
+        "access": "read-only"
+      },
+      "workspace": {
+        "root": "/nonexistent/fixture/neuro-hub-pro",
+        "environment": {
+          "id": "fixture",
+          "platform": "linux",
+          "label": "Fixture fictício de testes"
+        },
+        "policySources": [
+          {
+            "path": "CLAUDE.md",
+            "required": true,
+            "topics": []
+          }
+        ],
+        "validations": [],
+        "localWrite": {
+          "enabled": false
+        },
+        "close": {
+          "enabled": false,
+          "remoteName": "origin",
+          "tagging": "disabled"
+        },
+        "migrations": {
+          "paths": []
+        }
+      }
+    },
+    {
+      "id": "lsb-service",
+      "displayName": "LSB Service",
+      "aliases": [
+        "LSB"
+      ],
+      "resourceKind": "github-repository",
+      "remoteRepository": {
+        "owner": "example-owner",
+        "repository": "lsb-service",
+        "defaultBranch": "main"
+      },
+      "permissions": {
+        "access": "read-only"
+      },
+      "workspace": {
+        "root": "/nonexistent/fixture/lsb-service",
+        "environment": {
+          "id": "fixture",
+          "platform": "linux",
+          "label": "Fixture fictício de testes"
+        },
+        "policySources": [
+          {
+            "path": "CLAUDE.md",
+            "required": true,
+            "topics": []
+          }
+        ],
+        "validations": [],
+        "localWrite": {
+          "enabled": false
+        },
+        "close": {
+          "enabled": false,
+          "remoteName": "origin",
+          "tagging": "disabled"
+        },
+        "migrations": {
+          "paths": []
+        }
+      }
+    },
+    {
+      "id": "sebastiania",
+      "displayName": "SebastianIA",
+      "aliases": [
+        "Sebastian"
+      ],
+      "resourceKind": "github-repository",
+      "remoteRepository": {
+        "owner": "example-owner",
+        "repository": "SebastianIA",
+        "defaultBranch": "main"
+      },
+      "permissions": {
+        "access": "read-only"
+      },
+      "workspace": {
+        "root": "/nonexistent/fixture/sebastiania",
+        "environment": {
+          "id": "fixture",
+          "platform": "linux",
+          "label": "Fixture fictício de testes"
+        },
+        "policySources": [
+          {
+            "path": "CLAUDE.md",
+            "required": true,
+            "topics": []
+          }
+        ],
+        "validations": [],
+        "localWrite": {
+          "enabled": false
+        },
+        "close": {
+          "enabled": false,
+          "remoteName": "origin",
+          "tagging": "disabled"
+        },
+        "migrations": {
+          "paths": []
+        }
+      }
+    }
+  ]
+}
