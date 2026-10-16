@@ -140,7 +140,9 @@ export class ClaudeCliProjectTaskExecutor implements ProjectTaskExecutor {
     }
 
     if (parsed && typeof parsed.result === 'string') {
-      if (parsed.is_error) {
+      // A nonzero process exit is a failure even if the CLI returned JSON
+      // without setting is_error (e.g. a wrapper/runtime failure).
+      if (parsed.is_error || exitCode !== 0) {
         return { outcome: 'failed', summary: parsed.result, rawLog: stdout };
       }
       return { outcome: 'completed', summary: parsed.result, rawLog: stdout };
