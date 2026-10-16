@@ -1,4 +1,4 @@
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, sep, win32 } from 'node:path';
 
 /**
  * Real evidence extracted from a validation's own captured output - never
@@ -17,6 +17,7 @@ export interface FailureEvidence {
 }
 
 const TEST_FILE_LINE_PATTERN = /^test at (.+?):\d+:\d+/m;
+const TAP_LOCATION_PATTERN = /^\s*location:\s*['\"]?(.+?):\d+:\d+['\"]?\s*$/m;
 const STRUCTURED_ACTUAL_PATTERN = /^\s*actual:\s*([^\n,]+),?\s*$/m;
 const STRUCTURED_EXPECTED_PATTERN = /^\s*expected:\s*([^\n,]+),?\s*$/m;
 const SIMPLE_COMPARISON_PATTERN = /^\s*(\S.*?)\s+!==\s+(\S.*?)\s*$/m;
@@ -32,7 +33,11 @@ const UNUSABLE_LITERALS: ReadonlySet<string> = new Set(['undefined', 'null', 'Na
  */
 export function parseFailureEvidence(output: string): FailureEvidence {
   const testFileMatch = output.match(TEST_FILE_LINE_PATTERN);
-  const testFilePath = testFileMatch?.[1]?.trim();
+  const reportedPath = (testFileMatch?.[1] ?? output.match(TAP_LOCATION_PATTERN)?.[1])?.trim();
+  // TAP can report an absolute path. Only use a safe relative candidate:
+  // paths under a tests/ directory retain that suffix; root-level test files
+  // use their basename. The filesystem tool still enforces its allowed root.
+  const testFilePath = reportedPath === undefined ? undefined : normalizeReportedTestPath(reportedPath);
 
   const structuredActual = output.match(STRUCTURED_ACTUAL_PATTERN)?.[1];
   const structuredExpected = output.match(STRUCTURED_EXPECTED_PATTERN)?.[1];
@@ -112,4 +117,12 @@ export function extractImportedRelativePaths(testFileContent: string, testFilePa
 
 function normalizeToForwardSlashes(path: string): string {
   return path.split(sep).join('/');
+}
+
+function normalizeReportedTestPath(reported: string): string {
+  const cleaned = reported.replace(/['"]$/, '').replace(/\\/g, '/');
+  if (!isAbsolute(cleaned) && !win32.isAbsolute(reported)) return cleaned;
+  const testDirectory = cleaned.lastIndexOf('/tests/');
+  if (testDirectory >= 0) return cleaned.slice(testDirectory + 1);
+  return basename(cleaned);
 }
