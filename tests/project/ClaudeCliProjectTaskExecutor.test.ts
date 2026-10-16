@@ -126,3 +126,21 @@ test('a missing executable is reported as an unavailable executor', async () => 
   assert.equal(result.outcome, 'failed');
   assert.match(result.summary, /Executor indisponivel/);
 });
+
+test('CLI output capture enforces byte limit without splitting accented characters', () => {
+  const executor = new ClaudeCliProjectTaskExecutor() as unknown as {
+    appendCapped(current: string, addition: string): string;
+  };
+  const prefix = 'x'.repeat(256 * 1024 - 1);
+  assert.equal(executor.appendCapped(prefix, 'éabc'), prefix);
+  assert.equal(Buffer.byteLength(executor.appendCapped('', 'é'.repeat(200_000)), 'utf8'), 256 * 1024);
+});
+
+test('nonzero exit code with otherwise successful JSON must be failed', () => {
+  const executor = new ClaudeCliProjectTaskExecutor() as unknown as {
+    parseResult(exitCode: number | null, stdout: string, stderr: string): { outcome: string };
+  };
+  const payload = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done' });
+  assert.equal(executor.parseResult(1, payload, '').outcome, 'failed');
+  assert.equal(executor.parseResult(0, payload, '').outcome, 'completed');
+});
