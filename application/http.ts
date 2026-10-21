@@ -13,6 +13,7 @@ import {
 } from '../core/memory/index.js';
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
 import { resolveBuildProvenance } from './BuildProvenance.js';
+import { createConfiguredStudioRenderJobs } from './StudioEngineConfiguration.js';
 
 import { createConfiguredProjectContext, createConfiguredProjectTaskOrchestrator, inspectProjectConfiguration } from './ProjectConfiguration.js';
 const logger = createLogger();
@@ -36,6 +37,7 @@ async function startOnlineServer(): Promise<void> {
     const conversationMemoryStore = new FileMemoryStore(resolveMemoryFilePath(dataDir));
     const conversationHydrator = new FileCommandContextHydrator(conversationMemoryStore);
     const conversationRegistry = new ConversationRegistry(conversationMemoryStore, conversationHydrator);
+    const studioJobs = await createConfiguredStudioRenderJobs(dataDir, process.env, logger);
     const httpServer = new SebastianHttpServer({
       application,
       apiToken,
@@ -44,6 +46,7 @@ async function startOnlineServer(): Promise<void> {
       ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
       logger,
       webSessionStateFilePath: join(dataDir, 'web-session.json'),
+      studioJobs,
     });
     const started = await httpServer.listen(port);
     const build = resolveBuildProvenance();

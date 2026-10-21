@@ -21,6 +21,8 @@ import {
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
 import { STUDIO_CONTENT_SECURITY_POLICY, STUDIO_WEB_HTML, STUDIO_WEB_SCRIPT, STUDIO_WEB_STYLES } from './StudioWebInterface.js';
+import { handleStudioApi } from './StudioHttpRoutes.js';
+import type { StudioRenderJobs } from '../studio/StudioRenderJobs.js';
 
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
@@ -94,6 +96,8 @@ export interface SebastianHttpServerOptions {
   readonly requestId?: () => string;
   readonly sessionToken?: () => string;
   readonly webSessionStateFilePath?: string;
+  /** Sebastian Studio render jobs; when absent the /api/studio/* routes are not mounted. */
+  readonly studioJobs?: StudioRenderJobs;
   readonly executionTimeoutMs?: number;
 }
 
@@ -140,6 +144,7 @@ export class SebastianHttpServer {
   private shuttingDown = false;
   private applicationShutDown = false;
   private inMemoryWebSessions: readonly WebSessionRecord[] = [];
+  private readonly studioJobs: StudioRenderJobs | undefined;
 
   public constructor(options: SebastianHttpServerOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -180,6 +185,7 @@ export class SebastianHttpServer {
       throw new TypeError('Sebastian web session state file path must be non-empty when provided.');
     }
     this.webSessionStateFilePath = options.webSessionStateFilePath;
+    this.studioJobs = options.studioJobs;
     this.executionTimeoutMs = executionTimeoutMs;
     this.server = createServer((request, response) => {
       void this.handle(request, response);
@@ -234,6 +240,8 @@ export class SebastianHttpServer {
       return;
     }
     this.shuttingDown = true;
+    // Cancels queued/running Studio renders (and their engine work) before closing.
+    await this.studioJobs?.shutdown();
 
     await new Promise<void>((resolve, reject) => {
       if (!this.server.listening) {
@@ -299,6 +307,20 @@ export class SebastianHttpServer {
           isStylesheet ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
           isStylesheet ? STUDIO_WEB_STYLES : STUDIO_WEB_SCRIPT,
         );
+        return;
+      }
+
+      if (this.studioJobs && url.pathname.startsWith('/api/studio/')) {
+        await handleStudioApi(this.studioJobs, {
+          request,
+          response,
+          url,
+          authenticated: this.hasValidWebSession(request),
+          sameOrigin: this.hasSameOrigin(request),
+          readJson: () => readJsonBody(request),
+          writeJson: (statusCode, payload, headers) => this.writeJson(response, statusCode, payload, headers),
+          writeError: (statusCode, code, message, headers) => this.writeError(response, statusCode, code, message, requestId, headers),
+        });
         return;
       }
 
