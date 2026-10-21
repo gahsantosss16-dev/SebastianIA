@@ -147,6 +147,7 @@ button { cursor: pointer; }
 .conversation-item[aria-current="true"] { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .conversation-list-empty { padding: 9px 10px; color: var(--muted); font-size: 12px; }
 .sidebar-footer { flex-shrink: 0; min-width: 0; display: grid; gap: 4px; }
+.studio-link { display: block; text-align: center; text-decoration: none; }
 .sidebar-status { display: flex; align-items: center; gap: 8px; padding: 8px 6px; color: var(--muted); font-size: 12px; }
 .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--online); box-shadow: 0 0 8px rgba(95, 191, 136, 0.65); }
 
@@ -739,6 +740,7 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
             <span class="status-dot" aria-hidden="true"></span>
             <span>Online</span>
           </div>
+          <a class="new-conversation studio-link" href="/studio">Sebastian Studio</a>
           <button class="new-conversation" id="logout-button" type="button">Sair</button>
         </div>
       </aside>

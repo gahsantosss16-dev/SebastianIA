@@ -20,6 +20,9 @@ import {
 } from '../core/memory/index.js';
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
 import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from './SebastianWebInterface.js';
+import { STUDIO_CONTENT_SECURITY_POLICY, STUDIO_WEB_HTML, STUDIO_WEB_SCRIPT, STUDIO_WEB_STYLES } from './StudioWebInterface.js';
+import { handleStudioApi } from './StudioHttpRoutes.js';
+import type { StudioRenderJobs } from '../studio/StudioRenderJobs.js';
 
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
@@ -75,6 +78,7 @@ export const WEB_SESSION_REMEMBER_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 /** Bounds how many independent device sessions accumulate in the persisted file; oldest are evicted first. */
 const MAX_ACTIVE_WEB_SESSIONS = 20;
 const WEB_SESSION_COOKIE = 'sebastian_session';
+const WEB_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 interface OnlineCommandExecutor {
   executeCommand(input: CommandProcessingInput): Promise<CapabilityResult>;
@@ -92,6 +96,8 @@ export interface SebastianHttpServerOptions {
   readonly requestId?: () => string;
   readonly sessionToken?: () => string;
   readonly webSessionStateFilePath?: string;
+  /** Sebastian Studio render jobs; when absent the /api/studio/* routes are not mounted. */
+  readonly studioJobs?: StudioRenderJobs;
   readonly executionTimeoutMs?: number;
 }
 
@@ -138,6 +144,7 @@ export class SebastianHttpServer {
   private shuttingDown = false;
   private applicationShutDown = false;
   private inMemoryWebSessions: readonly WebSessionRecord[] = [];
+  private readonly studioJobs: StudioRenderJobs | undefined;
 
   public constructor(options: SebastianHttpServerOptions) {
     if (!options || typeof options !== 'object' || Array.isArray(options)) {
@@ -178,6 +185,7 @@ export class SebastianHttpServer {
       throw new TypeError('Sebastian web session state file path must be non-empty when provided.');
     }
     this.webSessionStateFilePath = options.webSessionStateFilePath;
+    this.studioJobs = options.studioJobs;
     this.executionTimeoutMs = executionTimeoutMs;
     this.server = createServer((request, response) => {
       void this.handle(request, response);
@@ -232,6 +240,8 @@ export class SebastianHttpServer {
       return;
     }
     this.shuttingDown = true;
+    // Cancels queued/running Studio renders (and their engine work) before closing.
+    await this.studioJobs?.shutdown();
 
     await new Promise<void>((resolve, reject) => {
       if (!this.server.listening) {
@@ -272,6 +282,45 @@ export class SebastianHttpServer {
           isStylesheet ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
           isStylesheet ? SEBASTIAN_WEB_STYLES : SEBASTIAN_WEB_SCRIPT,
         );
+        return;
+      }
+
+      // Sebastian Studio page: static and secret-free like '/'; the page gates on
+      // /api/web/session and every Studio API stays session-protected server-side.
+      if (url.pathname === '/studio') {
+        if (request.method !== 'GET') {
+          this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET' });
+          return;
+        }
+        this.writeWebAsset(response, 'text/html; charset=utf-8', STUDIO_WEB_HTML, STUDIO_CONTENT_SECURITY_POLICY);
+        return;
+      }
+
+      if (url.pathname === '/assets/studio.css' || url.pathname === '/assets/studio.js') {
+        if (request.method !== 'GET') {
+          this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET' });
+          return;
+        }
+        const isStylesheet = url.pathname.endsWith('.css');
+        this.writeWebAsset(
+          response,
+          isStylesheet ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8',
+          isStylesheet ? STUDIO_WEB_STYLES : STUDIO_WEB_SCRIPT,
+        );
+        return;
+      }
+
+      if (this.studioJobs && url.pathname.startsWith('/api/studio/')) {
+        await handleStudioApi(this.studioJobs, {
+          request,
+          response,
+          url,
+          authenticated: this.hasValidWebSession(request),
+          sameOrigin: this.hasSameOrigin(request),
+          readJson: () => readJsonBody(request),
+          writeJson: (statusCode, payload, headers) => this.writeJson(response, statusCode, payload, headers),
+          writeError: (statusCode, code, message, headers) => this.writeError(response, statusCode, code, message, requestId, headers),
+        });
         return;
       }
 
@@ -639,12 +688,17 @@ export class SebastianHttpServer {
     return `${WEB_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
   }
 
-  private writeWebAsset(response: ServerResponse, contentType: string, body: string): void {
+  private writeWebAsset(
+    response: ServerResponse,
+    contentType: string,
+    body: string,
+    contentSecurityPolicy = WEB_CONTENT_SECURITY_POLICY,
+  ): void {
     response.writeHead(200, {
       'Content-Type': contentType,
       'Content-Length': Buffer.byteLength(body),
       'Cache-Control': 'no-store',
-      'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      'Content-Security-Policy': contentSecurityPolicy,
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',
