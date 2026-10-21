@@ -6,6 +6,7 @@ on:
       - '.github/workflows/validate.yml'
       - 'core/**'
       - 'application/**'
+      - 'studio/**'
       - 'tests/**'
       - 'package*.json'
       - 'tsconfig.json'
