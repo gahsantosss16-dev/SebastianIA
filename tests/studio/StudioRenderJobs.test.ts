@@ -20,7 +20,7 @@ import {
   type StudioClipComposeRequest,
   type StudioClipComposer,
 } from '../../studio/ComfyStudioEngine.js';
-import { createConfiguredStudioEngine } from '../../application/StudioEngineConfiguration.js';
+import { createConfiguredStudioEngine, loadComposer } from '../../application/StudioEngineConfiguration.js';
 
 const silent = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
 
@@ -56,11 +56,13 @@ test('a job runs asynchronously, reports progress and ends with a verified MP4 p
   assert.equal(done?.downloadUrl, `/api/studio/renders/sebastian-studio-${queued.id}.mp4`);
   assert.deepEqual(done?.production.characters, ['Narrador', 'Nina', 'Bolota']);
   assert.ok(jobs.resolveRender(`sebastian-studio-${queued.id}.mp4`));
-  const manifest = JSON.parse(readFileSync(join(dir, `sebastian-studio-${queued.id}.json`), 'utf8')) as { plan: unknown; engine: string };
+  const manifest = JSON.parse(readFileSync(join(dir, `sebastian-studio-${queued.id}.json`), 'utf8')) as { plan: unknown; engine: string; media: { audio: unknown; video: { codec: string } } };
   assert.deepEqual(manifest.plan, PLAN);
   assert.equal(manifest.engine, 'teste');
+  assert.equal(manifest.media.video.codec, 'avc1');
+  assert.deepEqual(manifest.media.audio, { codec: 'mp4a' });
   // Working files and partial outputs never stay behind.
-  assert.deepEqual(readdirSync(dir).sort(), [`sebastian-studio-${queued.id}.json`, `sebastian-studio-${queued.id}.mp4`]);
+  assert.deepEqual(readdirSync(dir).sort(), ['jobs.json', `sebastian-studio-${queued.id}.json`, `sebastian-studio-${queued.id}.mp4`]);
 });
 
 test('extra fields are dropped and malformed or unapproved plans are refused', async () => {
@@ -107,7 +109,7 @@ test('real cancellation: running engine is aborted, queued jobs never start, not
   await jobs.idle();
   assert.equal(jobs.get(first.id)?.status, 'cancelled');
   assert.equal(engine.requests.length, 1);
-  assert.deepEqual(readdirSync(dir), []);
+  assert.deepEqual(readdirSync(dir), ['jobs.json']);
   assert.equal(jobs.cancel('00000000-0000-4000-8000-999999999999'), undefined);
 });
 
@@ -120,7 +122,7 @@ test('a job cancelled while being prepared never reaches the engine', async () =
   await jobs.idle();
   assert.equal(jobs.get(job.id)?.status, 'cancelled');
   assert.equal(engine.requests.length, 0);
-  assert.deepEqual(readdirSync(dir), []);
+  assert.deepEqual(readdirSync(dir), ['jobs.json']);
 });
 
 test('one render at a time, bounded queue, failures and invalid output are reported without leaking internals', async () => {
@@ -147,7 +149,7 @@ test('one render at a time, bounded queue, failures and invalid output are repor
   engine.release();
   await jobs.idle();
   assert.match(jobs.get(c.id)?.error?.message ?? '', /MP4 válido/);
-  assert.deepEqual(readdirSync(dir), []);
+  assert.deepEqual(readdirSync(dir), ['jobs.json']);
 });
 
 test('shutdown cancels queued and running work', async () => {
@@ -293,4 +295,99 @@ test('configuration: unconfigured, invalid and configured engines (no paid or re
   assert.ok(configured instanceof ComfyStudioEngine);
   assert.deepEqual(timeouts, [60000]);
   assert.equal((await configured.availability()).available, true);
+});
+
+test('persistence: jobs survive a restart; queued ones resume, interrupted ones fail clearly', async () => {
+  const engine = new ControlledEngine();
+  const dir = mkdtempSync(join(tmpdir(), 'studio-restart-'));
+  const first = new StudioRenderJobs({ outputDirectory: dir, engine, logger: silent, createId: nextId });
+  const done = await first.submit(PLAN);
+  engine.release();
+  await first.idle();
+  const interrupted = await first.submit(PLAN);
+  const waiting = await first.submit(PLAN);
+  await engine.rendering(2);
+  // Simulated crash: a new process reads the same directory while the old one never finished.
+  writeFileSync(join(dir, `.work-${interrupted.id}`, 'scene-01.mp4'), 'temp');
+  writeFileSync(join(dir, `.sebastian-studio-${interrupted.id}.mp4.partial`), 'half');
+  const next = new ControlledEngine();
+  const second = new StudioRenderJobs({ outputDirectory: dir, engine: next, logger: silent, createId: nextId });
+  assert.equal(second.get(done.id)?.status, 'completed');
+  assert.ok(second.resolveRender(`sebastian-studio-${done.id}.mp4`));
+  const lost = second.get(interrupted.id);
+  assert.equal(lost?.status, 'failed');
+  assert.equal(lost?.error?.code, 'STUDIO_RENDER_INTERRUPTED');
+  assert.match(lost?.error?.message ?? '', /servidor reiniciou/);
+  // The queued job is rendered by the new process with its exact plan.
+  await next.rendering(1);
+  assert.equal(second.get(waiting.id)?.status, 'rendering');
+  assert.deepEqual(next.requests[0]?.plan, PLAN);
+  next.release();
+  await second.idle();
+  assert.equal(second.get(waiting.id)?.status, 'completed');
+  assert.equal(readdirSync(dir).some((name) => name.startsWith('.')), false);
+  engine.release();
+  await first.shutdown();
+});
+
+test('retention removes old videos; unknown or failed artifacts are never served', async () => {
+  const engine = new ControlledEngine();
+  const dir = mkdtempSync(join(tmpdir(), 'studio-retention-'));
+  let now = new Date('2026-10-01T12:00:00Z');
+  const jobs = new StudioRenderJobs({ outputDirectory: dir, engine, logger: silent, createId: nextId, now: () => now, retentionDays: 7 });
+  const old = await jobs.submit(PLAN);
+  engine.release();
+  await jobs.idle();
+  const file = `sebastian-studio-${old.id}.mp4`;
+  assert.ok(jobs.resolveRender(file));
+  // A stray file with a valid-looking name but no completed job is not served and gets cleaned.
+  const stray = `sebastian-studio-00000000-0000-4000-8000-0000000abcde.mp4`;
+  writeFileSync(join(dir, stray), FAKE_MP4);
+  assert.equal(jobs.resolveRender(stray), undefined);
+  now = new Date('2026-10-09T12:00:00Z');
+  const fresh = await jobs.submit(PLAN);
+  engine.release();
+  await jobs.idle();
+  assert.equal(jobs.get(old.id), undefined);
+  assert.equal(jobs.resolveRender(file), undefined);
+  assert.deepEqual(readdirSync(dir).sort(), ['jobs.json', `sebastian-studio-${fresh.id}.json`, `sebastian-studio-${fresh.id}.mp4`]);
+});
+
+test('daily limit protects against misuse; outputs that would not play on phones are refused', async () => {
+  const engine = new ControlledEngine();
+  const dir = mkdtempSync(join(tmpdir(), 'studio-limit-'));
+  const jobs = new StudioRenderJobs({ outputDirectory: dir, engine, logger: silent, createId: nextId, maxJobsPerDay: 2 });
+  const a = await jobs.submit(PLAN);
+  engine.output = Buffer.concat([FAKE_MP4.subarray(0, FAKE_MP4.readUInt32BE(0)), Buffer.from([0, 0, 0, 8]), Buffer.from('mdat')]);
+  engine.release();
+  await jobs.idle();
+  assert.match(jobs.get(a.id)?.error?.message ?? '', /MP4 válido.*moov/);
+  await jobs.submit(PLAN);
+  await assert.rejects(jobs.submit(PLAN), (error: unknown) => error instanceof StudioJobError && error.code === 'STUDIO_RATE_LIMITED');
+  engine.release();
+  await jobs.shutdown();
+});
+
+test('composer integration point: STUDIO_COMPOSER_MODULE must export createStudioComposer(env)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'studio-composer-'));
+  const good = join(dir, 'composer.mjs');
+  writeFileSync(good, 'export function createStudioComposer(env) { return { id: "ffmpeg-work:" + env.MARK, async compose() {} }; }');
+  const composer = await loadComposer({ STUDIO_COMPOSER_MODULE: good, MARK: 'ok' });
+  assert.equal(composer?.id, 'ffmpeg-work:ok');
+  assert.equal(await loadComposer({}), undefined);
+  const wrongExport = join(dir, 'wrong.mjs');
+  writeFileSync(wrongExport, 'export const composer = {};');
+  await assert.rejects(loadComposer({ STUDIO_COMPOSER_MODULE: wrongExport }), /createStudioComposer/);
+  const wrongShape = join(dir, 'shape.mjs');
+  writeFileSync(wrongShape, 'export function createStudioComposer() { return { id: 1 }; }');
+  await assert.rejects(loadComposer({ STUDIO_COMPOSER_MODULE: wrongShape }), /compose\(request\)/);
+
+  // Wired through configuration, the engine becomes available with the Work's composer.
+  const workflowPath = join(dir, 'workflow.json');
+  writeFileSync(workflowPath, JSON.stringify(TEMPLATE));
+  const engine = await createConfiguredStudioEngine({ STUDIO_COMFYUI_URL: 'http://127.0.0.1:8188', STUDIO_COMFYUI_WORKFLOW_PATH: workflowPath, STUDIO_COMPOSER_MODULE: good, MARK: 'x' }, silent, {
+    loadGenerator: async () => ({ generate: async () => assert.fail() }),
+    fetchImpl: fakeComfyFetch([]),
+  });
+  assert.equal((await engine.availability()).available, true);
 });

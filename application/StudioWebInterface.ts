@@ -215,6 +215,9 @@ function describeStudioFailure(status, body) {
   if (status === 402 || error.code === 'STUDIO_COST_APPROVAL_REQUIRED') {
     return { reason: 'cost_approval', message: 'Este processamento exige aprovação de custo, que ainda não está disponível nesta interface. Nada foi cobrado.' };
   }
+  if (error.code === 'STUDIO_RATE_LIMITED') {
+    return { reason: 'rate_limited', message: error.message || 'Limite diário de vídeos atingido. Tente novamente mais tarde.' };
+  }
   if (error.code === 'STUDIO_BUSY' || status === 409 || status === 429) {
     return { reason: 'busy', message: 'O Studio já está renderizando outro vídeo. Aguarde a conclusão e tente novamente.' };
   }
@@ -674,32 +677,63 @@ ${STUDIO_RENDER_PROTOCOL_SOURCE}
     }
   }
 
-  async function startRender(plan) {
+  // The job being followed survives a page reload (e.g. a phone that slept): only its status URL and summary are stored.
+  const ACTIVE_JOB_KEY = 'sebastian-studio-active-job';
+  function saveActiveJob(statusUrl, plan) {
+    try { localStorage.setItem(ACTIVE_JOB_KEY, JSON.stringify({ statusUrl, title: plan.title, style: plan.style, format: plan.format, durationSeconds: plan.durationSeconds })); } catch {}
+  }
+  function clearActiveJob() {
+    try { localStorage.removeItem(ACTIVE_JOB_KEY); } catch {}
+  }
+  function loadActiveJob() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(ACTIVE_JOB_KEY) || 'null');
+      if (saved && STUDIO_JOB_PATH.test(saved.statusUrl) && STUDIO_STYLES[saved.style] && STUDIO_FORMATS[saved.format] && typeof saved.title === 'string' && Number.isInteger(saved.durationSeconds)) return saved;
+    } catch {}
+    clearActiveJob();
+    return null;
+  }
+  function resumeActiveJob() {
+    const saved = run ? null : loadActiveJob();
+    if (saved) void startRender(saved, saved.statusUrl);
+  }
+
+  async function startRender(plan, resumeStatusUrl) {
     const current = { controller: new AbortController(), statusUrl: null, cancelled: false, startedAt: Date.now(), clock: null };
     run = current;
     updateSubmit();
     setFormDisabled(true);
     slowText.classList.add('hidden');
-    setStage({ stage: 'Enviando a produção ao servidor…', progress: null });
+    setStage({ stage: resumeStatusUrl ? 'Retomando o acompanhamento da renderização…' : 'Enviando a produção ao servidor…', progress: null });
     showPanel('rendering');
     cancelButton.disabled = false;
     tick();
     current.clock = setInterval(tick, 1000);
     window.addEventListener('beforeunload', warnBeforeLeaving);
     try {
-      const response = await fetch('/api/studio/render', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan }),
-        signal: current.controller.signal,
-      });
-      let outcome = interpretRenderResponse(response.status, await readJson(response));
+      let outcome;
+      if (resumeStatusUrl) {
+        outcome = { kind: 'pending', statusUrl: resumeStatusUrl, stage: 'Retomando o acompanhamento da renderização…', progress: null };
+      } else {
+        const response = await fetch('/api/studio/render', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ plan }),
+          signal: current.controller.signal,
+        });
+        outcome = interpretRenderResponse(response.status, await readJson(response));
+      }
       while (outcome.kind === 'pending') {
-        if (outcome.statusUrl) current.statusUrl = outcome.statusUrl;
+        if (outcome.statusUrl && outcome.statusUrl !== current.statusUrl) {
+          current.statusUrl = outcome.statusUrl;
+          saveActiveJob(current.statusUrl, plan);
+        }
         setStage(outcome);
         outcome = await pollJob(current);
       }
+      // Session expiry keeps the job so it is resumed after signing in again.
+      if (outcome.kind !== 'locked') clearActiveJob();
       if (!current.cancelled) finish(outcome, plan);
     } catch {
       if (!current.cancelled) {
@@ -725,6 +759,7 @@ ${STUDIO_RENDER_PROTOCOL_SOURCE}
     if (!current || current.cancelled) return;
     current.cancelled = true;
     cancelButton.disabled = true;
+    clearActiveJob();
     current.controller.abort();
     let confirmed = false;
     if (current.statusUrl) {
@@ -779,6 +814,7 @@ ${STUDIO_RENDER_PROTOCOL_SOURCE}
       $('#studio-token').value = '';
       setLocked(false);
       void checkEngine();
+      resumeActiveJob();
       $('#studio-title').focus();
     } catch {
       unlockError.textContent = 'Não foi possível estabelecer uma sessão segura.';
@@ -800,7 +836,7 @@ ${STUDIO_RENDER_PROTOCOL_SOURCE}
       const body = await readJson(response);
       const authenticated = !!body && body.authenticated === true;
       setLocked(!authenticated);
-      if (authenticated) void checkEngine();
+      if (authenticated) { void checkEngine(); resumeActiveJob(); }
     } catch {
       setLocked(true, 'Não foi possível verificar a sessão. Verifique sua conexão.');
     }

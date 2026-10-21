@@ -2,7 +2,8 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
-import { StudioJobError, type StudioJobErrorCode, type StudioRenderJobs } from '../studio/StudioRenderJobs.js';
+import { RemoteStudioEngine, parseWorkerStatus } from '../studio/RemoteStudioEngine.js';
+import { StudioEngineError, StudioJobError, type StudioJobErrorCode, type StudioRenderJobs } from '../studio/StudioRenderJobs.js';
 
 /**
  * Sebastian Studio API, mounted by SebastianHttpServer under /api/studio/.
@@ -18,6 +19,13 @@ import { StudioJobError, type StudioJobErrorCode, type StudioRenderJobs } from '
  *   GET    /api/studio/jobs/:id               status, stage, progress, downloadUrl
  *   DELETE /api/studio/jobs/:id               real cancellation
  *   GET    /api/studio/renders/:file.mp4      MP4 with Range (206) support; HEAD too
+ *
+ * Remote GPU worker (only when the engine is RemoteStudioEngine), authenticated
+ * by "Authorization: Bearer <STUDIO_WORKER_TOKEN>", never by browser sessions:
+ *   POST /api/studio/worker/claim              { available, engine, message?, estimatedCostUsd } -> 200 { job } | 204
+ *   POST /api/studio/worker/jobs/:id/progress  { stage, progress } -> { action: continue | cancel }
+ *   PUT  /api/studio/worker/jobs/:id/result    video/mp4 body with Content-Length -> 204
+ *   POST /api/studio/worker/jobs/:id/failure   { message } -> 204
  */
 
 export interface StudioRouteContext {
@@ -37,13 +45,21 @@ const RENDER_PREFIX = '/api/studio/renders/';
 const ERROR_STATUS: Readonly<Record<StudioJobErrorCode, number>> = {
   STUDIO_UNAVAILABLE: 503,
   STUDIO_BUSY: 429,
+  STUDIO_RATE_LIMITED: 429,
   INVALID_STUDIO_PLAN: 400,
   STUDIO_COST_APPROVAL_REQUIRED: 402,
 };
 
+const WORKER_PREFIX = '/api/studio/worker/';
+const WORKER_JOB_PATH = /^\/api\/studio\/worker\/jobs\/([0-9a-f-]{36})\/(progress|result|failure)$/;
+
 export async function handleStudioApi(jobs: StudioRenderJobs, context: StudioRouteContext): Promise<void> {
   const { request, url } = context;
   const method = request.method ?? 'GET';
+  if (url.pathname.startsWith(WORKER_PREFIX)) {
+    await handleWorkerApi(jobs, context);
+    return;
+  }
   if (!context.authenticated) {
     context.writeError(401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.');
     return;
@@ -102,6 +118,91 @@ export async function handleStudioApi(jobs: StudioRenderJobs, context: StudioRou
   }
 
   context.writeError(404, 'NOT_FOUND', 'Rota do Studio não encontrada.');
+}
+
+async function handleWorkerApi(jobs: StudioRenderJobs, context: StudioRouteContext): Promise<void> {
+  const engine = jobs.renderEngine;
+  // Without a remote engine these routes do not exist; with one, only the worker token opens them.
+  if (!(engine instanceof RemoteStudioEngine)) {
+    context.writeError(404, 'NOT_FOUND', 'Rota do Studio não encontrada.');
+    return;
+  }
+  if (!engine.isWorkerAuthorized(context.request.headers.authorization)) {
+    context.writeError(401, 'UNAUTHORIZED', 'Credencial do processador inválida.');
+    return;
+  }
+  const { request, url, response } = context;
+  const method = request.method ?? 'GET';
+  if (url.pathname === `${WORKER_PREFIX}claim`) {
+    if (method !== 'POST') return methodNotAllowed(context, 'POST');
+    const status = parseWorkerStatus(await context.readJson());
+    if (!status) {
+      context.writeError(400, 'INVALID_WORKER_STATUS', 'Estado do processador inválido.');
+      return;
+    }
+    let closed = false;
+    response.once('close', () => { closed = true; });
+    const job = await engine.claim(status, engine.claimWaitMs);
+    if (closed) {
+      // The worker hung up while waiting: never hand it a job it cannot receive.
+      if (job) engine.fail(job.jobId, 'a conexão do processador caiu ao receber a tarefa');
+      return;
+    }
+    if (!job) {
+      response.writeHead(204, { 'Cache-Control': 'no-store' });
+      response.end();
+      return;
+    }
+    context.writeJson(200, { ok: true, job: { id: job.jobId, plan: job.plan } });
+    return;
+  }
+  const match = WORKER_JOB_PATH.exec(url.pathname);
+  if (!match) {
+    context.writeError(404, 'NOT_FOUND', 'Rota do Studio não encontrada.');
+    return;
+  }
+  const jobId = match[1] ?? '';
+  const action = match[2];
+  if (action === 'progress') {
+    if (method !== 'POST') return methodNotAllowed(context, 'POST');
+    const body = await context.readJson() as { stage?: unknown; progress?: unknown } | null;
+    const answer = engine.progress(jobId, typeof body?.stage === 'string' ? body.stage : '', typeof body?.progress === 'number' ? body.progress : 0);
+    if (answer === 'unknown') {
+      context.writeError(404, 'STUDIO_JOB_NOT_FOUND', 'Tarefa não atribuída a este processador.');
+      return;
+    }
+    context.writeJson(200, { ok: true, action: answer });
+    return;
+  }
+  if (action === 'failure') {
+    if (method !== 'POST') return methodNotAllowed(context, 'POST');
+    const body = await context.readJson() as { message?: unknown } | null;
+    engine.fail(jobId, typeof body?.message === 'string' ? body.message : '');
+    response.writeHead(204);
+    response.end();
+    return;
+  }
+  if (method !== 'PUT') return methodNotAllowed(context, 'PUT');
+  if (!/^video\/mp4(\s*;|$)/i.test(request.headers['content-type'] ?? '')) {
+    context.writeError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Content-Type deve ser video/mp4.', { Connection: 'close' });
+    return;
+  }
+  try {
+    const result = await engine.complete(jobId, request, Number(request.headers['content-length']));
+    if (result === 'stored') {
+      response.writeHead(204);
+      response.end();
+    } else if (result === 'too_large') {
+      context.writeError(413, 'PAYLOAD_TOO_LARGE', `O vídeo precisa de Content-Length e no máximo ${engine.maxResultBytes} bytes.`, { Connection: 'close' });
+    } else if (result === 'cancelled') {
+      context.writeError(409, 'STUDIO_JOB_CANCELLED', 'A renderização foi cancelada pelo usuário.', { Connection: 'close' });
+    } else {
+      context.writeError(404, 'STUDIO_JOB_NOT_FOUND', 'Tarefa não atribuída a este processador.', { Connection: 'close' });
+    }
+  } catch (error) {
+    if (!(error instanceof StudioEngineError)) throw error;
+    context.writeError(400, 'INVALID_UPLOAD', error.message, { Connection: 'close' });
+  }
 }
 
 function methodNotAllowed(context: StudioRouteContext, allow: string): void {
