@@ -91,7 +91,7 @@ export class ComfyVideoProvider {
               for (const entry of entries) {
                 if (!isObject(entry) || typeof entry.filename !== 'string') continue;
                 const filename = cleanName(entry.filename);
-                if (!/\\.(mp4|webm)$/i.test(filename)) continue;
+                if (!/\.(mp4|webm)$/i.test(filename)) continue;
                 const resource = new URL('view', this.base);
                 resource.searchParams.set('filename', filename);
                 if (typeof entry.subfolder === 'string') resource.searchParams.set('subfolder', entry.subfolder);
