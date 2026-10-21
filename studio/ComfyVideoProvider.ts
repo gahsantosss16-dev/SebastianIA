@@ -62,7 +62,7 @@ export class ComfyVideoProvider {
     const clientId = randomUUID();
     const queued = await this.fetcher(new URL('prompt', this.base), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: workflow, client_id: clientId }), signal,
+      body: JSON.stringify({ prompt: workflow, client_id: clientId }), ...(signal ? { signal } : {}),
     });
     if (!queued.ok) throw new ComfyVideoError(`ComfyUI queue failed (HTTP ${queued.status})`);
     const result: unknown = await queued.json();
@@ -73,7 +73,7 @@ export class ComfyVideoProvider {
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new ComfyVideoError('Invalid ComfyUI prompt ID');
     while (Date.now() < deadline) {
       if (signal?.aborted) throw new ComfyVideoError('Video generation cancelled');
-      const response = await this.fetcher(new URL('history/' + id, this.base), { signal });
+      const response = await this.fetcher(new URL('history/' + id, this.base), { ...(signal ? { signal } : {}) });
       if (!response.ok) throw new ComfyVideoError(`ComfyUI status failed (HTTP ${response.status})`);
       const history: unknown = await response.json();
       if (!isObject(history)) throw new ComfyVideoError('Invalid ComfyUI status');
@@ -96,7 +96,7 @@ export class ComfyVideoProvider {
                 resource.searchParams.set('filename', filename);
                 if (typeof entry.subfolder === 'string') resource.searchParams.set('subfolder', entry.subfolder);
                 resource.searchParams.set('type', typeof entry.type === 'string' ? entry.type : 'output');
-                const file = await this.fetcher(resource, { signal });
+                const file = await this.fetcher(resource, { ...(signal ? { signal } : {}) });
                 if (!file.ok) throw new ComfyVideoError(`ComfyUI artifact unavailable (HTTP ${file.status})`);
                 return { filename, bytes: new Uint8Array(await file.arrayBuffer()),
                   mimeType: filename.toLowerCase().endsWith('.mp4') ? 'video/mp4' : 'video/webm' };
