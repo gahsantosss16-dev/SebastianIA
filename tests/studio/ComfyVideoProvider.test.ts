@@ -7,7 +7,7 @@ test('queues a real model workflow and retrieves its MP4', async () => {
   const provider = new ComfyVideoProvider({
     baseUrl: 'http://127.0.0.1:8188/',
     pollIntervalMs: 100,
-    fetchImpl: (async (input: RequestInfo | URL) => {
+    fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
       const url = String(input); calls.push(url);
       if (url.endsWith('/prompt')) return asJson({ prompt_id: 'job-1' });
       if (url.endsWith('/history/job-1')) return asJson({
@@ -29,7 +29,7 @@ test('refuses arbitrary remote endpoints, empty workflows and billing defaults',
   await assert.rejects(provider.generate({}), ComfyVideoError);
 });
 test('fails closed when the model finishes without video', async () => {
-  const provider = new ComfyVideoProvider({ baseUrl: 'http://127.0.0.1:8188', fetchImpl: (async (input: RequestInfo | URL) => {
+  const provider = new ComfyVideoProvider({ baseUrl: 'http://127.0.0.1:8188', fetchImpl: (async (input: Parameters<typeof fetch>[0]) => {
     return String(input).endsWith('/prompt') ? asJson({ prompt_id: 'job-2' }) : asJson({ 'job-2': { status: { completed: true }, outputs: {} } });
   }) as typeof fetch });
   await assert.rejects(provider.generate({ x: { class_type: 'NoVideo', inputs: {} } }), /without video/);
