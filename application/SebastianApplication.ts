@@ -1,3 +1,4 @@
+import { videoStudioCapabilityProvider } from './VideoStudioCapabilityProvider.js';
 import {
   bootstrapCoreOperationalRuntime,
   type CoreOperationalRuntimeBootstrapInput,
@@ -101,7 +102,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
     composition: {
       ...(options.projectContext === undefined ? {} : { projectContext: options.projectContext }),
       ...(options.projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator: options.projectTaskOrchestrator }),
-      providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider],
+      providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider, videoStudioCapabilityProvider],
       allowedFilesystemRoot,
       authorizedCommands,
       ...(options.cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider: options.cognitiveModelProvider }),
