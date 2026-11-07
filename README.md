@@ -29,9 +29,12 @@ O projeto foi concebido para se tornar um verdadeiro parceiro digital, inspirado
 
 ## Status atual
 
-- ✅ SPEC-010 — Memory Manager implementada e homologada.
-- ✅ O projeto agora conta com um Memory Manager funcional, com isolamento por namespace e validação explícita.
-- ⏳ A próxima SPEC ainda não foi iniciada.
+O assistente possui conversa, memória persistente, ferramentas e API HTTP autenticada. O Estúdio de Vídeos é uma capacidade adicional, com roteiro gratuito, aprovação, geração local, status, prévia e download.
+
+- [Como executar o Estúdio e reproduzir o piloto](docs/VIDEO_STUDIO_RUNBOOK.md).
+- [Plano original da PR #6](docs/VIDEO_STUDIO_PLAN.md).
+
+O renderizador exige FFmpeg, ffprobe e eSpeak NG no servidor. Não contrata serviços nem chama APIs pagas. A ausência desses binários não desabilita o assistente pessoal.
 
 ---
 
