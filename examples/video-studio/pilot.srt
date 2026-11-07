@@ -1,0 +1,40 @@
+1
+00:00:00,000 --> 00:00:02,976
+Hoje, no laboratório: Beto, o robô
+
+2
+00:00:02,976 --> 00:00:05,246
+que serviu café para uma planta.
+
+3
+00:00:06,000 --> 00:00:09,048
+Beto, o pequeno robô, queria resolver
+
+4
+00:00:09,048 --> 00:00:10,998
+tudo apertando um botão.
+
+5
+00:00:12,000 --> 00:00:14,762
+O botão piscou. A máquina serviu
+
+6
+00:00:14,762 --> 00:00:17,003
+café para um vaso de plantas!
+
+7
+00:00:18,000 --> 00:00:20,813
+Lia olhou para Beto: primeiro entender,
+
+8
+00:00:20,813 --> 00:00:22,222
+depois apertar!
+
+9
+00:00:24,000 --> 00:00:26,633
+Beto aprendeu a perguntar. E a
+
+10
+00:00:26,633 --> 00:00:29,494
+planta? Nunca esteve tão acordada!
+

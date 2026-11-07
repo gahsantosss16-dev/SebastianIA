@@ -1,3 +1,6 @@
+import { createReadStream, statSync } from 'node:fs';
+import { VideoStudioService, VideoStudioError } from '../studio/VideoStudioService.js';
+import { VIDEO_STUDIO_HTML, VIDEO_STUDIO_SCRIPT, VIDEO_STUDIO_STYLES } from './VideoStudioWeb.js';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -82,6 +85,7 @@ interface OnlineCommandExecutor {
 }
 
 export interface SebastianHttpServerOptions {
+  readonly videoStudio?: VideoStudioService;
   readonly projectContext?: ProjectConversationContext;
   readonly projectTaskOrchestrator?: ProjectTaskOrchestrator;
   readonly application: OnlineCommandExecutor;
@@ -134,6 +138,7 @@ export class SebastianHttpServer {
   private readonly webSessionStateFilePath: string | undefined;
   private readonly executionTimeoutMs: number;
   private readonly server: Server;
+  private readonly videoStudio: VideoStudioService | undefined;
   private converseInFlight = false;
   private shuttingDown = false;
   private applicationShutDown = false;
@@ -165,6 +170,7 @@ export class SebastianHttpServer {
     }
 
     this.application = options.application;
+    this.videoStudio = options.videoStudio;
     this.projectContext = options.projectContext;
     this.projectTaskOrchestrator = options.projectTaskOrchestrator;
     this.conversationRegistry = options.conversationRegistry;
@@ -273,6 +279,57 @@ export class SebastianHttpServer {
           isStylesheet ? SEBASTIAN_WEB_STYLES : SEBASTIAN_WEB_SCRIPT,
         );
         return;
+      }
+
+      if (url.pathname === '/studio' || url.pathname === '/assets/video-studio.js' || url.pathname === '/assets/video-studio.css') {
+        if (request.method !== 'GET') { this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId); return; }
+        this.writeWebAsset(response, url.pathname === '/studio' ? 'text/html; charset=utf-8' : url.pathname.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', url.pathname === '/studio' ? VIDEO_STUDIO_HTML : url.pathname.endsWith('.css') ? VIDEO_STUDIO_STYLES : VIDEO_STUDIO_SCRIPT);
+        return;
+      }
+      if (url.pathname === '/api/video/jobs' || url.pathname.startsWith('/api/video/jobs/')) {
+        const bearer = this.isAuthorized(request.headers.authorization);
+        if (!bearer && (!this.hasValidWebSession(request) || (request.method !== 'GET' && !this.hasSameOrigin(request)))) {
+          this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId); return;
+        }
+        if (!this.videoStudio) { this.writeError(response, 503, 'STUDIO_UNAVAILABLE', 'Estúdio não configurado.', requestId); return; }
+        const parts = url.pathname.slice('/api/video/jobs'.length).split('/').filter(Boolean);
+        try {
+          if (parts.length === 0 && request.method === 'GET') { this.writeJson(response, 200, { jobs: this.videoStudio.list() }); return; }
+          if (parts.length === 0 && request.method === 'POST') {
+            if (!isJsonContentType(request.headers['content-type'])) throw new VideoStudioError(415, 'Use application/json.');
+            const body = await readJsonBody(request);
+            if (!body || typeof body !== 'object' || Array.isArray(body)) throw new VideoStudioError(400, 'Entrada inválida.');
+            this.writeJson(response, 201, { ...this.videoStudio.create(body as Record<string, unknown>) }); return;
+          }
+          const id = parts[0] ?? '';
+          if (!/^[a-f0-9-]{36}$/.test(id)) throw new VideoStudioError(404, 'Vídeo não encontrado.');
+          if (parts.length === 1 && request.method === 'GET') { this.writeJson(response, 200, { ...this.videoStudio.get(id) }); return; }
+          if (parts.length === 2 && parts[1] === 'render' && request.method === 'POST') {
+            if (!isJsonContentType(request.headers['content-type'])) throw new VideoStudioError(415, 'Use application/json.');
+            const body = await readJsonBody(request) as { approved?: unknown } | null;
+            this.writeJson(response, 202, { ...this.videoStudio.approve(id, body?.approved) }); return;
+          }
+          if (parts.length === 2 && request.method === 'GET' && (parts[1] === 'video.mp4' || parts[1] === 'captions.srt')) {
+            const file = this.videoStudio.artifact(id, parts[1]);
+            const size = statSync(file).size;
+            const range = request.headers.range;
+            let start = 0, end = size - 1;
+            if (range !== undefined) {
+              const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+              if (!match) { response.writeHead(416, { 'Content-Range': `bytes */${size}` }); response.end(); return; }
+              start = Number(match[1]); end = match[2] ? Number(match[2]) : end;
+              if (start > end || start >= size || end >= size) { response.writeHead(416, { 'Content-Range': `bytes */${size}` }); response.end(); return; }
+            }
+            response.writeHead(range ? 206 : 200, { 'Content-Type': parts[1] === 'video.mp4' ? 'video/mp4' : 'application/x-subrip; charset=utf-8', 'Content-Length': end-start+1, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...(range ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {}), ...(url.searchParams.has('download') || parts[1] === 'captions.srt' ? { 'Content-Disposition': `attachment; filename="${parts[1]}"` } : {}) });
+            const stream = createReadStream(file, { start, end });
+            stream.on('error', () => response.destroy());
+            response.on('close', () => stream.destroy()); stream.pipe(response); return;
+          }
+          throw new VideoStudioError(405, 'Método ou rota não permitido.');
+        } catch (error) {
+          if (error instanceof VideoStudioError) { this.writeError(response, error.status, 'VIDEO_STUDIO_ERROR', error.message, requestId); return; }
+          throw error;
+        }
       }
 
       if (url.pathname === '/health') {
@@ -644,7 +701,7 @@ export class SebastianHttpServer {
       'Content-Type': contentType,
       'Content-Length': Buffer.byteLength(body),
       'Cache-Control': 'no-store',
-      'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      'Content-Security-Policy': "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',

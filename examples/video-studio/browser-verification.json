@@ -1,0 +1,18 @@
+{
+  "chromiumPlayback": {
+    "videoWidth": 720,
+    "videoHeight": 1280,
+    "duration": 30.021333,
+    "startedAt": 0.762667,
+    "seekedAt": 12,
+    "ended": true,
+    "audioRms": 0.0270095785628122,
+    "error": null
+  },
+  "artifactSha256": "2fdb5e9f4627d46f42838f747e96e73827ab78fc482a25d22bb7a5d1beced410",
+  "exactPublishedPilot": true,
+  "source": "Previously generated real pilot, served through production authenticated media routes",
+  "authenticatedSession": true,
+  "seekAndRange": true,
+  "javascriptErrors": []
+}

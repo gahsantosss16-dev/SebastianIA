@@ -700,6 +700,7 @@ export const SEBASTIAN_WEB_HTML = `<!doctype html>
   <link rel="stylesheet" href="/assets/sebastian.css">
 </head>
 <body>
+  <a href="/studio">Estúdio de vídeos</a>
   <div class="shell">
     <section class="unlock hidden" id="unlock" aria-labelledby="unlock-title">
       <div class="unlock-card">

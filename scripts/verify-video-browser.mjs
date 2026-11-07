@@ -1,0 +1,55 @@
+import { createHash } from 'node:crypto';
+// Optional browser verification; uses an already installed Playwright, never installs it.
+const { chromium } = await import(process.env.SEBASTIAN_PLAYWRIGHT_MODULE ?? 'playwright');
+import { createSebastianApplication } from '../dist/application/SebastianApplication.js';
+import { SebastianHttpServer } from '../dist/application/SebastianHttpServer.js';
+import { VideoStudioService } from '../dist/studio/VideoStudioService.js';
+import { ConversationRegistry, FileCommandContextHydrator, FileMemoryStore } from '../dist/core/memory/index.js';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, copyFileSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+const evidence = resolve('examples/video-studio');
+import assert from 'node:assert/strict';
+const dir = mkdtempSync(join(tmpdir(),'sebastian-browser-'));
+const store = new FileMemoryStore(join(dir,'memory.json'));
+const app = createSebastianApplication({dataDir:dir});
+const http = new SebastianHttpServer({ application:app,apiToken:'browser-local-verification-secret',conversationRegistry:new ConversationRegistry(store,new FileCommandContextHydrator(store)),videoStudio:new VideoStudioService(join(dir,'videos'),{render:async(_plan,target)=>{mkdirSync(target,{recursive:true});copyFileSync(join(evidence,'pilot.mp4'),join(target,'video.mp4'));copyFileSync(join(evidence,'pilot.srt'),join(target,'captions.srt'));}}) });
+const started=await http.listen(0,'127.0.0.1');
+const base=`http://127.0.0.1:${started.port}`;
+const browser=await chromium.launch({executablePath:process.env.SEBASTIAN_CHROMIUM_PATH ?? '/usr/bin/chromium',headless:true,args:['--no-sandbox']});
+const page=await browser.newPage({viewport:{width:1100,height:900}});
+const errors=[];page.on('pageerror',e=>errors.push(e.message));
+page.on('console',m=>{if(m.type()==='error' && /Content Security Policy|Refused/.test(m.text())) errors.push(m.text());});
+try{
+ await page.goto(base+'/studio');
+ await page.waitForFunction(()=>document.querySelector('#error').textContent.length>0);
+ assert.match(await page.locator('#error').textContent(),/Sessão/);
+ const login=await page.request.post(base+'/api/web/session',{headers:{Origin:base},data:{token:'browser-local-verification-secret'}});assert.equal(login.status(),201);
+ await page.reload();await page.locator('#idea').fill('Beto, o robô que serviu café para uma planta');await page.locator('#form button').click();
+ await page.getByRole('button',{name:'Aprovar roteiro e gerar MP4 (US$ 0)'}).waitFor();
+ assert.match(await page.locator('article pre').textContent(),/Beto/);
+ await page.getByRole('button',{name:'Aprovar roteiro e gerar MP4 (US$ 0)'}).click();
+ await page.locator('video').waitFor({timeout:90000});
+ await page.waitForFunction(()=>document.querySelector('video').readyState>=2);
+ const playback = await page.locator('video').evaluate(async v=>{
+   const ac = new AudioContext(); await ac.resume();
+   const source=ac.createMediaElementSource(v), analyser=ac.createAnalyser();source.connect(analyser);analyser.connect(ac.destination);
+   await v.play(); await new Promise(r=>setTimeout(r,750));
+   const samples=new Float32Array(analyser.fftSize);analyser.getFloatTimeDomainData(samples);
+   const rms=Math.sqrt(samples.reduce((sum,x)=>sum+x*x,0)/samples.length);
+   const startedAt=v.currentTime;v.currentTime=12;
+   await new Promise(r=>v.addEventListener('seeked',r,{once:true}));
+   const seekedAt=v.currentTime;v.playbackRate=8;await v.play();
+   await new Promise((resolve,reject)=>{v.addEventListener('ended',resolve,{once:true});v.addEventListener('error',reject,{once:true});});
+   const result={videoWidth:v.videoWidth,videoHeight:v.videoHeight,duration:v.duration,startedAt,seekedAt,ended:v.ended,audioRms:rms,error:v.error};
+   v.currentTime=13;await new Promise(r=>v.addEventListener('seeked',r,{once:true}));await ac.close();return result;
+ });
+ assert.equal(playback.videoWidth,720);assert.equal(playback.videoHeight,1280);assert.ok(playback.startedAt>0);assert.ok(playback.seekedAt>=12);assert.equal(playback.ended,true);assert.ok(playback.audioRms>0.001);assert.equal(playback.error,null);
+ const mediaUrl=await page.locator('video').getAttribute('src');const artifact=await page.request.get(base+mediaUrl,{headers:{Authorization:'Bearer browser-local-verification-secret'}});assert.equal(artifact.status(),200);const digest=createHash('sha256').update(await artifact.body()).digest('hex');const expectedDigest=createHash('sha256').update(readFileSync(join(evidence,'pilot.mp4'))).digest('hex');assert.equal(digest,expectedDigest);
+ writeFileSync(join(evidence,'browser-verification.json'),JSON.stringify({chromiumPlayback:playback,artifactSha256:digest,exactPublishedPilot:true,source:'Previously generated real pilot, served through production authenticated media routes',authenticatedSession:true,seekAndRange:true,javascriptErrors:errors},null,2));
+ await page.screenshot({path:join(evidence,'studio-desktop.png'),fullPage:true});
+ await page.setViewportSize({width:390,height:844});await page.screenshot({path:join(evidence,'studio-mobile.png'),fullPage:true});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ assert.deepEqual(errors,[]);
+ console.log('Browser passed: exact published pilot playback via authenticated routes, audible decoded audio, seek, ended, CSP, desktop and mobile.');
+}finally{await browser.close();await started.close();rmSync(dir,{recursive:true,force:true});}

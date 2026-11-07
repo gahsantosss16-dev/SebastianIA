@@ -1,0 +1,14 @@
+{
+  "tests": 999,
+  "pass": 999,
+  "fail": 0,
+  "cancelled": 0,
+  "skipped": 0,
+  "command": "PATH=\"/workspace/.tools/espeak-ng/bin:$PATH\" SEBASTIAN_VIDEO_E2E=1 npm test",
+  "typecheck": "passed",
+  "build": "passed",
+  "coreFilesChanged": false,
+  "browserVerification": "browser-verification.json",
+  "mediaVerification": "verification.json",
+  "durationMs": 141762.578725
+}

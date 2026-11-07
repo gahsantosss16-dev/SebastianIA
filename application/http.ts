@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { VideoStudioService } from '../studio/VideoStudioService.js';
 
 import { createLogger } from '../core/logger.js';
 import { createOnlineSebastianApplication } from './OnlineSebastianApplication.js';
@@ -38,6 +39,7 @@ async function startOnlineServer(): Promise<void> {
     const conversationRegistry = new ConversationRegistry(conversationMemoryStore, conversationHydrator);
     const httpServer = new SebastianHttpServer({
       application,
+      videoStudio: new VideoStudioService(join(dataDir, 'video-studio')),
       apiToken,
       conversationRegistry,
       ...(projectContext === undefined ? {} : { projectContext }),
