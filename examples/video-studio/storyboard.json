@@ -1,0 +1,41 @@
+{
+  "title": "Beto, o robô que serviu café para uma planta",
+  "format": "9:16",
+  "durationSeconds": 30,
+  "scenes": [
+    {
+      "index": 1,
+      "durationSeconds": 6,
+      "narration": "Hoje, no laboratório: Beto, o robô que serviu café para uma planta.",
+      "visualPrompt": "Laboratório ao amanhecer"
+    },
+    {
+      "index": 2,
+      "durationSeconds": 6,
+      "narration": "Beto, o pequeno robô, queria resolver tudo apertando um botão.",
+      "visualPrompt": "Beto diante do botão"
+    },
+    {
+      "index": 3,
+      "durationSeconds": 6,
+      "narration": "O botão piscou. A máquina serviu café para um vaso de plantas!",
+      "visualPrompt": "Café para a planta"
+    },
+    {
+      "index": 4,
+      "durationSeconds": 6,
+      "narration": "Lia olhou para Beto: primeiro entender, depois apertar!",
+      "visualPrompt": "Lia e Beto conversam"
+    },
+    {
+      "index": 5,
+      "durationSeconds": 6,
+      "narration": "Beto aprendeu a perguntar. E a planta? Nunca esteve tão acordada!",
+      "visualPrompt": "Beto e a planta desperta"
+    }
+  ],
+  "caption": "Beto, o robô que serviu café para uma planta #comedia #SebastianIA",
+  "status": "storyboard_only",
+  "estimatedCostUsd": 0,
+  "provider": "local-ffmpeg-espeak"
+}

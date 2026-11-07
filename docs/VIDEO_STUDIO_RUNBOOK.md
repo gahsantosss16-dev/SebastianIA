@@ -44,6 +44,21 @@ Os jobs ficam em `<diretório de dados existente>/video-studio/<uuid>/`. Para li
 
 É uma animação ilustrada original, com movimento de câmera, cinco cenas, legendas gravadas no vídeo e narração sintética portuguesa do eSpeak NG. Não é animação cinematográfica ou voz neural. A história usa um modelo de comédia fixo com Beto, Lia e a planta; a ideia muda a abertura. A interface informa essa limitação. Não promete produzir qualquer roteiro arbitrário nem imitar personagens protegidos.
 
-Duração inteira de 15 a 60 segundos; ideia de 1 a 240 caracteres. Narração é sintetizada por cena e acelerada apenas dentro de um limite; textos longos para a duração escolhida falham de forma visível. Os blocos de legenda acompanham a duração do áudio da cena; não há alinhamento fonético palavra a palavra. Sem trilha de terceiros.
+Duração inteira de 15 a 60 segundos; ideia de 1 a 240 caracteres. Narração é sintetizada por cena e acelerada apenas dentro de um limite; textos longos para a duração escolhida falham de forma visível. Cada bloco de legenda é sintetizado como um trecho WAV próprio; seus limites usam a duração medida e o tempo aplicado. Não há alinhamento fonético palavra a palavra. Sem trilha de terceiros.
 
 Em servidor sem os binários locais, o assistente continua funcionando e a geração retorna um erro explícito. Esta branch não instala nada na Hostinger e não faz merge/deploy. O MP4 piloto e as evidências devem ser revisados antes de homologação e eventual publicação. A PR #6 foi usada como base, preservando seu histórico.
+
+## Execução validada em 7 de novembro de 2026
+
+O usuário autorizou explicitamente o eSpeak NG gratuito. Foi instalado por extração local dos pacotes Debian oficiais em `/workspace/.tools/espeak-ng`, com suas bibliotecas obrigatórias libespeak-ng, libpcaudio e libsonic. O wrapper `bin/espeak-ng` aponta as bibliotecas e os dados de voz locais; `--voices=pt` confirmou `Portuguese_(Brazil)`, selecionado pelo renderizador com `-v pt-br`. Nenhuma instalação global, assinatura ou gasto.
+
+Para reproduzir **neste ambiente**:
+
+```sh
+PATH="/workspace/.tools/espeak-ng/bin:$PATH" npm run video:pilot
+PATH="/workspace/.tools/espeak-ng/bin:$PATH" SEBASTIAN_VIDEO_E2E=1 npm test
+```
+
+Para usar o servidor normal com essa instalação local, aplique o mesmo prefixo ao comando de inicialização existente. Outros ambientes precisam disponibilizar os binários documentados; este trabalho não os instala automaticamente na hospedagem.
+
+O piloto e as evidências estão em [examples/video-studio](../examples/video-studio/README.md). A validação detectou e corrigiu o zoom que reiniciava por quadro; o movimento agora usa o contador de quadros de saída. A reprodução real no Chromium confirmou áudio, seek e finalização. O eSpeak tem timbre robótico; alternativas gratuitas propostas, sem instalação, são narração própria ou Piper com um modelo pt-BR de licença adequada. Preservados todos os arquivos de `core/`, o assistente pessoal e os contratos de produção anteriores. Sem merge na main.

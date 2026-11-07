@@ -1,0 +1,29 @@
+{
+  "authenticatedHttpDownload": true,
+  "unauthorizedAccessStatus": 401,
+  "fullDecodePassed": true,
+  "externalCostUsd": 0,
+  "maxVolumeDb": -1.3,
+  "renderer": "FFmpeg + eSpeak NG (pt-br)",
+  "durationSeconds": 30.021333,
+  "video": "H.264 720x1280 24fps",
+  "audio": "AAC 48kHz mono",
+  "subtitles": "burned-in + SRT",
+  "originalScenes": 5,
+  "movementMeanPixelDifference": 6.060977095516569,
+  "distinctSceneMeanPixelDifferences": [
+    3.6659356725146197,
+    5.992019980506822,
+    16.52570662768031,
+    9.790204678362572
+  ],
+  "sceneMaxVolumesDb": [
+    -2.2,
+    -3.3,
+    -1.8,
+    -3.1,
+    -1.3
+  ],
+  "captionTiming": "Measured WAV segment boundaries, adjusted by applied tempo; tolerance 2ms before AAC encoding",
+  "captionSegments": 10
+}

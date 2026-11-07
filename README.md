@@ -31,6 +31,7 @@ O projeto foi concebido para se tornar um verdadeiro parceiro digital, inspirado
 
 O assistente possui conversa, memória persistente, ferramentas e API HTTP autenticada. O Estúdio de Vídeos é uma capacidade adicional, com roteiro gratuito, aprovação, geração local, status, prévia e download.
 
+- [Assistir / baixar o primeiro MP4 real](https://github.com/gahsantosss16-dev/SebastianIA/raw/refs/heads/feat/issue-7-real-mp4/examples/video-studio/pilot.mp4).
 - [Como executar o Estúdio e reproduzir o piloto](docs/VIDEO_STUDIO_RUNBOOK.md).
 - [Plano original da PR #6](docs/VIDEO_STUDIO_PLAN.md).
 

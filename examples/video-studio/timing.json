@@ -1,0 +1,82 @@
+[
+  {
+    "scene": 1,
+    "text": "Hoje, no laboratório: Beto, o robô",
+    "startSeconds": 0,
+    "endSeconds": 2.976009,
+    "sourceDurationSeconds": 2.976009,
+    "tempo": 1
+  },
+  {
+    "scene": 1,
+    "text": "que serviu café para uma planta.",
+    "startSeconds": 2.976009,
+    "endSeconds": 5.245986,
+    "sourceDurationSeconds": 2.269977,
+    "tempo": 1
+  },
+  {
+    "scene": 2,
+    "text": "Beto, o pequeno robô, queria resolver",
+    "startSeconds": 6,
+    "endSeconds": 9.048118,
+    "sourceDurationSeconds": 3.048118,
+    "tempo": 1
+  },
+  {
+    "scene": 2,
+    "text": "tudo apertando um botão.",
+    "startSeconds": 9.048118,
+    "endSeconds": 10.997596,
+    "sourceDurationSeconds": 1.949478,
+    "tempo": 1
+  },
+  {
+    "scene": 3,
+    "text": "O botão piscou. A máquina serviu",
+    "startSeconds": 12,
+    "endSeconds": 14.762449,
+    "sourceDurationSeconds": 2.762449,
+    "tempo": 1
+  },
+  {
+    "scene": 3,
+    "text": "café para um vaso de plantas!",
+    "startSeconds": 14.762449,
+    "endSeconds": 17.002948,
+    "sourceDurationSeconds": 2.240499,
+    "tempo": 1
+  },
+  {
+    "scene": 4,
+    "text": "Lia olhou para Beto: primeiro entender,",
+    "startSeconds": 18,
+    "endSeconds": 20.812925,
+    "sourceDurationSeconds": 2.812925,
+    "tempo": 1
+  },
+  {
+    "scene": 4,
+    "text": "depois apertar!",
+    "startSeconds": 20.812925,
+    "endSeconds": 22.222267000000002,
+    "sourceDurationSeconds": 1.409342,
+    "tempo": 1
+  },
+  {
+    "scene": 5,
+    "text": "Beto aprendeu a perguntar. E a",
+    "startSeconds": 24,
+    "endSeconds": 26.633468999999998,
+    "sourceDurationSeconds": 2.633469,
+    "tempo": 1
+  },
+  {
+    "scene": 5,
+    "text": "planta? Nunca esteve tão acordada!",
+    "startSeconds": 26.633468999999998,
+    "endSeconds": 29.494104,
+    "sourceDurationSeconds": 2.860635,
+    "tempo": 1
+  }
+]
