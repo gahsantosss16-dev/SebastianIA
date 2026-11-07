@@ -62,29 +62,41 @@ export class LocalVideoRenderer implements VideoRenderer {
     await runMedia('ffmpeg', ['-version']);
     await runMedia('espeak-ng', ['--version']);
     await mkdir(directory, { recursive: true });
+    const timings: { scene: number; text: string; startSeconds: number; endSeconds: number; sourceDurationSeconds: number; tempo: number }[] = [];
     let offset = 0, fullSrt = '', cue = 1;
     for (const [i, scene] of plan.scenes.entries()) {
       progress(i + 1);
       await writeFile(join(directory, 'scene.ppm'), sceneArt(i));
-      await writeFile(join(directory, 'narration.txt'), scene.narration);
-      await runMedia('espeak-ng', ['-v', 'pt-br', '-s', '165', '-f', 'narration.txt', '-w', 'voice.wav'], directory);
-      const voice = await probeMedia(join(directory, 'voice.wav'));
-      const speed = Math.max(1, Number(voice.format.duration) / (scene.durationSeconds - 0.3));
-      if (speed > 2.5) throw new Error('Narração longa demais. Reduza a ideia ou aumente a duração.');
       const words = scene.narration.split(/\s+/);
       const chunks = Array.from({ length: Math.ceil(words.length / 6) }, (_, n) => words.slice(n*6, n*6+6).join(' '));
-      const spokenDuration = Number(voice.format.duration) / speed;
-      let srt = '';
+      // Synthesize exactly what each cue displays. Measured WAV boundaries,
+      // rather than equal subdivisions, keep the subtitles aligned to speech.
+      const durations: number[] = [];
       for (const [n, chunk] of chunks.entries()) {
-        const a = n * spokenDuration / chunks.length, b = (n+1) * spokenDuration / chunks.length;
+        await writeFile(join(directory, 'narration.txt'), chunk);
+        await runMedia('espeak-ng', ['-v', 'pt-br', '-s', '165', '-f', 'narration.txt', '-w', `voice-${n}.wav`], directory);
+        const voice = await probeMedia(join(directory, `voice-${n}.wav`));
+        durations.push(Number(voice.format.duration));
+      }
+      const voiceDuration = durations.reduce((a, b) => a + b, 0);
+      const speed = Math.max(1, voiceDuration / (scene.durationSeconds - 0.3));
+      if (!Number.isFinite(speed) || speed > 2.5) throw new Error('Narração longa demais. Reduza a ideia ou aumente a duração.');
+      await writeFile(join(directory, 'voice-concat.txt'), chunks.map((_, n) => `file 'voice-${n}.wav'`).join('\n'));
+      await runMedia('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '1', '-i', 'voice-concat.txt', '-c', 'copy', 'voice.wav'], directory);
+      let srt = '', elapsed = 0;
+      for (const [n, chunk] of chunks.entries()) {
+        const a = elapsed, b = elapsed + durations[n]! / speed;
         srt += `${n+1}\n${subtitleTime(a)} --> ${subtitleTime(b)}\n${chunk}\n\n`;
         fullSrt += `${cue++}\n${subtitleTime(offset+a)} --> ${subtitleTime(offset+b)}\n${chunk}\n\n`;
+        timings.push({ scene: i+1, text: chunk, startSeconds: offset+a, endSeconds: offset+b, sourceDurationSeconds: durations[n]!, tempo: speed });
+        elapsed = b;
       }
       await writeFile(join(directory, 'scene.srt'), srt);
-      await runMedia('ffmpeg', ['-y', '-v', 'error', '-loop', '1', '-i', 'scene.ppm', '-i', 'voice.wav', '-vf', "scale=720:1280,zoompan=z='min(zoom+0.00015,1.04)':d=1:s=720x1280:fps=24,subtitles=scene.srt:force_style='FontName=DejaVu Sans,FontSize=19,PrimaryColour=&HFFFFFF,OutlineColour=&H181818,BorderStyle=1,Outline=2,MarginV=42'", '-af', `atempo=${speed.toFixed(5)},apad`, '-t', String(scene.durationSeconds), '-r', '24', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-threads', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '1', `${i}.mp4`], directory);
+      await runMedia('ffmpeg', ['-y', '-v', 'error', '-loop', '1', '-i', 'scene.ppm', '-i', 'voice.wav', '-vf', "scale=720:1280,zoompan=z='min(1+on*0.0003,1.045)':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d=1:s=720x1280:fps=24,subtitles=scene.srt:force_style='FontName=DejaVu Sans,FontSize=12,PrimaryColour=&HFFFFFF,OutlineColour=&H181818,BorderStyle=1,Outline=2,MarginV=42'", '-af', `atempo=${speed.toFixed(5)},apad`, '-t', String(scene.durationSeconds), '-r', '24', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-threads', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-ar', '48000', '-ac', '1', `${i}.mp4`], directory);
       offset += scene.durationSeconds;
     }
     await writeFile(join(directory, 'captions.srt'), fullSrt);
+    await writeFile(join(directory, 'timing.json'), JSON.stringify(timings, null, 2));
     await writeFile(join(directory, 'concat.txt'), plan.scenes.map((_, i) => `file '${i}.mp4'`).join('\n'));
     await runMedia('ffmpeg', ['-y', '-v', 'error', '-f', 'concat', '-safe', '1', '-i', 'concat.txt', '-c', 'copy', '-movflags', '+faststart', 'rendering.mp4'], directory);
     const result = await probeMedia(join(directory, 'rendering.mp4'));
