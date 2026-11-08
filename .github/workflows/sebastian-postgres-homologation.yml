@@ -2,12 +2,20 @@ name: SebastianIA PostgreSQL homologation (manual)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/sebastian-persistent-memory]
+    paths:
+      - '.github/workflows/sebastian-postgres-homologation.yml'
+      - 'scripts/**'
+      - 'core/memory/**'
+      - 'config/supabase-prod-ca-2021.crt'
 
 permissions:
   contents: read
 
 jobs:
   postgres-homologation:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[postgres-homologation]')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: sebastian-homologation
@@ -23,7 +31,7 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
-      - name: Run PostgreSQL connection check
+      - name: Verify PostgreSQL identity, client TLS and isolated persistence
         env:
           SEBASTIAN_TECHNICAL_PASSWORD: ${{ secrets.SEBASTIAN_APP_DEV_PASSWORD }}
           SEBASTIAN_SUPABASE_CA_FILE: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
@@ -42,4 +50,4 @@ jobs:
           printf '%s' "$SEBASTIAN_TECHNICAL_PASSWORD" > "$secret_file"
           unset SEBASTIAN_TECHNICAL_PASSWORD
           export SEBASTIAN_SUPABASE_PASSWORD_FILE="$secret_file"
-          npm run run:postgres:homologation
+          npm run run:postgres:homologation -- --verify-persistence

@@ -1,3 +1,4 @@
+import { TLSSocket, checkServerIdentity } from 'node:tls';
 import { Pool, type PoolConfig, type QueryResultRow } from 'pg';
 
 /**
@@ -12,7 +13,7 @@ export interface SqlQueryable {
 
 export class PostgresMemoryStore {
   private poolFailure: Error | undefined;
-  public constructor(private readonly database: SqlQueryable) {}
+  public constructor(private readonly database: SqlQueryable, private readonly pool?: Pool, private readonly tlsHostname?: string) {}
 
   public static fromConnectionString(connectionString: string, ca?: string): PostgresMemoryStore {
     if (typeof connectionString !== 'string' || connectionString.trim() === '') {
@@ -32,7 +33,7 @@ export class PostgresMemoryStore {
       ...(local ? {} : { ssl: { rejectUnauthorized: true, ...(ca === undefined ? {} : { ca }) } }),
     };
     const pool = new Pool(config);
-    const store = new PostgresMemoryStore(pool);
+    const store = new PostgresMemoryStore(pool, pool, url.hostname);
     pool.on('error', (cause) => { store.poolFailure = new Error('PostgreSQL memory connection failed; restart the persistence runtime.', { cause }); });
     return store;
   }
@@ -74,18 +75,33 @@ export class PostgresMemoryStore {
     await this.database.query('select namespace from sebastian.memory_records limit 0');
   }
 
-  /** Read-only homologation check: never returns server fields or credential material. */
-  public async verifySecureIdentity(expectedUser: string): Promise<void> {
+  /** Inspect the actual Node TLS socket; pg_stat_ssl through a pooler describes a different hop. */
+  public async inspectSecureConnection(expectedUser: string): Promise<{
+    identityVerified: boolean; tlsVerified: boolean; backendTls: boolean; tlsProtocol: string | null;
+  }> {
     this.assertAvailable();
-    const result = await this.database.query<{ identity_matches: boolean; tls_verified: boolean }>(
-      `select current_user::text = $1 as identity_matches,
-        coalesce((select ssl and version in ('TLSv1.2', 'TLSv1.3')
-          from pg_stat_ssl where pid = pg_backend_pid()), false) as tls_verified`,
-      [expectedUser],
-    );
-    if (result.rows[0]?.identity_matches !== true || result.rows[0]?.tls_verified !== true) {
-      throw new Error('PostgreSQL identity or TLS verification failed.');
-    }
+    if (!this.pool || !this.tlsHostname) throw new Error('PostgreSQL client TLS inspection is unavailable.');
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{ identity_matches: boolean; backend_tls: boolean }>(
+        `select current_user::text = $1 as identity_matches,
+          coalesce((select ssl from pg_stat_ssl where pid = pg_backend_pid()), false) as backend_tls`,
+        [expectedUser],
+      );
+      // pg returns a Client instance; PoolClient typings omit its Connection property.
+      const socket = (client as unknown as { connection?: { stream?: unknown } }).connection?.stream;
+      const protocol = socket instanceof TLSSocket ? socket.getProtocol() : null;
+      const tlsVerified = socket instanceof TLSSocket && socket.encrypted === true && socket.authorized === true &&
+        (protocol === 'TLSv1.2' || protocol === 'TLSv1.3') &&
+        checkServerIdentity(this.tlsHostname, socket.getPeerCertificate()) === undefined;
+      return { identityVerified: result.rows[0]?.identity_matches === true, tlsVerified,
+        backendTls: result.rows[0]?.backend_tls === true, tlsProtocol: protocol };
+    } finally { client.release(); }
+  }
+
+  public async verifySecureIdentity(expectedUser: string): Promise<void> {
+    const result = await this.inspectSecureConnection(expectedUser);
+    if (!result.identityVerified || !result.tlsVerified) throw new Error('PostgreSQL identity or TLS verification failed.');
   }
 
   private assertAvailable(): void {
