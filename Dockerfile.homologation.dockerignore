@@ -1,0 +1,17 @@
+# Allowlist: no .git, .env, local data, credentials or application entrypoints.
+**
+!Dockerfile.homologation
+!package.json
+!package-lock.json
+!tsconfig.json
+!core/
+core/**
+!core/memory/
+core/memory/**
+!core/memory/PostgresMemoryStore.ts
+!core/memory/PostgresMemoryStoreConfiguration.ts
+!scripts/
+scripts/**
+!scripts/check-postgres-homologation.ts
+!scripts/SessionPoolerHomologationEnvironment.ts
+!scripts/run-session-pooler-homologation.ts

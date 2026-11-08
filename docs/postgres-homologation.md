@@ -43,11 +43,15 @@ No Supabase, consulte **Connect → Direct connection** para os parâmetros e
 [Database Settings → SSL Configuration](https://supabase.com/dashboard/project/smtyixukyexezjumouvw/database/settings)
 para a CA. O endereço direto pode exigir IPv6. O diagnóstico também aceita
 Session Pooler IPv4 com `SEBASTIAN_SUPABASE_CONNECTION_MODE=session-pooler`,
-`SEBASTIAN_SUPABASE_SESSION_POOLER_HOST` copiado do painel e login
+`SEBASTIAN_SUPABASE_SESSION_POOLER_HOST=aws-1-us-west-2.pooler.supabase.com`
+confirmado pelo usuário no painel e login
 `sebastian_app.smtyixukyexezjumouvw`, na porta 5432. Não deduz o hostname pela
 região e não escolhe um fallback automaticamente. Consulte a
 [verificação específica do Session Pooler](postgres-session-pooler.md).
 Liberar um destino na lista HTTP não habilita raw TCP neste executor.
+O [procedimento isolado](run-isolated-postgres-homologation.md) prepara a execução
+em outro ambiente, usando senha em arquivo de secret e sem novas tentativas no
+proxy atual.
 
 O template [.env.homologation.example](../.env.homologation.example) não contém
 credenciais. Prefira injeção pelo gerenciador de secrets. Se usar um arquivo

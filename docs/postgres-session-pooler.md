@@ -27,7 +27,7 @@ exemplo Prisma não são requisitos da aplicação e não foram copiadas.
 | Usuário enviado ao pooler | `sebastian_app.smtyixukyexezjumouvw` |
 | Papel real no PostgreSQL, após autenticação | `sebastian_app` |
 | Senha | A senha desse papel, armazenada sob `sebastian_app_dev_password` no Vault |
-| Host | Exatamente o hostname de **Connect → Session pooler** do projeto |
+| Host confirmado no painel | `aws-1-us-west-2.pooler.supabase.com` |
 | Porta / banco | `5432` / `postgres` |
 | TLS | Certificado e hostname validados; TLS 1.2/1.3; nunca `rejectUnauthorized=false` |
 
@@ -40,13 +40,11 @@ padrão do painel nem utilizar sua senha administrativa.
 - LOGIN e INHERIT de `sebastian_app` estão habilitados, sem prazo de expiração.
 - CONNECT no banco, USAGE no schema e SELECT/INSERT/UPDATE na memória confirmados.
 - O papel herda `sebastian_runtime`, sem superuser/bypass de RLS e sem DELETE.
-- O conector não fornece o endpoint do pooler; não há ferramenta de navegador
-  disponível nesta execução para ler o painel. O hostname exato foi solicitado
-  separadamente, sem pedir URL completa ou senha. A região não determina o
-  prefixo do host; nenhum `aws-0`/`aws-1` foi assumido como endpoint deste projeto.
-- O ambiente continua sem secret `SEBASTIAN_SUPABASE_DATABASE_URL`, sem variável
-  do host do pooler, sem VPN/destino TCP configurado. O transporte TCP do proxy
-  recusou conexão. Não houve handshake TLS ou autenticação no pooler.
+- O usuário confirmou no painel `aws-1-us-west-2.pooler.supabase.com:5432`,
+  banco `postgres`. Esse hostname não é mais uma pendência.
+- O executor desta conversa continua sem secret de processo e sem rota TCP
+  PostgreSQL disponível. Não foi repetida a tentativa pelo proxy recusado.
+  Nenhum handshake TLS ou login remoto foi realizado nesta etapa.
 - A função interna `pgbouncer.get_auth` existe, mas sua chamada foi negada ao
   papel do conector. Essa proteção não é um teste de login de `sebastian_app`.
   Não foi concedida permissão nem extraído hash/senha desse mecanismo.
@@ -62,7 +60,7 @@ Nas configurações seguras do **executor de homologação**:
    a lista HTTP sozinha não resolve. Alternativamente, executar o teste em um
    host de homologação com saída IPv4 autorizada.
 2. Configurar `SEBASTIAN_SUPABASE_CONNECTION_MODE=session-pooler` e
-   `SEBASTIAN_SUPABASE_SESSION_POOLER_HOST` com o hostname confirmado no painel.
+   `SEBASTIAN_SUPABASE_SESSION_POOLER_HOST=aws-1-us-west-2.pooler.supabase.com`.
 3. Injetar `SEBASTIAN_SUPABASE_DATABASE_URL` como secret de processo, usando o
    login qualificado acima, a senha dedicada codificada como URL, o mesmo host,
    porta 5432, banco postgres e `sslmode=verify-full`. O Vault não injeta esse
@@ -76,10 +74,16 @@ Nas configurações seguras do **executor de homologação**:
    sem imprimir credenciais nem dados. As variáveis de modo/host restringem o
    diagnóstico; o driver da aplicação usa a URL explicitamente configurada.
 
-Resultado atual no modo pooler, sem essas variáveis:
+Para o novo executor, prefira o runner de secret montado e o
+[procedimento isolado com comandos completos](run-isolated-postgres-homologation.md).
+Ele monta a URL em memória e chama o mesmo diagnóstico. O hostname conhecido
+é injetado pelo runner; não é necessário fornecer uma URL secreta em argumentos.
+
+Uma chamada direta ao diagnóstico, com modo/host configurados e sem URL secreta,
+retorna:
 
 ```json
-{"status":"blocked","missing":["SEBASTIAN_SUPABASE_DATABASE_URL","SEBASTIAN_SUPABASE_SESSION_POOLER_HOST"]}
+{"status":"blocked","missing":["SEBASTIAN_SUPABASE_DATABASE_URL"]}
 ```
 
 Após a conexão aprovada, executar as fases reais `write`, `read` e `isolation`

@@ -16,6 +16,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test tests/**/*.test.ts",
+    "run:postgres:homologation": "node --import tsx scripts/run-session-pooler-homologation.ts",
     "check:postgres:homologation": "node --import tsx scripts/check-postgres-homologation.ts",
     "test:postgres": "tsx scripts/validate-postgres-memory.ts"
   },
