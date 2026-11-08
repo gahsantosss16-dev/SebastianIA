@@ -26,6 +26,7 @@ jobs:
       - name: Run PostgreSQL connection check
         env:
           SEBASTIAN_TECHNICAL_PASSWORD: ${{ secrets.SEBASTIAN_APP_DEV_PASSWORD }}
+          SEBASTIAN_SUPABASE_CA_FILE: ${{ github.workspace }}/config/supabase-prod-ca-2021.crt
         shell: bash
         run: |
           set +x
