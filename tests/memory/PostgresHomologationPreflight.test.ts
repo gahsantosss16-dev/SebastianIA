@@ -44,7 +44,7 @@ test('homologation check rejects SSL downgrade flags before opening a connection
 
 test('a missing CA produces a fixed safe error code without leaking the URL or filesystem path', () => {
   const result = run('postgresql://sebastian_app:CREDENTIAL_SENTINEL@db.smtyixukyexezjumouvw.supabase.co/postgres?sslmode=verify-full', '/nonexistent/CREDENTIAL_SENTINEL.crt');
-  assert.deepEqual(result, { status: 1, report: { status: 'failed', code: 'POSTGRES_CHECK_FAILED' } });
+  assert.deepEqual(result, { status: 1, report: { status: 'failed', code: 'POSTGRES_CHECK_FAILED', stage: 'connect' } });
 });
 
 // Fixture hostname only: never inferred as the actual project's assigned endpoint.
@@ -62,7 +62,7 @@ test('session pooler requires an explicit host instead of guessing from region',
 test('session pooler accepts the project-qualified dedicated login up to CA loading, without a network attempt', () => {
   const url = `postgresql://${qualifiedUser}:CREDENTIAL_SENTINEL@${poolerHost}:5432/postgres?sslmode=verify-full`;
   assert.deepEqual(run(url, '/nonexistent/CREDENTIAL_SENTINEL.crt', 'session-pooler', poolerHost), {
-    status: 1, report: { status: 'failed', code: 'POSTGRES_CHECK_FAILED' },
+    status: 1, report: { status: 'failed', code: 'POSTGRES_CHECK_FAILED', stage: 'connect' },
   });
 });
 
