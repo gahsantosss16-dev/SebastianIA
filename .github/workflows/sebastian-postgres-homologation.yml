@@ -1,0 +1,44 @@
+name: SebastianIA PostgreSQL homologation (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-homologation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: sebastian-homologation
+    steps:
+      - name: Check out isolated development branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Run PostgreSQL connection check
+        env:
+          SEBASTIAN_TECHNICAL_PASSWORD: ${{ secrets.SEBASTIAN_APP_DEV_PASSWORD }}
+        shell: bash
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          if [[ -z "${SEBASTIAN_TECHNICAL_PASSWORD:-}" ]]; then
+            echo '{"status":"blocked","code":"MISSING_TECHNICAL_SECRET"}'
+            exit 2
+          fi
+          secret_file="$(mktemp)"
+          cleanup() { rm -f "$secret_file"; }
+          trap cleanup EXIT
+          printf '%s' "$SEBASTIAN_TECHNICAL_PASSWORD" > "$secret_file"
+          unset SEBASTIAN_TECHNICAL_PASSWORD
+          export SEBASTIAN_SUPABASE_PASSWORD_FILE="$secret_file"
+          npm run run:postgres:homologation
