@@ -54,8 +54,12 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ status: 'passed', mode, identityVerified: true, tlsVerified: true, schemaReady: true, writesPerformed: false }));
   } catch (error) {
     const candidate = (error as { code?: unknown } | null)?.code;
+    const message = error instanceof Error ? error.message : '';
+    // Fixed application failures carry no Postgres code; map them to fixed labels.
+    const appCode = message === 'PostgreSQL memory schema or permissions are unavailable.' ? 'SCHEMA_OR_PERMISSIONS_NOT_READY'
+      : message === 'PostgreSQL identity or TLS verification failed.' ? 'IDENTITY_OR_TLS_CHECK_FAILED' : undefined;
     const code = typeof candidate === 'string' && (SAFE_CODES.has(candidate) || /^[0-9A-Z]{5}$/.test(candidate))
-      ? candidate : 'POSTGRES_CHECK_FAILED';
+      ? candidate : appCode ?? 'POSTGRES_CHECK_FAILED';
     console.log(JSON.stringify({ status: 'failed', code }));
     process.exitCode = 1;
   } finally {
