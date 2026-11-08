@@ -12,6 +12,7 @@ export * from './FileMemoryStoreLocation.js';
 export * from './PostgresMemoryStore.js';
 export * from './PostgresMemoryStoreConfiguration.js';
 export * from './FileMemoryStorePostgresImporter.js';
+export * from './AsyncMemoryStore.js';
 export * from './PendingOperationContract.js';
 export * from './FileCommandResultMemoryWriter.js';
 export * from './FileCommandContextHydrator.js';
