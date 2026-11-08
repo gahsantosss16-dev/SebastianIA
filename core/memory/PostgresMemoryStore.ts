@@ -88,6 +88,21 @@ export class PostgresMemoryStore {
     }
   }
 
+  /** Homologation diagnostics: fixed booleans and the TLS protocol name only. */
+  public async describeHomologationFacts(expectedUser: string): Promise<{ identityMatches: boolean; sessionUserMatches: boolean; backendSsl: boolean; backendTlsVersion: string | null }> {
+    this.assertAvailable();
+    const result = await this.database.query<{ identity_matches: boolean; session_user_matches: boolean; backend_ssl: boolean | null; backend_tls_version: string | null }>(
+      `select current_user::text = $1 as identity_matches, session_user::text = $1 as session_user_matches,
+        (select ssl from pg_stat_ssl where pid = pg_backend_pid()) as backend_ssl,
+        (select version from pg_stat_ssl where pid = pg_backend_pid()) as backend_tls_version`,
+      [expectedUser],
+    );
+    const row = result.rows[0];
+    const version = row?.backend_tls_version ?? null;
+    return { identityMatches: row?.identity_matches === true, sessionUserMatches: row?.session_user_matches === true,
+      backendSsl: row?.backend_ssl === true, backendTlsVersion: version !== null && /^TLSv1\.[0-3]$/.test(version) ? version : null };
+  }
+
   private assertAvailable(): void {
     if (this.poolFailure !== undefined) throw this.poolFailure;
   }
