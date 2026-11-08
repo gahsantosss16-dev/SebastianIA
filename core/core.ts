@@ -139,14 +139,14 @@ export class SebastianCore {
     }
 
     try {
-      const hydratedInput = this.hydrateCommandInput(input, dependencies.commandContextHydrator);
+      const hydratedInput = await this.hydrateCommandInput(input, dependencies.commandContextHydrator);
       const result = dependencies.executor.execute(hydratedInput, bundle);
       const { effectiveResult, memoryExtras } = await this.handoffToSpecializedAgent(
         hydratedInput,
         result,
         dependencies.specializedAgent,
       );
-      this.writeBackCommandResult(hydratedInput, effectiveResult, memoryExtras, dependencies.commandResultMemoryWriter);
+      await this.writeBackCommandResult(hydratedInput, effectiveResult, memoryExtras, dependencies.commandResultMemoryWriter);
       return effectiveResult;
     } catch (error) {
       if (error instanceof Error) {
@@ -262,10 +262,10 @@ export class SebastianCore {
     return isValid ? (memoryExtras as Readonly<Record<string, unknown>>) : undefined;
   }
 
-  private hydrateCommandInput(
+  private async hydrateCommandInput(
     input: CommandProcessingInput,
     hydrator: CommandContextHydrator,
-  ): CommandProcessingInput {
+  ): Promise<CommandProcessingInput> {
     const hydratorContract = hydrator as unknown as { hydrate?: unknown };
     if (!hydratorContract || typeof hydratorContract.hydrate !== 'function') {
       throw new CoreCommandContextHydrationDependencyUnavailableError(
@@ -273,7 +273,7 @@ export class SebastianCore {
       );
     }
 
-    const hydration = hydrator.hydrate({
+    const hydration = await hydrator.hydrate({
       commandType: input.type,
       generatedAt: input.generatedAt,
       ...(input.conversation?.conversationId === undefined
@@ -330,12 +330,12 @@ export class SebastianCore {
     };
   }
 
-  private writeBackCommandResult(
+  private async writeBackCommandResult(
     input: CommandProcessingInput,
     result: CapabilityResult,
     memoryExtras: Readonly<Record<string, unknown>> | undefined,
     writer: CommandResultMemoryWriter,
-  ): void {
+  ): Promise<void> {
     const writerContract = writer as unknown as { write?: unknown };
     if (!writerContract || typeof writerContract.write !== 'function') {
       throw new CoreCommandResultMemoryDependencyUnavailableError(
@@ -343,7 +343,7 @@ export class SebastianCore {
       );
     }
 
-    const outcome = writer.write({
+    const outcome = await writer.write({
       executionId: `${input.type}:${input.generatedAt}`,
       commandType: input.type,
       commandGeneratedAt: input.generatedAt,

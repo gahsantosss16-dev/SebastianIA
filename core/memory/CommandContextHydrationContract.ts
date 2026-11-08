@@ -39,5 +39,5 @@ export type CommandContextHydrationResult =
   | CommandContextHydrationFailure;
 
 export interface CommandContextHydrator {
-  hydrate(request: CommandContextHydrationRequest): CommandContextHydrationResult;
+  hydrate(request: CommandContextHydrationRequest): CommandContextHydrationResult | Promise<CommandContextHydrationResult>;
 }
