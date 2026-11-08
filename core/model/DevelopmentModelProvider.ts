@@ -27,7 +27,12 @@ import {
   type RelevantMemoryMatch,
 } from './ConversationContextComposer.js';
 
-const REMEMBER_MARKER = 'lembra que';
+/**
+ * Narrow, imperative-only memory commands. The optional Sebastian prefix
+ * keeps the parser ergonomic without treating personal statements or memory
+ * questions (for example, "você lembra que...") as writes.
+ */
+const REMEMBER_COMMAND_PATTERN = /^(?:sebastian\s*[,:-]?\s*)?(?:lembra\s+(?:que|q)\s+|guarde\s+(?:na\s+)?(?:sua\s+)?mem[oó]ria\s+(?:que|q)\s+|guarda\s+(?:na\s+)?(?:sua\s+)?mem[oó]ria\s+(?:(?:que|q)\s+)?|guarda\s+q\s+|memorize\s+(?:que|q)\s+|salve\s+esta\s+informa(?:ç|c)[aã]o\s*(?::\s*|(?:que|q)\s+)|anota\s+a[ií]\s+(?:que|q)\s+)(.+)$/iu;
 const LIST_DIRECTORY_MARKER = 'arquivos existem';
 const READ_FILE_MARKER = 'leia o arquivo';
 const ADD_TASK_MARKER = 'adiciona uma tarefa';
@@ -272,12 +277,13 @@ export class DevelopmentModelProvider implements ModelProvider {
   }
 
   private extractRememberContent(text: string): string | undefined {
-    const markerIndex = text.toLowerCase().indexOf(REMEMBER_MARKER);
-    if (markerIndex === -1) {
+    const trimmed = text.trim();
+    // A question mark makes an otherwise imperative-looking phrase a query;
+    // do not turn "Lembra que eu...?" into a persistent write.
+    if (trimmed.endsWith('?')) {
       return undefined;
     }
-
-    const content = text.slice(markerIndex + REMEMBER_MARKER.length).trim();
+    const content = REMEMBER_COMMAND_PATTERN.exec(trimmed)?.[1]?.trim() ?? '';
     return content === '' ? undefined : content;
   }
 

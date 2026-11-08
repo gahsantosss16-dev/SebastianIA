@@ -1214,9 +1214,13 @@ test('CONVERSATIONS: permanent memory stays independent of which conversation is
     const conversationA = await createWebConversation(running.baseUrl, cookie);
     nowMs += 1_000;
     const rememberResponse = await webConverse(
-      running.baseUrl, cookie, 'Sebastian, lembra que prefiro reuniões de manhã', conversationA.id,
+      running.baseUrl, cookie, 'Guarde na sua memória que prefiro reuniões de manhã', conversationA.id,
     );
     assert.equal(rememberResponse.status, 200);
+    assert.equal(
+      (await rememberResponse.json() as { message: string }).message,
+      'Informação registrada: "prefiro reuniões de manhã".',
+    );
     nowMs += 1_000;
 
     const conversationB = await createWebConversation(running.baseUrl, cookie);
@@ -1241,10 +1245,31 @@ test('CONVERSATIONS: permanent memory stays independent of which conversation is
 
     const loadedB = await getWebConversation(running.baseUrl, cookie, conversationB.id);
     const messagesB = (await loadedB.json() as { messages: readonly { content: string }[] }).messages;
-    assert.equal(messagesB.some((message) => message.content.includes('Sebastian, lembra que')), false);
+    assert.equal(messagesB.some((message) => message.content.includes('Guarde na sua memória que')), false);
   } finally {
     await running.close();
     rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('WEB: a failed command never returns a false memory-registration confirmation', async () => {
+  const failingApplication: TestApplication = {
+    executeCommand: async () => {
+      throw new Error('simulated memory write-back failure');
+    },
+    shutdown: () => undefined,
+  };
+  const running = await startServer(failingApplication);
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const conversation = await createWebConversation(running.baseUrl, cookie);
+    const response = await webConverse(running.baseUrl, cookie, 'Guarde na sua memória que sou um bruxo', conversation.id);
+    assert.equal(response.status, 500);
+    const body = await response.json() as { error: { message: string } };
+    assert.equal(body.error.message, 'Falha interna.');
+    assert.doesNotMatch(body.error.message, /registrad/i);
+  } finally {
+    await running.close();
   }
 });
 

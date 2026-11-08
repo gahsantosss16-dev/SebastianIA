@@ -15,6 +15,7 @@ import { DEFAULT_GITHUB_TIMEOUT_MS } from '../core/tool/index.js';
 import {
   deriveConversationTitle,
   isValidConversationIdFormat,
+  MEMORY_FACT_RECORD_KIND,
   type ConversationRegistry,
   type ConversationSummaryRecord,
 } from '../core/memory/index.js';
@@ -817,7 +818,16 @@ function readCookie(cookieHeader: string | undefined, name: string): string | un
 
 function extractPublicMessage(result: CapabilityResult): string {
   const message = result.output.message;
-  return typeof message === 'string' && message.trim() !== '' ? message : 'Solicitação processada.';
+  if (typeof message === 'string' && message.trim() !== '') {
+    return message;
+  }
+  // Core executes writeBackCommandResult before resolveCommand returns. Thus
+  // reaching this response means the structured fact was persisted; a failed
+  // writer throws and is rendered by the HTTP error path instead.
+  if (result.output.memoryRecordKind === MEMORY_FACT_RECORD_KIND && typeof result.output.content === 'string') {
+    return `Informação registrada: "${result.output.content}".`;
+  }
+  return 'Solicitação processada.';
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {

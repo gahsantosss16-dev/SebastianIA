@@ -46,6 +46,39 @@ test('interpret is case-insensitive for the remember marker', async () => {
   assert.deepEqual(decision, { intent: 'remember', content: 'eu gosto de café' });
 });
 
+test('interpret recognizes bounded natural-language memory commands and common q abbreviations', async () => {
+  const provider = new DevelopmentModelProvider();
+  const examples = [
+    ['Sebastian, lembra q prefiro reuniões de manhã', 'prefiro reuniões de manhã'],
+    ['Guarde na sua memória que sou um bruxo.', 'sou um bruxo.'],
+    ['guarda na memoria q gosto de café', 'gosto de café'],
+    ['Guarda q minha cor favorita é azul', 'minha cor favorita é azul'],
+    ['Memorize que trabalho de manhã', 'trabalho de manhã'],
+    ['Salve esta informação: meu sobrenome é Bennett', 'meu sobrenome é Bennett'],
+    ['Anota aí que prefiro mensagens curtas', 'prefiro mensagens curtas'],
+    ['anota ai q gosto de chá', 'gosto de chá'],
+  ] as const;
+
+  for (const [text, content] of examples) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-11-08T00:00:00.000Z' });
+    assert.deepEqual(decision, { intent: 'remember', content });
+  }
+});
+
+test('interpret never turns personal statements or memory questions into writes', async () => {
+  const provider = new DevelopmentModelProvider();
+  const questions = [
+    'Você lembra que prefiro reuniões de manhã?',
+    'Guarde na sua memória que eu gosto de café?',
+    'sou Gabriel Bennett da família fundadora Bennett',
+  ];
+
+  for (const text of questions) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-11-08T00:00:00.000Z' });
+    assert.notEqual(decision.intent, 'remember');
+  }
+});
+
 test('interpret responds using the most recent remembered fact for an explicit memory question', async () => {
   const provider = new DevelopmentModelProvider();
 
