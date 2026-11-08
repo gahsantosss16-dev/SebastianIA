@@ -23,7 +23,8 @@ try {
         const report = JSON.parse(line) as Record<string, unknown>;
         if (report.status === 'diagnostic') {
           write({ status: 'diagnostic', identityMatches: report.identityMatches === true, sessionUserMatches: report.sessionUserMatches === true,
-            backendSsl: report.backendSsl === true, backendTlsVersion: typeof report.backendTlsVersion === 'string' && /^TLSv1\.[0-3]$/.test(report.backendTlsVersion) ? report.backendTlsVersion : null });
+            backendSsl: report.backendSsl === true, backendTlsVersion: typeof report.backendTlsVersion === 'string' && /^TLSv1\.[0-3]$/.test(report.backendTlsVersion) ? report.backendTlsVersion : null,
+            clientTlsAuthorized: report.clientTlsAuthorized === true, clientTlsVersion: typeof report.clientTlsVersion === 'string' && /^TLSv1\.[23]$/.test(report.clientTlsVersion) ? report.clientTlsVersion : null });
         }
         if (['passed', 'failed', 'blocked'].includes(String(report.status))) reports.push(report);
       } catch { /* npm banners are not diagnostic results */ }

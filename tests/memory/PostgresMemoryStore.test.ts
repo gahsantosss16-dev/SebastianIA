@@ -30,3 +30,18 @@ test('PostgresMemoryStore rejects malformed database payloads instead of returni
   database.rows.set('command-results\u0000broken', '{');
   await assert.rejects(new PostgresMemoryStore(database).listRecords('command-results'), /invalid JSON/);
 });
+
+function identityDatabase(row: Record<string, unknown>): SqlQueryable {
+  return { query: async <Row>() => ({ rows: [row as Row] }) } as unknown as SqlQueryable;
+}
+
+test('verifySecureIdentity fails closed when identity or TLS cannot be proven', async () => {
+  await assert.rejects(new PostgresMemoryStore(identityDatabase({ identity_matches: true, session_user_matches: true, backend_ssl: false, backend_tls_version: null })).verifySecureIdentity('sebastian_app'), /identity or TLS/);
+  await assert.rejects(new PostgresMemoryStore(identityDatabase({ identity_matches: false, session_user_matches: false, backend_ssl: true, backend_tls_version: 'TLSv1.3' })).verifySecureIdentity('sebastian_app'), /identity or TLS/);
+  await new PostgresMemoryStore(identityDatabase({ identity_matches: true, session_user_matches: true, backend_ssl: true, backend_tls_version: 'TLSv1.3' })).verifySecureIdentity('sebastian_app');
+});
+
+test('homologation facts never expose more than fixed booleans and TLS protocol names', async () => {
+  const facts = await new PostgresMemoryStore(identityDatabase({ identity_matches: true, session_user_matches: true, backend_ssl: true, backend_tls_version: 'weird' })).describeHomologationFacts('sebastian_app');
+  assert.deepEqual(facts, { identityMatches: true, sessionUserMatches: true, backendSsl: true, backendTlsVersion: null, clientTlsAuthorized: null, clientTlsVersion: null });
+});

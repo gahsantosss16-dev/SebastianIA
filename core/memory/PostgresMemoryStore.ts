@@ -74,33 +74,51 @@ export class PostgresMemoryStore {
     await this.database.query('select namespace from sebastian.memory_records limit 0');
   }
 
-  /** Read-only homologation check: never returns server fields or credential material. */
+  /**
+   * Read-only homologation check: never returns server fields or credential material.
+   * TLS is proven on this process's own socket (certificate chain and hostname
+   * verified by Node). Through the Supabase Session Pooler, pg_stat_ssl only
+   * describes the pooler's internal hop to Postgres, so it is not the client
+   * connection; it remains the fallback when no client socket is reachable.
+   */
   public async verifySecureIdentity(expectedUser: string): Promise<void> {
     this.assertAvailable();
-    const result = await this.database.query<{ identity_matches: boolean; tls_verified: boolean }>(
-      `select current_user::text = $1 as identity_matches,
-        coalesce((select ssl and version in ('TLSv1.2', 'TLSv1.3')
-          from pg_stat_ssl where pid = pg_backend_pid()), false) as tls_verified`,
-      [expectedUser],
-    );
-    if (result.rows[0]?.identity_matches !== true || result.rows[0]?.tls_verified !== true) {
+    const facts = await this.describeHomologationFacts(expectedUser);
+    const tlsVerified = facts.clientTlsAuthorized ?? facts.backendSsl;
+    if (!facts.identityMatches || !tlsVerified) {
       throw new Error('PostgreSQL identity or TLS verification failed.');
     }
   }
 
   /** Homologation diagnostics: fixed booleans and the TLS protocol name only. */
-  public async describeHomologationFacts(expectedUser: string): Promise<{ identityMatches: boolean; sessionUserMatches: boolean; backendSsl: boolean; backendTlsVersion: string | null }> {
+  public async describeHomologationFacts(expectedUser: string): Promise<{
+    identityMatches: boolean; sessionUserMatches: boolean; backendSsl: boolean;
+    backendTlsVersion: string | null; clientTlsAuthorized: boolean | null; clientTlsVersion: string | null;
+  }> {
     this.assertAvailable();
-    const result = await this.database.query<{ identity_matches: boolean; session_user_matches: boolean; backend_ssl: boolean | null; backend_tls_version: string | null }>(
-      `select current_user::text = $1 as identity_matches, session_user::text = $1 as session_user_matches,
+    const sql = `select current_user::text = $1 as identity_matches, session_user::text = $1 as session_user_matches,
         (select ssl from pg_stat_ssl where pid = pg_backend_pid()) as backend_ssl,
-        (select version from pg_stat_ssl where pid = pg_backend_pid()) as backend_tls_version`,
-      [expectedUser],
-    );
-    const row = result.rows[0];
+        (select version from pg_stat_ssl where pid = pg_backend_pid()) as backend_tls_version`;
+    type Row = { identity_matches: boolean; session_user_matches: boolean; backend_ssl: boolean | null; backend_tls_version: string | null };
+    let row: Row | undefined;
+    let clientTlsAuthorized: boolean | null = null;
+    let clientTlsVersion: string | null = null;
+    if (this.database instanceof Pool) {
+      const client = await this.database.connect();
+      try {
+        const stream = (client as unknown as { connection?: { stream?: { authorized?: unknown; getProtocol?: () => string | null } } }).connection?.stream;
+        const protocol = typeof stream?.getProtocol === 'function' ? stream.getProtocol() : null;
+        clientTlsVersion = protocol === 'TLSv1.2' || protocol === 'TLSv1.3' ? protocol : null;
+        clientTlsAuthorized = stream?.authorized === true && clientTlsVersion !== null;
+        row = (await client.query<Row>(sql, [expectedUser])).rows[0];
+      } finally { client.release(); }
+    } else {
+      row = (await this.database.query<Row>(sql, [expectedUser])).rows[0];
+    }
     const version = row?.backend_tls_version ?? null;
     return { identityMatches: row?.identity_matches === true, sessionUserMatches: row?.session_user_matches === true,
-      backendSsl: row?.backend_ssl === true, backendTlsVersion: version !== null && /^TLSv1\.[0-3]$/.test(version) ? version : null };
+      backendSsl: row?.backend_ssl === true, backendTlsVersion: version === 'TLSv1.2' || version === 'TLSv1.3' ? version : null,
+      clientTlsAuthorized, clientTlsVersion };
   }
 
   private assertAvailable(): void {

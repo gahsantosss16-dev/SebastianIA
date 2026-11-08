@@ -50,14 +50,9 @@ async function main(): Promise<void> {
   try {
     store = createSupabaseMemoryStore(process.env);
     await store.ready();
-    try {
-      await store.verifySecureIdentity(USER);
-    } catch (identityError) {
-      // Fixed booleans only: which half of the identity/TLS check failed.
-      const facts = await store.describeHomologationFacts(USER);
-      console.log(JSON.stringify({ status: 'diagnostic', ...facts }));
-      throw identityError;
-    }
+    // Fixed booleans only: which connection hop is TLS-verified and whose identity is used.
+    console.log(JSON.stringify({ status: 'diagnostic', ...(await store.describeHomologationFacts(USER)) }));
+    await store.verifySecureIdentity(USER);
     console.log(JSON.stringify({ status: 'passed', mode, identityVerified: true, tlsVerified: true, schemaReady: true, writesPerformed: false }));
   } catch (error) {
     const candidate = (error as { code?: unknown } | null)?.code;
