@@ -1,0 +1,14 @@
+FROM node:24-bookworm-slim
+WORKDIR /app
+COPY --chmod=0644 package.json package-lock.json ./
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then \
+      NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca npm ci --ignore-scripts --no-audit --no-fund; \
+    else npm ci --ignore-scripts --no-audit --no-fund; fi
+COPY --chmod=0644 tsconfig.json ./
+COPY --chmod=0644 core/memory/PostgresMemoryStore.ts core/memory/PostgresMemoryStoreConfiguration.ts ./core/memory/
+COPY --chmod=0644 scripts/check-postgres-homologation.ts scripts/SessionPoolerHomologationEnvironment.ts scripts/run-session-pooler-homologation.ts ./scripts/
+RUN chmod 0755 /app /app/core /app/core/memory /app/scripts
+ENV HOME=/tmp NPM_CONFIG_CACHE=/tmp/npm-cache
+USER node
+ENTRYPOINT ["node", "--import", "tsx", "scripts/run-session-pooler-homologation.ts"]

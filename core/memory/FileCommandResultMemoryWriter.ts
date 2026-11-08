@@ -7,22 +7,27 @@ import {
   CommandResultMemoryWriteBackFailureError,
   InvalidCommandResultMemoryWriteBackInputError,
 } from './CommandResultMemoryContractErrors.js';
-import { FileMemoryStore } from './FileMemoryStore.js';
+import type { AsyncMemoryStore } from './AsyncMemoryStore.js';
 
 export const COMMAND_RESULTS_NAMESPACE = 'command-results';
 
 export class FileCommandResultMemoryWriter implements CommandResultMemoryWriter {
-  private readonly store: FileMemoryStore;
+  private readonly store: AsyncMemoryStore;
 
-  public constructor(store: FileMemoryStore) {
+  public constructor(store: AsyncMemoryStore) {
     this.store = store;
   }
 
-  public write(input: CommandResultMemoryWriteBackInput): CommandResultMemoryWriteBackResult {
+  public async write(input: CommandResultMemoryWriteBackInput): Promise<CommandResultMemoryWriteBackResult> {
     this.validateInput(input);
 
     try {
-      const key = `${COMMAND_RESULTS_NAMESPACE}:${input.executionId}`;
+      // Two conversations may generate the same command type and timestamp in parallel.
+      // Keep executionId stable in the payload, but scope the durable natural key.
+      const recordKey = input.metadata.conversationId === undefined
+        ? input.executionId
+        : JSON.stringify([input.metadata.conversationId, input.executionId]);
+      const key = `${COMMAND_RESULTS_NAMESPACE}:${recordKey}`;
       const recordedAt = new Date().toISOString();
       const value: Readonly<Record<string, unknown>> = {
         executionId: input.executionId,
@@ -35,7 +40,7 @@ export class FileCommandResultMemoryWriter implements CommandResultMemoryWriter 
         recordedAt,
       };
 
-      this.store.writeRecord(COMMAND_RESULTS_NAMESPACE, input.executionId, value);
+      await this.store.writeRecord(COMMAND_RESULTS_NAMESPACE, recordKey, value);
 
       return { status: 'recorded', key, recordedAt };
     } catch (error) {

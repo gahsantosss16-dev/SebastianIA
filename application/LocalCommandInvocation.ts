@@ -2,7 +2,7 @@ import type { CapabilityResult } from '../core/capability/index.js';
 import type { CommandProcessingInput } from '../core/command/index.js';
 import type { SebastianCore } from '../core/core.js';
 import type { Logger } from '../core/logger.js';
-import { resolveSebastianDataDirectory } from '../core/memory/index.js';
+import { createMemoryStoreRuntime, resolveSebastianDataDirectory } from '../core/memory/index.js';
 import {
   InvalidLocalCommandArgumentsError,
   LocalCommandExecutionAndShutdownError,
@@ -19,11 +19,11 @@ import { createConfiguredProjectContext, createConfiguredProjectTaskOrchestrator
 
 interface CommandExecutor {
   executeCommand(input: CommandProcessingInput): Promise<CapabilityResult>;
-  shutdown(): void;
+  shutdown(): void | Promise<void>;
 }
 
 export interface LocalCommandInvocationDependencies {
-  readonly createApplication?: () => CommandExecutor;
+  readonly createApplication?: () => CommandExecutor | Promise<CommandExecutor>;
   readonly now?: () => Date;
 }
 
@@ -80,23 +80,33 @@ const COMMAND_DEFINITIONS: readonly LocalCommandDefinition[] = [
 const USAGE_SUMMARY = [...COMMAND_DEFINITIONS.map((definition) => definition.usage), '"<free text>"'].join(' | ');
 
 export class LocalCommandInvocationAdapter {
-  private readonly createApplication: () => CommandExecutor;
+  private readonly createApplication: () => CommandExecutor | Promise<CommandExecutor>;
   private readonly now: () => Date;
 
   public constructor(dependencies: LocalCommandInvocationDependencies = {}) {
     this.createApplication =
       dependencies.createApplication ??
-      (() => {
+      (async () => {
         const dataDir = resolveSebastianDataDirectory();
-        const projectContext = createConfiguredProjectContext(dataDir);
-        const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir);
-        return createSebastianApplication({
-          logger: silentLogger,
-          dataDir,
-          allowedFilesystemRoot: resolveSebastianWorkspaceRoot() ?? process.cwd(),
-          ...(projectContext === undefined ? {} : { projectContext }),
-          ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
-        });
+        const persistence = createMemoryStoreRuntime(dataDir);
+        try {
+          await persistence.ready();
+          const projectContext = createConfiguredProjectContext(dataDir, process.env, persistence.store);
+          const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir, process.env, undefined, undefined, persistence.store);
+          const application = createSebastianApplication({
+            logger: silentLogger, dataDir, memoryStore: persistence.store,
+            allowedFilesystemRoot: resolveSebastianWorkspaceRoot() ?? process.cwd(),
+            ...(projectContext === undefined ? {} : { projectContext }),
+            ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
+          });
+          return {
+            executeCommand: (input: CommandProcessingInput) => application.executeCommand(input),
+            shutdown: async () => { try { application.shutdown(); } finally { await persistence.close(); } },
+          };
+        } catch (error) {
+          await persistence.close();
+          throw error;
+        }
       });
     this.now = dependencies.now ?? (() => new Date());
   }
@@ -110,14 +120,14 @@ export class LocalCommandInvocationAdapter {
       generatedAt: this.now().toISOString(),
     };
 
-    const application = this.createApplication();
+    const application = await this.createApplication();
     let result: CapabilityResult;
 
     try {
       result = await application.executeCommand(input);
     } catch (executionError) {
       try {
-        application.shutdown();
+        await application.shutdown();
       } catch (shutdownError) {
         throw new LocalCommandExecutionAndShutdownError(executionError, shutdownError);
       }
@@ -125,7 +135,7 @@ export class LocalCommandInvocationAdapter {
     }
 
     try {
-      application.shutdown();
+      await application.shutdown();
     } catch (shutdownError) {
       throw new LocalCommandRuntimeShutdownError('Local command runtime shutdown failed.', {
         cause: shutdownError,

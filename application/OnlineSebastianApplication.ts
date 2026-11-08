@@ -1,3 +1,4 @@
+import { type AsyncMemoryStore, AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
 import type { Logger } from '../core/logger.js';
 import {
   FILESYSTEM_READ_FILE_TOOL_ID,
@@ -17,7 +18,7 @@ import {
 } from '../core/tool/index.js';
 import type { CognitiveModelProvider, OperationalToolPolicyEntry } from '../core/cognition/index.js';
 import { KNOWLEDGE_SEARCH_TOOL_ID, KnowledgeSearchTool, KnowledgeStore } from '../core/knowledge/index.js';
-import { FileMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js';
+import { FileMemoryStore, resolveMemoryFilePath, resolveSebastianStoreDriver } from '../core/memory/index.js';
 import { createGitHubProjectRegistry, createGitHubReadOnlyTool } from './GitHubProjectRegistryConfiguration.js';
 import { createSebastianApplication } from './SebastianApplication.js';
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
@@ -61,7 +62,7 @@ function knowledgeOperationalTools(knowledgeTool: KnowledgeSearchTool): readonly
       description: 'Busca trechos relevantes em bibliotecas de conhecimento configuradas (ex.: programação), com metadados de autoridade e proveniência.',
       requiresAuthorization: false,
       requiredStringArguments: ['query'],
-      broadApplicabilityProbe: (objective: string) => knowledgeTool.hasRelevantMatch(objective),
+      broadApplicabilityProbe: async (objective: string) => (await knowledgeTool.hasRelevantMatch(objective)),
     },
   ];
 }
@@ -188,7 +189,11 @@ export function createOnlineSebastianApplication(
   env: NodeJS.ProcessEnv = process.env,
   projectContext?: ProjectConversationContext,
   projectTaskOrchestrator?: ProjectTaskOrchestrator,
+  memoryStore?: AsyncMemoryStore,
 ) {
+  if (resolveSebastianStoreDriver(env) === 'supabase' && memoryStore === undefined) {
+    throw new Error('Supabase composition requires the shared async memory store.');
+  }
   const root = process.cwd();
   const validations: readonly AuthorizedCommandDefinition[] = [
     { toolId: VALIDATION_TYPECHECK_TOOL_ID, executable: process.execPath, args: ['--run', 'typecheck'], timeoutMs: 12_000 },
@@ -221,16 +226,13 @@ export function createOnlineSebastianApplication(
     defaultGitHubProjectId = undefined;
   }
 
-  // Knowledge Layer V1 (docs/knowledge-layer-v1.md): the store needs a real
-  // file to persist to, exactly like conversation memory - without a
-  // dataDir there is nowhere durable to keep ingested sources/chunks, so the
-  // capability simply stays out of the catalog (fail-soft, same pattern as
-  // the GitHub integration above).
-  const knowledgeTool = dataDir === undefined
+  const knowledgeStore = memoryStore ?? (dataDir === undefined
     ? undefined
-    : new KnowledgeSearchTool(new KnowledgeStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))));
+    : new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))));
+  const knowledgeTool = knowledgeStore === undefined ? undefined : new KnowledgeSearchTool(new KnowledgeStore(knowledgeStore));
 
   return createSebastianApplication({
+    ...(memoryStore === undefined ? {} : { memoryStore }),
     ...(projectContext === undefined ? {} : { projectContext }),
     ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
     ...(logger === undefined ? {} : { logger }),

@@ -88,7 +88,7 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
    * (e.g. a cheap relevance probe against an actual indexed corpus) - never
    * from a curated per-topic keyword/phrase list.
    */
-  readonly broadApplicabilityProbe?: (objective: string) => boolean;
+  readonly broadApplicabilityProbe?: (objective: string) => boolean | Promise<boolean>;
 }
 
 export type CognitiveOperationalResult =
@@ -113,8 +113,11 @@ export class CognitiveOperationalOrchestrator {
    * objective term must occur in a registered Tool's id/description. This is
    * capability-driven (the catalog is the source), not a phrase/topic list.
    */
-  public hasApplicableToolCandidate(objective: string, immediateContext?: string): boolean {
-    return this.catalog.some((entry) => this.isBroadlyApplicable(entry, objective, immediateContext));
+  public async hasApplicableToolCandidate(objective: string, immediateContext?: string): Promise<boolean> {
+    for (const entry of this.catalog) {
+      if (await this.isBroadlyApplicable(entry, objective, immediateContext)) return true;
+    }
+    return false;
   }
 
   /**
@@ -125,12 +128,12 @@ export class CognitiveOperationalOrchestrator {
    * least one meaningful objective term occurring in the entry's own
    * id/description.
    */
-  private isBroadlyApplicable(entry: OperationalToolPolicyEntry, objective: string, immediateContext?: string): boolean {
+  private async isBroadlyApplicable(entry: OperationalToolPolicyEntry, objective: string, immediateContext?: string): Promise<boolean> {
     if (entry.deterministicIntent?.pattern?.test(objective) === true) return true;
     if (immediateContext !== undefined &&
       entry.deterministicIntent?.immediateContext?.objectivePattern.test(objective) === true &&
       entry.deterministicIntent.immediateContext.contextPattern.test(immediateContext) === true) return true;
-    if (entry.broadApplicabilityProbe?.(objective) === true) return true;
+    if ((await entry.broadApplicabilityProbe?.(objective)) === true) return true;
     const objectiveTerms = this.catalogTerms(objective);
     if (objectiveTerms.size === 0) return false;
     const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
@@ -150,14 +153,14 @@ export class CognitiveOperationalOrchestrator {
    * the ordinary loop - it never produces an answer directly and never
    * skips `synthesize()`.
    */
-  private findRecoveryRoute(objective: string, immediateContext?: string): OperationalToolPolicyEntry | undefined {
-    const candidates = this.catalog.filter((entry) => {
-      if (entry.requiresAuthorization) return false;
+  private async findRecoveryRoute(objective: string, immediateContext?: string): Promise<OperationalToolPolicyEntry | undefined> {
+    const candidates: OperationalToolPolicyEntry[] = [];
+    for (const entry of this.catalog) {
+      if (entry.requiresAuthorization) continue;
       const shape = entry.requiredStringArguments;
       const invokableWithoutGuessing = shape.length === 0 || (shape.length === 1 && shape[0] === 'query');
-      if (!invokableWithoutGuessing) return false;
-      return this.isBroadlyApplicable(entry, objective, immediateContext);
-    });
+      if (invokableWithoutGuessing && await this.isBroadlyApplicable(entry, objective, immediateContext)) candidates.push(entry);
+    }
     return candidates.length === 1 ? candidates[0] : undefined;
   }
 
@@ -166,7 +169,7 @@ export class CognitiveOperationalOrchestrator {
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly immediateContext?: string },
     observations: CognitiveObservationRecord[],
   ): Promise<boolean> {
-    const route = this.findRecoveryRoute(objective, context.immediateContext);
+    const route = await this.findRecoveryRoute(objective, context.immediateContext);
     if (!route) return false;
     const args = route.requiredStringArguments.length === 0 ? {} : { query: objective };
     const invocation = await this.tool.invoke({

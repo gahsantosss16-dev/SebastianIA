@@ -15,7 +15,10 @@
     "start:online": "node ./dist/application/http.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test tests/**/*.test.ts"
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "run:postgres:homologation": "node --import tsx scripts/run-session-pooler-homologation.ts",
+    "check:postgres:homologation": "node --import tsx scripts/check-postgres-homologation.ts",
+    "test:postgres": "tsx scripts/validate-postgres-memory.ts"
   },
   "keywords": [
     "ai",
@@ -30,5 +33,9 @@
     "@types/node": "^26.1.2",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@types/pg": "^8.15.5",
+    "pg": "^8.16.3"
   }
 }

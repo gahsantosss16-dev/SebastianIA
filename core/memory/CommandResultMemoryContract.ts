@@ -27,5 +27,5 @@ export type CommandResultMemoryWriteBackResult =
   | CommandResultMemoryWriteBackFailure;
 
 export interface CommandResultMemoryWriter {
-  write(input: CommandResultMemoryWriteBackInput): CommandResultMemoryWriteBackResult;
+  write(input: CommandResultMemoryWriteBackInput): CommandResultMemoryWriteBackResult | Promise<CommandResultMemoryWriteBackResult>;
 }

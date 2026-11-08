@@ -1,3 +1,4 @@
+import { type AsyncMemoryStore, AsyncFileMemoryStore } from './memory/AsyncMemoryStore.js';
 import type { CorePipelineDependencies } from './core.js';
 import {
   buildRegistry,
@@ -65,6 +66,8 @@ export interface CorePipelineBootstrapInput {
    * ones, so context and command results survive across separate processes.
    */
   readonly memoryFilePath?: string;
+  /** Explicit shared persistence boundary; takes precedence over the legacy file path. */
+  readonly memoryStore?: AsyncMemoryStore;
   /**
    * Explicit root directory the filesystem inspection Tool is allowed to
    * read from. Captured by the composing caller (application composition
@@ -153,7 +156,7 @@ export class CorePipelineBootstrap {
         ((memoryFilePath) =>
           memoryFilePath === undefined
             ? new InMemoryCommandContextHydrator()
-            : new FileCommandContextHydrator(new FileMemoryStore(memoryFilePath))),
+            : new FileCommandContextHydrator(new AsyncFileMemoryStore(new FileMemoryStore(memoryFilePath)))),
       buildSpecializedTool:
         factories.buildSpecializedTool ??
         ((allowedFilesystemRoot, authorizedCommands) =>
@@ -177,7 +180,7 @@ export class CorePipelineBootstrap {
         ((memoryFilePath) =>
           memoryFilePath === undefined
             ? new InMemoryCommandResultMemoryWriter()
-            : new FileCommandResultMemoryWriter(new FileMemoryStore(memoryFilePath))),
+            : new FileCommandResultMemoryWriter(new AsyncFileMemoryStore(new FileMemoryStore(memoryFilePath)))),
     };
   }
 
@@ -189,7 +192,9 @@ export class CorePipelineBootstrap {
     const bindings = this.composeBindings(input.bindings, bundle);
     const coordinator = this.composeCoordinator(bindings);
     const executor = this.composeExecutor(coordinator);
-    const commandContextHydrator = this.composeCommandContextHydrator(input.memoryFilePath);
+    const commandContextHydrator = input.memoryStore === undefined
+      ? this.composeCommandContextHydrator(input.memoryFilePath)
+      : new FileCommandContextHydrator(input.memoryStore);
     const specializedTool =
       input.specializedTool ??
       this.composeSpecializedTool(input.allowedFilesystemRoot ?? process.cwd(), input.authorizedCommands ?? []);
@@ -205,7 +210,9 @@ export class CorePipelineBootstrap {
       input.projectContext,
       input.projectTaskOrchestrator,
     );
-    const commandResultMemoryWriter = this.composeCommandResultMemoryWriter(input.memoryFilePath);
+    const commandResultMemoryWriter = input.memoryStore === undefined
+      ? this.composeCommandResultMemoryWriter(input.memoryFilePath)
+      : new FileCommandResultMemoryWriter(input.memoryStore);
 
     return Object.freeze({
       executor,
@@ -217,6 +224,10 @@ export class CorePipelineBootstrap {
   }
 
   private validateInput(input: CorePipelineBootstrapInput): void {
+    if (input && input.memoryStore !== undefined &&
+        (!input.memoryStore || typeof input.memoryStore.listRecords !== 'function' || typeof input.memoryStore.writeRecord !== 'function')) {
+      throw new CorePipelineBootstrapError('Core memoryStore must provide async listRecords and writeRecord.');
+    }
     const isObject = input && typeof input === 'object' && !Array.isArray(input);
     if (!isObject) {
       throw new CorePipelineBootstrapError('Core pipeline bootstrap input must be an object.');

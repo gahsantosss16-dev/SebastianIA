@@ -7,7 +7,7 @@ import type { CoreConfig } from '../core/config.js';
 import type { Logger } from '../core/logger.js';
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
-import { resolveMemoryFilePath } from '../core/memory/index.js';
+import { type AsyncMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js';
 import {
   VALIDATION_TEST_TOOL_ID,
   VALIDATION_BUILD_TOOL_ID,
@@ -46,6 +46,7 @@ export interface SebastianApplicationOptions {
    * tests and embedders that have not opted into disk persistence).
    */
   readonly dataDir?: string;
+  readonly memoryStore?: AsyncMemoryStore;
   /**
    * Root directory the filesystem inspection Tool is allowed to read from.
    * Defaults to `process.cwd()` - the seam exists so tests and future
@@ -99,6 +100,7 @@ export function createSebastianApplication(options: SebastianApplicationOptions 
 
   const input: CoreOperationalRuntimeBootstrapInput = {
     composition: {
+      ...(options.memoryStore === undefined ? {} : { memoryStore: options.memoryStore }),
       ...(options.projectContext === undefined ? {} : { projectContext: options.projectContext }),
       ...(options.projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator: options.projectTaskOrchestrator }),
       providers: [localGreetingCapabilityProvider, localMemoryCapabilityProvider, localConverseCapabilityProvider],

@@ -67,7 +67,7 @@ function validateInput(input: IngestSourceInput): void {
  * accumulates). Exact cross-source duplicates (identical `chunkHash` already
  * present under a different chunkId) are detected and skipped explicitly.
  */
-export function ingestSource(store: KnowledgeStore, input: IngestSourceInput): IngestSourceResult {
+export async function ingestSource(store: KnowledgeStore, input: IngestSourceInput): Promise<IngestSourceResult> {
   validateInput(input);
 
   const source: KnowledgeSourceRecord = {
@@ -87,7 +87,7 @@ export function ingestSource(store: KnowledgeStore, input: IngestSourceInput): I
     ...(input.publicationDate === undefined ? {} : { publicationDate: input.publicationDate }),
     ...(input.technologyRelated === undefined ? {} : { technologyRelated: input.technologyRelated }),
   };
-  store.upsertSource(source);
+  await store.upsertSource(source);
 
   const draftChunks = chunkDocument(input.format, input.rawText);
   let chunksWritten = 0;
@@ -96,7 +96,7 @@ export function ingestSource(store: KnowledgeStore, input: IngestSourceInput): I
   for (const draft of draftChunks) {
     const chunkHash = sha256(draft.text);
     const chunkId = sha256(`${input.sourceId}|${draft.locator}|${chunkHash}`).slice(0, 32);
-    const existingByHash = store.findChunkByHash(chunkHash);
+    const existingByHash = await store.findChunkByHash(chunkHash);
     if (existingByHash !== undefined && existingByHash.chunkId !== chunkId) {
       // Identical text already stored under a different chunk (a different
       // source, or the same source at a different locator) - the first
@@ -104,7 +104,7 @@ export function ingestSource(store: KnowledgeStore, input: IngestSourceInput): I
       chunksSkippedAsDuplicate += 1;
       continue;
     }
-    store.upsertChunk({
+    await store.upsertChunk({
       chunkId,
       sourceId: input.sourceId,
       sectionPath: draft.sectionPath,
@@ -122,12 +122,12 @@ export function ingestSource(store: KnowledgeStore, input: IngestSourceInput): I
 }
 
 /** Soft removal only (see docs/knowledge-layer-v1.md, section 4) - never mutates chunk content, only marks the source (and therefore its chunks, via retrieval-time filtering) as no longer active. */
-export function deprecateSource(store: KnowledgeStore, sourceId: string, deprecatedBySourceId?: string): void {
-  const existing = store.getSource(sourceId);
+export async function deprecateSource(store: KnowledgeStore, sourceId: string, deprecatedBySourceId?: string): Promise<void> {
+  const existing = await store.getSource(sourceId);
   if (existing === undefined) {
     throw new TypeError(`Knowledge source "${sourceId}" does not exist and cannot be deprecated.`);
   }
-  store.upsertSource({
+  await store.upsertSource({
     ...existing,
     status: 'deprecated',
     ...(deprecatedBySourceId === undefined ? {} : { supersededBy: deprecatedBySourceId }),

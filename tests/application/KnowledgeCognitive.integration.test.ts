@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -34,8 +35,8 @@ function decision(overrides: Partial<CognitiveDecision> = {}): CognitiveDecision
 test('knowledge.search has no deterministic auto-answer shortcut - a chunk containing a prompt-injection payload always flows through synthesize() as evidence, never straight to the user, and never obeyed as an instruction', async () => {
   const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-knowledge-injection-'));
   try {
-    const store = new KnowledgeStore(new FileMemoryStore(resolveMemoryFilePath(dataDir)));
-    ingestSource(store, {
+    const store = new KnowledgeStore(new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))));
+    await ingestSource(store, {
       sourceId: 'poisoned-doc', title: 'Documento Suspeito', domain: 'programming', sourceType: 'article',
       authorityLevel: 'book', usageRights: 'licenciado', origin: 'fixture://poisoned.md', format: 'markdown',
       ingestedAt: '2026-09-06T10:00:00.000Z',
@@ -85,8 +86,8 @@ test('knowledge.search has no deterministic auto-answer shortcut - a chunk conta
 test('a conflict between a knowledge source and real project-state evidence reaches synthesize() with both sides present in the same call', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-knowledge-conflict-'));
   try {
-    const store = new KnowledgeStore(new FileMemoryStore(join(root, 'memory.json')));
-    ingestSource(store, {
+    const store = new KnowledgeStore(new AsyncFileMemoryStore(new FileMemoryStore(join(root, 'memory.json'))));
+    await ingestSource(store, {
       sourceId: 'style-guide', title: 'Guia de Estilo Recomendado', domain: 'programming', sourceType: 'book',
       authorityLevel: 'book', usageRights: 'licenciado', origin: 'fixture://style-guide.md', format: 'markdown',
       ingestedAt: '2026-09-06T10:00:00.000Z',
@@ -101,12 +102,12 @@ test('a conflict between a knowledge source and real project-state evidence reac
 
     const invoked: string[] = [];
     const tool = {
-      invoke(invocation: SpecializedToolInvocationInput) {
+      async invoke(invocation: SpecializedToolInvocationInput) {
         invoked.push(invocation.toolId);
         if (invocation.toolId === GIT_STATUS_TOOL_ID) {
           return { status: 'completed' as const, output: { outcome: 'ok', message: 'Branch "main": o projeto atualmente acessa dados diretamente via ORM, sem uma camada Repository.' } };
         }
-        return knowledgeTool.invoke(invocation);
+        return await knowledgeTool.invoke(invocation);
       },
     };
 
@@ -159,7 +160,7 @@ test('a conflict between a knowledge source and real project-state evidence reac
 test('a question about the current project state, when the model correctly chooses the real inspection tool, is answered from that real observation - not from knowledge.search alone', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-knowledge-project-state-'));
   try {
-    const store = new KnowledgeStore(new FileMemoryStore(join(root, 'memory.json')));
+    const store = new KnowledgeStore(new AsyncFileMemoryStore(new FileMemoryStore(join(root, 'memory.json'))));
     const knowledgeTool = new KnowledgeSearchTool(store);
     const catalog = [
       { toolId: GIT_STATUS_TOOL_ID, description: 'Consulta branch e alterações pendentes do repositório atual.', requiresAuthorization: false, requiredStringArguments: [] },
@@ -168,12 +169,12 @@ test('a question about the current project state, when the model correctly choos
 
     const invoked: string[] = [];
     const tool = {
-      invoke(invocation: SpecializedToolInvocationInput) {
+      async invoke(invocation: SpecializedToolInvocationInput) {
         invoked.push(invocation.toolId);
         if (invocation.toolId === GIT_STATUS_TOOL_ID) {
           return { status: 'completed' as const, output: { outcome: 'ok', message: 'Branch "main", sem alterações pendentes.' } };
         }
-        return knowledgeTool.invoke(invocation);
+        return await knowledgeTool.invoke(invocation);
       },
     };
 
@@ -203,8 +204,8 @@ test('a question about the current project state, when the model correctly choos
 test('the synthesize()-skip fast path introduced for deterministic commit quantities never applies to knowledge.search, even when the objective itself contains a number', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sebastian-knowledge-no-synthesis-bypass-'));
   try {
-    const store = new KnowledgeStore(new FileMemoryStore(join(root, 'memory.json')));
-    ingestSource(store, {
+    const store = new KnowledgeStore(new AsyncFileMemoryStore(new FileMemoryStore(join(root, 'memory.json'))));
+    await ingestSource(store, {
       sourceId: 'security-basics', title: 'Riscos Básicos de Segurança', domain: 'programming', sourceType: 'article',
       authorityLevel: 'book', usageRights: 'licenciado', origin: 'fixture://security.md', format: 'markdown',
       ingestedAt: '2026-09-06T10:00:00.000Z',
@@ -232,7 +233,7 @@ test('the synthesize()-skip fast path introduced for deterministic commit quanti
     };
 
     const app = createSebastianApplication({
-      logger, dataDir: root, authorizedCommands: [], specializedTool: { invoke: (i: SpecializedToolInvocationInput) => knowledgeTool.invoke(i) } as never,
+      logger, dataDir: root, authorizedCommands: [], specializedTool: { invoke: async (i: SpecializedToolInvocationInput) => (await knowledgeTool.invoke(i)) } as never,
       cognitiveModelProvider: provider, cognitiveOperationalTools: catalog as never,
     });
 

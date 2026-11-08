@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
@@ -39,13 +40,13 @@ function fixture(options: { executor?: ProjectTaskExecutor } = {}) {
     };
   });
   const registry = new ProjectRegistry({ readOnly: true, entries });
-  const store = new FileMemoryStore(join(root, 'memory.json'));
+  const store = new AsyncFileMemoryStore(new FileMemoryStore(join(root, 'memory.json')));
   const projectContext = new ProjectConversationContext(registry, store, 'test');
   const noopExecutor: ProjectTaskExecutor = {
     execute: async (): Promise<ProjectTaskExecutionResult> => ({ outcome: 'completed', summary: 'não deveria ter sido chamado neste teste' }),
   };
   const executor = options.executor ?? noopExecutor;
-  const projectTaskOrchestrator = new ProjectTaskOrchestrator(registry, new FileMemoryStore(join(root, 'tasks.json')), executor, 'test');
+  const projectTaskOrchestrator = new ProjectTaskOrchestrator(registry, new AsyncFileMemoryStore(new FileMemoryStore(join(root, 'tasks.json'))), executor, 'test');
   return { projectContext, projectTaskOrchestrator };
 }
 
@@ -108,7 +109,7 @@ test('a project selection combined with a real question in the same message sele
 
   assert.equal(result.status, 'completed');
   assert.equal(interpretedText, realFailingMessage, 'the conversational model must have been consulted with the real message');
-  assert.equal(projectContext.active('c1')?.id, 'neuro-hub-pro', 'the project must still have been selected as a side effect');
+  assert.equal((await projectContext.active('c1'))?.id, 'neuro-hub-pro', 'the project must still have been selected as a side effect');
   if (result.status === 'completed') {
     const message = (result.output.finalResult as { message: string }).message;
     assert.doesNotMatch(message, /Não consegui concluir essa consulta agora/);
@@ -144,5 +145,5 @@ test('when the remainder after selection is itself a real ANALISA/FAZ request, t
   assert.equal(result.status, 'completed');
   assert.equal(executed, true, 'the task executor must have run the ANALISA request');
   assert.equal(interpretCalled, false, 'a recognized ANALISA/FAZ request must never also fall through to the conversational model');
-  assert.equal(projectContext.active('c1')?.id, 'lsb-service');
+  assert.equal((await projectContext.active('c1'))?.id, 'lsb-service');
 });

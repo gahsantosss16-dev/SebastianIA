@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { RecentExchangeRecord } from './FileCommandContextHydrator.js';
-import { FileMemoryStore } from './FileMemoryStore.js';
+import type { AsyncMemoryStore } from './AsyncMemoryStore.js';
 
 export const CONVERSATION_REGISTRY_NAMESPACE = 'conversations';
 export const DEFAULT_CONVERSATION_TITLE = 'Nova conversa';
@@ -18,7 +18,7 @@ export interface ConversationSummaryRecord {
 }
 
 interface ConversationTurnSource {
-  listConversationTurns(conversationId: string): readonly RecentExchangeRecord[];
+  listConversationTurns(conversationId: string): Promise<readonly RecentExchangeRecord[]>;
 }
 
 /**
@@ -58,13 +58,13 @@ export function deriveConversationTitle(text: string): string {
  * renders and the existence check a conversationId is validated against.
  */
 export class ConversationRegistry {
-  private readonly store: FileMemoryStore;
+  private readonly store: AsyncMemoryStore;
   private readonly turnSource: ConversationTurnSource;
   private readonly createId: () => string;
   private readonly now: () => string;
 
   public constructor(
-    store: FileMemoryStore,
+    store: AsyncMemoryStore,
     turnSource: ConversationTurnSource,
     createId: () => string = () => `conversation-${randomUUID()}`,
     now: () => string = () => new Date().toISOString(),
@@ -75,7 +75,7 @@ export class ConversationRegistry {
     this.now = now;
   }
 
-  public create(): ConversationSummaryRecord {
+  public async create(): Promise<ConversationSummaryRecord> {
     const at = this.now();
     const record: ConversationSummaryRecord = {
       id: this.createId(),
@@ -83,51 +83,51 @@ export class ConversationRegistry {
       createdAt: at,
       lastActivityAt: at,
     };
-    this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, record.id, { ...record });
+    await this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, record.id, { ...record });
     return record;
   }
 
-  public list(): readonly ConversationSummaryRecord[] {
-    this.ensureLegacyConversationRegistered();
-    return this.readAll().sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
+  public async list(): Promise<readonly ConversationSummaryRecord[]> {
+    await this.ensureLegacyConversationRegistered();
+    return (await this.readAll()).sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
   }
 
-  public get(id: string): ConversationSummaryRecord | undefined {
+  public async get(id: string): Promise<ConversationSummaryRecord | undefined> {
     if (!isValidConversationIdFormat(id)) {
       return undefined;
     }
-    this.ensureLegacyConversationRegistered();
-    return this.readAll().find((conversation) => conversation.id === id);
+    await this.ensureLegacyConversationRegistered();
+    return (await this.readAll()).find((conversation) => conversation.id === id);
   }
 
-  public touch(id: string, at: string = this.now()): void {
-    const existing = this.get(id);
+  public async touch(id: string, at: string = this.now()): Promise<void> {
+    const existing = await this.get(id);
     if (!existing) {
       return;
     }
-    this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, id, { ...existing, lastActivityAt: at });
+    await this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, id, { ...existing, lastActivityAt: at });
   }
 
   /** Applies `title` only while the conversation still carries the generic placeholder - never overwrites a title a later feature might let a user set explicitly. */
-  public applyTitleIfPlaceholder(id: string, title: string): void {
-    const existing = this.get(id);
+  public async applyTitleIfPlaceholder(id: string, title: string): Promise<void> {
+    const existing = await this.get(id);
     if (!existing || existing.title !== DEFAULT_CONVERSATION_TITLE || title.trim() === '') {
       return;
     }
-    this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, id, { ...existing, title });
+    await this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, id, { ...existing, title });
   }
 
   /** The full turn history of one conversation, for a caller (the HTTP layer) reopening it - `undefined` for an id that fails format validation or does not exist. */
-  public listTurns(id: string): readonly RecentExchangeRecord[] | undefined {
-    if (!this.get(id)) {
+  public async listTurns(id: string): Promise<readonly RecentExchangeRecord[] | undefined> {
+    if (!(await this.get(id))) {
       return undefined;
     }
-    return this.turnSource.listConversationTurns(id);
+    return await this.turnSource.listConversationTurns(id);
   }
 
-  private readAll(): ConversationSummaryRecord[] {
-    return this.store
-      .listRecords(CONVERSATION_REGISTRY_NAMESPACE)
+  private async readAll(): Promise<ConversationSummaryRecord[]> {
+    return (await this.store
+      .listRecords(CONVERSATION_REGISTRY_NAMESPACE))
       .map((record) => this.parse(record))
       .filter((record): record is ConversationSummaryRecord => record !== undefined);
   }
@@ -152,15 +152,15 @@ export class ConversationRegistry {
    * most once - after the first successful registration the default id is
    * present in the store, so this becomes a no-op read on every later call.
    */
-  private ensureLegacyConversationRegistered(): void {
-    const alreadyRegistered = this.store
-      .listRecords(CONVERSATION_REGISTRY_NAMESPACE)
+  private async ensureLegacyConversationRegistered(): Promise<void> {
+    const alreadyRegistered = (await this.store
+      .listRecords(CONVERSATION_REGISTRY_NAMESPACE))
       .some((record) => record.id === LEGACY_DEFAULT_CONVERSATION_ID);
     if (alreadyRegistered) {
       return;
     }
 
-    const legacyTurns = [...this.turnSource.listConversationTurns(LEGACY_DEFAULT_CONVERSATION_ID)]
+    const legacyTurns = [...await this.turnSource.listConversationTurns(LEGACY_DEFAULT_CONVERSATION_ID)]
       .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
     if (legacyTurns.length === 0) {
       return;
@@ -174,6 +174,6 @@ export class ConversationRegistry {
       createdAt: first.recordedAt,
       lastActivityAt: last.recordedAt,
     };
-    this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, record.id, { ...record });
+    await this.store.writeRecord(CONVERSATION_REGISTRY_NAMESPACE, record.id, { ...record });
   }
 }

@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -14,16 +15,16 @@ import { FileCommandContextHydrator } from '../../core/memory/FileCommandContext
 import { FileCommandResultMemoryWriter } from '../../core/memory/FileCommandResultMemoryWriter.js';
 import { FileMemoryStore } from '../../core/memory/FileMemoryStore.js';
 
-function withTempStore(run: (store: FileMemoryStore) => void): void {
+async function withTempStore(run: (store: AsyncFileMemoryStore) => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'sebastian-conversation-registry-'));
   try {
-    run(new FileMemoryStore(join(dir, 'memory.json')));
+    await run(new AsyncFileMemoryStore(new FileMemoryStore(join(dir, 'memory.json'))));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-function createRegistry(store: FileMemoryStore, ids: readonly string[] = [], clockMs = { value: 0 }): ConversationRegistry {
+function createRegistry(store: AsyncFileMemoryStore, ids: readonly string[] = [], clockMs = { value: 0 }): ConversationRegistry {
   let index = 0;
   return new ConversationRegistry(
     store,
@@ -53,66 +54,66 @@ test('deriveConversationTitle takes the first non-empty line, collapses whitespa
   assert.ok(title.endsWith('…'));
 });
 
-test('create persists a conversation with a placeholder title and identical createdAt/lastActivityAt', () => {
-  withTempStore((store) => {
+test('create persists a conversation with a placeholder title and identical createdAt/lastActivityAt', async () => {
+  await withTempStore(async (store) => {
     const registry = createRegistry(store, ['conversation-aaa']);
-    const created = registry.create();
+    const created = await registry.create();
     assert.deepEqual(created, {
       id: 'conversation-aaa',
       title: DEFAULT_CONVERSATION_TITLE,
       createdAt: created.createdAt,
       lastActivityAt: created.createdAt,
     });
-    assert.deepEqual(registry.get('conversation-aaa'), created);
+    assert.deepEqual((await registry.get('conversation-aaa')), created);
   });
 });
 
-test('list returns conversations sorted by most recent activity first', () => {
-  withTempStore((store) => {
+test('list returns conversations sorted by most recent activity first', async () => {
+  await withTempStore(async (store) => {
     const clock = { value: 0 };
     const registry = createRegistry(store, ['conversation-first', 'conversation-second'], clock);
-    registry.create();
+    await registry.create();
     clock.value += 1_000;
-    registry.create();
+    await registry.create();
     clock.value += 1_000;
-    registry.touch('conversation-first', new Date(clock.value).toISOString());
+    await registry.touch('conversation-first', new Date(clock.value).toISOString());
 
-    assert.deepEqual(registry.list().map((c) => c.id), ['conversation-first', 'conversation-second']);
+    assert.deepEqual((await registry.list()).map((c) => c.id), ['conversation-first', 'conversation-second']);
   });
 });
 
-test('get rejects a malformed id without ever touching storage, and returns undefined for a well-formed but missing id', () => {
-  withTempStore((store) => {
+test('get rejects a malformed id without ever touching storage, and returns undefined for a well-formed but missing id', async () => {
+  await withTempStore(async (store) => {
     const registry = createRegistry(store);
-    assert.equal(registry.get('../etc/passwd'), undefined);
-    assert.equal(registry.get('conversation-does-not-exist'), undefined);
+    assert.equal((await registry.get('../etc/passwd')), undefined);
+    assert.equal((await registry.get('conversation-does-not-exist')), undefined);
   });
 });
 
-test('touch on an unknown id is a safe no-op', () => {
-  withTempStore((store) => {
+test('touch on an unknown id is a safe no-op', async () => {
+  await withTempStore(async (store) => {
     const registry = createRegistry(store);
-    registry.touch('conversation-does-not-exist', new Date().toISOString());
-    assert.deepEqual(registry.list(), []);
+    await registry.touch('conversation-does-not-exist', new Date().toISOString());
+    assert.deepEqual((await registry.list()), []);
   });
 });
 
-test('applyTitleIfPlaceholder sets the title only once, from the first useful message, and never overwrites it again', () => {
-  withTempStore((store) => {
+test('applyTitleIfPlaceholder sets the title only once, from the first useful message, and never overwrites it again', async () => {
+  await withTempStore(async (store) => {
     const registry = createRegistry(store, ['conversation-x']);
-    registry.create();
-    registry.applyTitleIfPlaceholder('conversation-x', 'Como faço deploy na Hostinger?');
-    assert.equal(registry.get('conversation-x')?.title, 'Como faço deploy na Hostinger?');
+    await registry.create();
+    await registry.applyTitleIfPlaceholder('conversation-x', 'Como faço deploy na Hostinger?');
+    assert.equal((await registry.get('conversation-x'))?.title, 'Como faço deploy na Hostinger?');
 
-    registry.applyTitleIfPlaceholder('conversation-x', 'Uma pergunta completamente diferente');
-    assert.equal(registry.get('conversation-x')?.title, 'Como faço deploy na Hostinger?');
+    await registry.applyTitleIfPlaceholder('conversation-x', 'Uma pergunta completamente diferente');
+    assert.equal((await registry.get('conversation-x'))?.title, 'Como faço deploy na Hostinger?');
   });
 });
 
-test('listTurns returns undefined for an id that does not exist, and the real turns for one that does', () => {
-  withTempStore((store) => {
+test('listTurns returns undefined for an id that does not exist, and the real turns for one that does', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:1',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-14T00:00:00.000Z',
@@ -122,24 +123,24 @@ test('listTurns returns undefined for an id that does not exist, and the real tu
       metadata: { conversationId: 'conversation-real' },
     });
     const registry = createRegistry(store, ['conversation-real']);
-    registry.create();
+    await registry.create();
 
-    assert.equal(registry.listTurns('conversation-does-not-exist'), undefined);
-    assert.deepEqual(registry.listTurns('conversation-real')?.map((t) => t.requestText), ['oi']);
+    assert.equal((await registry.listTurns('conversation-does-not-exist')), undefined);
+    assert.deepEqual((await registry.listTurns('conversation-real'))?.map((t) => t.requestText), ['oi']);
   });
 });
 
-test('a fresh installation with no registry entries and no legacy history lists nothing', () => {
-  withTempStore((store) => {
+test('a fresh installation with no registry entries and no legacy history lists nothing', async () => {
+  await withTempStore(async (store) => {
     const registry = createRegistry(store);
-    assert.deepEqual(registry.list(), []);
+    assert.deepEqual((await registry.list()), []);
   });
 });
 
-test('an installation with only pre-existing legacy exchanges (no conversationId metadata) gets conversation-1 registered automatically, once', () => {
-  withTempStore((store) => {
+test('an installation with only pre-existing legacy exchanges (no conversationId metadata) gets conversation-1 registered automatically, once', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:legacy-1',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-14T00:00:00.000Z',
@@ -148,7 +149,7 @@ test('an installation with only pre-existing legacy exchanges (no conversationId
       output: { conversationTurn: { requestText: 'Quais são minhas tarefas?', summary: 'Você não tem nenhuma tarefa pendente.', kind: 'respond' } },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:legacy-2',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-14T00:05:00.000Z',
@@ -159,7 +160,7 @@ test('an installation with only pre-existing legacy exchanges (no conversationId
     });
 
     const registry = createRegistry(store);
-    const list = registry.list();
+    const list = await registry.list();
     assert.equal(list.length, 1);
     assert.equal(list[0]!.id, LEGACY_DEFAULT_CONVERSATION_ID);
     assert.equal(list[0]!.title, 'Quais são minhas tarefas?');
@@ -167,14 +168,14 @@ test('an installation with only pre-existing legacy exchanges (no conversationId
     assert.equal(list[0]!.lastActivityAt, '2026-08-14T00:05:00.000Z');
 
     // Calling list again must not duplicate or re-derive the migrated entry.
-    assert.deepEqual(registry.list(), list);
+    assert.deepEqual((await registry.list()), list);
   });
 });
 
-test('legacy migration never overwrites a real conversation-1 that was already explicitly created', () => {
-  withTempStore((store) => {
+test('legacy migration never overwrites a real conversation-1 that was already explicitly created', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:legacy-1',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-14T00:00:00.000Z',
@@ -185,10 +186,10 @@ test('legacy migration never overwrites a real conversation-1 that was already e
     });
 
     const registry = createRegistry(store, [LEGACY_DEFAULT_CONVERSATION_ID], { value: 5_000 });
-    const explicit = registry.create();
+    const explicit = await registry.create();
     assert.equal(explicit.id, LEGACY_DEFAULT_CONVERSATION_ID);
 
-    const list = registry.list();
+    const list = await registry.list();
     assert.equal(list.length, 1);
     assert.equal(list[0]!.title, DEFAULT_CONVERSATION_TITLE, 'the explicitly created conversation must win, never be replaced by the migration');
   });
