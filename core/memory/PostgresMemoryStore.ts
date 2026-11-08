@@ -74,6 +74,20 @@ export class PostgresMemoryStore {
     await this.database.query('select namespace from sebastian.memory_records limit 0');
   }
 
+  /** Read-only homologation check: never returns server fields or credential material. */
+  public async verifySecureIdentity(expectedUser: string): Promise<void> {
+    this.assertAvailable();
+    const result = await this.database.query<{ identity_matches: boolean; tls_verified: boolean }>(
+      `select current_user::text = $1 as identity_matches,
+        coalesce((select ssl and version in ('TLSv1.2', 'TLSv1.3')
+          from pg_stat_ssl where pid = pg_backend_pid()), false) as tls_verified`,
+      [expectedUser],
+    );
+    if (result.rows[0]?.identity_matches !== true || result.rows[0]?.tls_verified !== true) {
+      throw new Error('PostgreSQL identity or TLS verification failed.');
+    }
+  }
+
   private assertAvailable(): void {
     if (this.poolFailure !== undefined) throw this.poolFailure;
   }
