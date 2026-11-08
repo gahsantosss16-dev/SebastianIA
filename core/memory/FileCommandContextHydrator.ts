@@ -6,7 +6,7 @@ import {
 } from './CommandContextHydrationContract.js';
 import { InvalidCommandContextHydrationRequestError } from './CommandContextHydrationContractErrors.js';
 import { COMMAND_RESULTS_NAMESPACE } from './FileCommandResultMemoryWriter.js';
-import { FileMemoryStore } from './FileMemoryStore.js';
+import type { AsyncMemoryStore } from './AsyncMemoryStore.js';
 import {
   OPERATION_EVENT_RECORD_KIND,
   type PendingOperationRecord,
@@ -90,17 +90,17 @@ export interface RecentExchangeRecord {
  * contracts without introducing a separate memory schema.
  */
 export class FileCommandContextHydrator implements CommandContextHydrator {
-  private readonly store: FileMemoryStore;
+  private readonly store: AsyncMemoryStore;
 
-  public constructor(store: FileMemoryStore) {
+  public constructor(store: AsyncMemoryStore) {
     this.store = store;
   }
 
-  public hydrate(request: CommandContextHydrationRequest): CommandContextHydrationResult {
+  public async hydrate(request: CommandContextHydrationRequest): Promise<CommandContextHydrationResult> {
     this.validateRequest(request);
 
-    const succeededRecords = this.store
-      .listRecords(COMMAND_RESULTS_NAMESPACE)
+    const succeededRecords = (await this.store
+      .listRecords(COMMAND_RESULTS_NAMESPACE))
       .filter((record) => record.resultStatus === 'succeeded');
 
     // Conversational state (exchanges, tasks, pending operations) is scoped to
@@ -149,13 +149,13 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
    * Legacy records with no conversationId at all are folded into
    * DEFAULT_CONVERSATION_ID, exactly like `hydrate`.
    */
-  public listConversationTurns(conversationId: string): readonly RecentExchangeRecord[] {
+  public async listConversationTurns(conversationId: string): Promise<readonly RecentExchangeRecord[]> {
     if (typeof conversationId !== 'string' || conversationId.trim() === '') {
       throw new InvalidCommandContextHydrationRequestError('Conversation id must be a non-empty string.');
     }
 
-    const scopedRecords = this.store
-      .listRecords(COMMAND_RESULTS_NAMESPACE)
+    const scopedRecords = (await this.store
+      .listRecords(COMMAND_RESULTS_NAMESPACE))
       .filter((record) => record.resultStatus === 'succeeded')
       .filter((record) => {
         const recordConversationId = (record.metadata as { readonly conversationId?: unknown } | undefined)?.conversationId;

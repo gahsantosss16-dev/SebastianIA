@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -311,8 +312,8 @@ test('core writes command results through to disk when composed with a memoryFil
     core.start();
     await core.executeCommand(commandInput());
 
-    const independentStore = new FileMemoryStore(memoryFilePath);
-    const records = independentStore.listRecords('command-results');
+    const independentStore = new AsyncFileMemoryStore(new FileMemoryStore(memoryFilePath));
+    const records = await independentStore.listRecords('command-results');
     assert.equal(records.length, 1);
     assert.equal(records[0]?.commandType, 'greeting');
   } finally {
@@ -484,8 +485,8 @@ test('a task added, listed, completed and listed again persists correctly across
     );
     assert.deepEqual(secondListing.output, { message: 'Você não tem nenhuma tarefa pendente.' });
 
-    const independentStore = new FileMemoryStore(memoryFilePath);
-    const records = independentStore.listRecords('command-results');
+    const independentStore = new AsyncFileMemoryStore(new FileMemoryStore(memoryFilePath));
+    const records = await independentStore.listRecords('command-results');
     assert.equal(records.length, 4, 'creation, both listings and completion must all persist as separate append-only records');
   } finally {
     rmSync(dir, { recursive: true, force: true });

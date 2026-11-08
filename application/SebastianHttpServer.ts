@@ -315,7 +315,7 @@ export class SebastianHttpServer {
             this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
             return;
           }
-          this.handleListConversations(response);
+          await this.handleListConversations(response);
           return;
         }
         if (request.method === 'POST') {
@@ -323,7 +323,7 @@ export class SebastianHttpServer {
             this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
             return;
           }
-          this.handleCreateConversation(response);
+          await this.handleCreateConversation(response);
           return;
         }
         this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET, POST' });
@@ -340,7 +340,7 @@ export class SebastianHttpServer {
           return;
         }
         const conversationId = url.pathname.slice('/api/web/conversations/'.length);
-        this.handleGetConversation(response, conversationId, requestId);
+        await this.handleGetConversation(response, conversationId, requestId);
         return;
       }
 
@@ -480,7 +480,7 @@ export class SebastianHttpServer {
       const body = await readJsonBody(request);
       const message = extractMessage(body);
       const conversationId = extractOptionalConversationId(body);
-      if (conversationId !== undefined && !this.conversationRegistry.get(conversationId)) {
+      if (conversationId !== undefined && !(await this.conversationRegistry.get(conversationId))) {
         this.writeError(response, 404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.', requestId);
         return;
       }
@@ -501,15 +501,15 @@ export class SebastianHttpServer {
       const result = await withTimeout(execution, requestTimeoutMs, () => controller.abort());
       const publicMessage = extractPublicMessage(result);
       if (conversationId !== undefined) {
-        this.conversationRegistry.touch(conversationId, this.now().toISOString());
-        this.conversationRegistry.applyTitleIfPlaceholder(conversationId, deriveConversationTitle(message));
+        await this.conversationRegistry.touch(conversationId, this.now().toISOString());
+        await this.conversationRegistry.applyTitleIfPlaceholder(conversationId, deriveConversationTitle(message));
       }
       this.writeJson(response, 200, {
         ok: true,
         message: publicMessage,
         requestId,
-        ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId ?? 'conversation-1') }),
-        ...(this.projectTaskOrchestrator === undefined ? {} : { task: this.projectTaskOrchestrator.currentTask(conversationId ?? 'conversation-1') }),
+        ...(this.projectContext === undefined ? {} : { project: await this.projectContext.active(conversationId ?? 'conversation-1') }),
+        ...(this.projectTaskOrchestrator === undefined ? {} : { task: await this.projectTaskOrchestrator.currentTask(conversationId ?? 'conversation-1') }),
       });
     } finally {
       request.off('aborted', abortOnDisconnect);
@@ -518,23 +518,23 @@ export class SebastianHttpServer {
     }
   }
 
-  private handleCreateConversation(response: ServerResponse): void {
-    const conversation = this.conversationRegistry.create();
+  private async handleCreateConversation(response: ServerResponse): Promise<void> {
+    const conversation = await this.conversationRegistry.create();
     this.writeJson(response, 201, { conversation: this.publicConversationSummary(conversation) });
   }
 
-  private handleListConversations(response: ServerResponse): void {
-    const conversations = this.conversationRegistry.list().map((conversation) => this.publicConversationSummary(conversation));
+  private async handleListConversations(response: ServerResponse): Promise<void> {
+    const conversations = (await this.conversationRegistry.list()).map((conversation) => this.publicConversationSummary(conversation));
     this.writeJson(response, 200, { conversations });
   }
 
-  private handleGetConversation(response: ServerResponse, conversationId: string, requestId: string): void {
+  private async handleGetConversation(response: ServerResponse, conversationId: string, requestId: string): Promise<void> {
     if (!isValidConversationIdFormat(conversationId)) {
       this.writeError(response, 404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.', requestId);
       return;
     }
-    const conversation = this.conversationRegistry.get(conversationId);
-    const turns = conversation ? this.conversationRegistry.listTurns(conversationId) : undefined;
+    const conversation = await this.conversationRegistry.get(conversationId);
+    const turns = conversation ? (await this.conversationRegistry.listTurns(conversationId)) : undefined;
     if (!conversation || !turns) {
       this.writeError(response, 404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.', requestId);
       return;
@@ -546,8 +546,8 @@ export class SebastianHttpServer {
     this.writeJson(response, 200, {
       conversation: this.publicConversationSummary(conversation),
       messages,
-      ...(this.projectContext === undefined ? {} : { project: this.projectContext.active(conversationId) }),
-      ...(this.projectTaskOrchestrator === undefined ? {} : { task: this.projectTaskOrchestrator.currentTask(conversationId) }),
+      ...(this.projectContext === undefined ? {} : { project: await this.projectContext.active(conversationId) }),
+      ...(this.projectTaskOrchestrator === undefined ? {} : { task: await this.projectTaskOrchestrator.currentTask(conversationId) }),
     });
   }
 

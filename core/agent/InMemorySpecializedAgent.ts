@@ -155,7 +155,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const command = input.payload.commandInput as { conversation?: { conversationId?: string } };
     const conversationId = command.conversation?.conversationId ?? 'conversation-1';
     const abortSignal = this.extractAbortSignal(input);
-    const projectReply = this.projectContext?.handle(conversationId, text, input.executionId, input.requestedAt);
+    const projectReply = await this.projectContext?.handle(conversationId, text, input.executionId, input.requestedAt);
     if (projectReply && this.projectTaskOrchestrator && projectReply.project) {
       // Identity/selection/rules handling above never changes because of this: it always
       // runs and its reply is only overridden below when the same message ALSO carries a
@@ -249,10 +249,10 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       forceFallback ||
       (decision.intent === 'respond' &&
         decision.cognitiveFallbackEligible === true &&
-        this.cognitiveOperationalOrchestrator?.hasApplicableToolCandidate(
+        (await this.cognitiveOperationalOrchestrator?.hasApplicableToolCandidate(
           text,
           immediatePreviousExchange === undefined ? undefined : this.formatImmediateContext(immediatePreviousExchange),
-        ) === true) ||
+        )) === true) ||
       (decision.intent === 'useTool' && decision.cognitiveOperationalEligible === true);
     if (!eligible || !this.cognitiveOperationalOrchestrator) {
       return decision;

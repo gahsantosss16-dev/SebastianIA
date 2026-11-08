@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
 import type { Logger } from '../core/logger.js';
 import {
   FILESYSTEM_READ_FILE_TOOL_ID,
@@ -61,7 +62,7 @@ function knowledgeOperationalTools(knowledgeTool: KnowledgeSearchTool): readonly
       description: 'Busca trechos relevantes em bibliotecas de conhecimento configuradas (ex.: programação), com metadados de autoridade e proveniência.',
       requiresAuthorization: false,
       requiredStringArguments: ['query'],
-      broadApplicabilityProbe: (objective: string) => knowledgeTool.hasRelevantMatch(objective),
+      broadApplicabilityProbe: async (objective: string) => (await knowledgeTool.hasRelevantMatch(objective)),
     },
   ];
 }
@@ -228,7 +229,7 @@ export function createOnlineSebastianApplication(
   // the GitHub integration above).
   const knowledgeTool = dataDir === undefined
     ? undefined
-    : new KnowledgeSearchTool(new KnowledgeStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))));
+    : new KnowledgeSearchTool(new KnowledgeStore(new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir)))));
 
   return createSebastianApplication({
     ...(projectContext === undefined ? {} : { projectContext }),

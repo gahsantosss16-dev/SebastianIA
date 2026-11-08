@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -136,7 +137,7 @@ function fixture(options: FixtureOptions = {}) {
   });
   const registry = new ProjectRegistry({ readOnly: true, entries });
   const memoryFile = join(root, 'memory.json');
-  const store = new FileMemoryStore(memoryFile);
+  const store = new AsyncFileMemoryStore(new FileMemoryStore(memoryFile));
   const executor = new FakeExecutor();
   const orchestrator = new ProjectTaskOrchestrator(registry, store, executor, 'test', undefined, options.cognitiveModelProvider);
   return { root, memoryFile, entries, registry, store, executor, orchestrator, remotesByProjectId };
@@ -223,8 +224,8 @@ test('conversation isolation: two conversations on different projects never shar
   const [neuro, lsbForRead] = entries;
   await orchestrator.handle('conv-neuro', activeOf(neuro!), 'Sebastian, corrija o botão', 'e1', NOW);
   await orchestrator.handle('conv-lsb', activeOf(lsbForRead!), 'Sebastian, analisa o estado', 'e2', NOW);
-  const neuroTask = orchestrator.currentTask('conv-neuro');
-  const lsbTask = orchestrator.currentTask('conv-lsb');
+  const neuroTask = await orchestrator.currentTask('conv-neuro');
+  const lsbTask = await orchestrator.currentTask('conv-lsb');
   assert.equal(neuroTask?.projectId, 'neuro-hub-pro');
   assert.equal(lsbTask?.projectId, 'lsb-service');
   assert.notEqual(neuroTask?.taskId, lsbTask?.taskId);
@@ -234,12 +235,12 @@ test('a follow-up message continues the same task/project without repeating the 
   const { entries, orchestrator } = fixture();
   const neuro = entries[0]!;
   const first = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
-  const firstTask = orchestrator.currentTask('c1')!;
+  const firstTask = (await orchestrator.currentTask('c1'))!;
   assert.equal(firstTask.status, 'awaitingHomologation');
   assert.match(first!.message, /aguardando sua homologação/i);
 
   const second = await orchestrator.handle('c1', activeOf(neuro), 'ficou muito pequeno, aumenta um pouco', 'e2', NOW);
-  const secondTask = orchestrator.currentTask('c1')!;
+  const secondTask = (await orchestrator.currentTask('c1'))!;
   assert.equal(secondTask.taskId, firstTask.taskId, 'continuation must keep the same task identity');
   assert.equal(secondTask.projectId, 'neuro-hub-pro');
   assert.match(secondTask.requestText, /Ajuste solicitado agora pelo usuário: ficou muito pequeno, aumenta um pouco/);
@@ -255,7 +256,7 @@ test('a completed write task reports files changed, a diff excerpt and validatio
   const { entries, orchestrator } = fixture({ neuroValidations: validations });
   const neuro = entries[0]!;
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão', 'e1', NOW);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.equal(task.filesChanged.length, 1);
   assert.equal(task.validations.length, 1);
   assert.equal(task.validations[0]!.succeeded, true);
@@ -271,12 +272,12 @@ test('a change already present in the checkout before FAZ is never attributed to
   writeFileSync(join(root, 'user-notes.txt'), 'rascunho do usuário');
 
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.deepEqual(task.filesChanged, ['changed-1.txt']);
   assert.doesNotMatch(reply!.message, /CLAUDE\.md|user-notes\.txt|preexistente/);
 
   await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'closed');
   const committed = git(root, ['show', '--name-only', '--format=', 'HEAD']).trim().split('\n');
   assert.deepEqual(committed, ['changed-1.txt']);
   assert.equal(git(remotesByProjectId.get('neuro-hub-pro')!, ['rev-parse', 'HEAD']).trim(), git(root, ['rev-parse', 'HEAD']).trim());
@@ -302,7 +303,7 @@ test('a pre-existing file that the FAZ executor then edits is still attributed t
 
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   assert.equal(executor.calls.length, 1);
-  assert.deepEqual(orchestrator.currentTask('c1')!.filesChanged, ['changed-1.txt']);
+  assert.deepEqual((await orchestrator.currentTask('c1'))!.filesChanged, ['changed-1.txt']);
 });
 
 test('a continuation keeps the files the task itself changed earlier, even when the new round does not touch them again', async () => {
@@ -312,17 +313,17 @@ test('a continuation keeps the files the task itself changed earlier, even when 
   executor.writeOnAuthorizedCall = false;
   await orchestrator.handle('c1', activeOf(neuro), 'ficou muito pequeno, aumenta um pouco', 'e2', NOW);
 
-  assert.deepEqual(orchestrator.currentTask('c1')!.filesChanged, ['changed-1.txt']);
+  assert.deepEqual((await orchestrator.currentTask('c1'))!.filesChanged, ['changed-1.txt']);
 });
 
 test('reopening with a new orchestrator instance over the same store preserves the task', async () => {
   const { entries, orchestrator, registry, store, executor } = fixture();
   const neuro = entries[0]!;
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão', 'e1', NOW);
-  const before = orchestrator.currentTask('c1')!;
+  const before = (await orchestrator.currentTask('c1'))!;
 
   const reopened = new ProjectTaskOrchestrator(registry, store, executor, 'test');
-  const after = reopened.currentTask('c1');
+  const after = await reopened.currentTask('c1');
   assert.equal(after?.taskId, before.taskId);
   assert.equal(after?.status, before.status);
   assert.equal(after?.projectId, before.projectId);
@@ -340,12 +341,12 @@ test('FECHA TUDO ("fecha tudo") nunca é engolido pela continuação de uma tare
   const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
   const neuro = entries[0]!;
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
-  const afterFaz = orchestrator.currentTask('c1')!;
+  const afterFaz = (await orchestrator.currentTask('c1'))!;
   assert.equal(afterFaz.status, 'awaitingHomologation');
 
   const closeReply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
   assert.doesNotMatch(closeReply!.message, /Ajuste solicitado agora pelo usuário/, 'não pode ser tratado como uma edição de continuação');
-  const afterClose = orchestrator.currentTask('c1')!;
+  const afterClose = (await orchestrator.currentTask('c1'))!;
   assert.equal(afterClose.status, 'closed');
   assert.ok(afterClose.commitHash);
 });
@@ -356,7 +357,7 @@ test('variações de frase autorizam o fechamento: "pode fechar" e "homologado, 
     const neuro = entries[0]!;
     await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
     const closeReply = await orchestrator.handle('c1', activeOf(neuro), phrase, 'e2', NOW);
-    const task = orchestrator.currentTask('c1')!;
+    const task = (await orchestrator.currentTask('c1'))!;
     assert.equal(task.status, 'closed', `frase "${phrase}" deveria autorizar o fechamento`);
     assert.match(closeReply!.message, /Push: confirmado/);
   }
@@ -366,9 +367,9 @@ test('feedback isolado ("homologado" sozinho, sem menção a fechar) registra ho
   const { entries, orchestrator } = fixture({ neuroClose: { enabled: true } });
   const neuro = entries[0]!;
   const before = await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
-  const beforeTask = orchestrator.currentTask('c1')!;
+  const beforeTask = (await orchestrator.currentTask('c1'))!;
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'isso está homologado e funcionando bem', 'e2', NOW);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.equal(task.status, 'awaitingHomologation', 'feedback isolado, sem menção a fechar, nunca dispara commit/push/tag');
   assert.equal(task.commitHash, undefined);
   assert.ok(task.homologatedAt, 'o feedback de aprovação deve ficar registrado');
@@ -386,7 +387,7 @@ test('fechamento correto após homologação: FAZ real -> awaitingHomologation -
   assert.match(fazReply!.message, /aguardando sua homologação/i);
 
   const closeReply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.equal(task.status, 'closed');
   assert.match(closeReply!.message, /Push: confirmado/);
   assert.match(closeReply!.message, /Tag: neuro-hub-pro-homologado-.*publicada/);
@@ -414,7 +415,7 @@ test('(2) após um diagnóstico concluído, "então corrige" abre FAZ usando o d
   const { entries, executor, orchestrator } = fixture();
   const neuro = entries[0]!;
   await orchestrator.handle('c1', activeOf(neuro), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
-  const analyzed = orchestrator.currentTask('c1')!;
+  const analyzed = (await orchestrator.currentTask('c1'))!;
   assert.equal(analyzed.status, 'completed', 'uma ANALISA bem-sucedida termina completed, não fica em OPEN_STATUSES');
 
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'então corrige', 'e2', NOW);
@@ -422,7 +423,7 @@ test('(2) após um diagnóstico concluído, "então corrige" abre FAZ usando o d
   assert.equal(executor.calls[1]!.authorization, 'writeAuthorized');
   assert.match(executor.calls[1]!.instructions, /Tarefa anterior:.*BDEFS/s);
   assert.match(executor.calls[1]!.instructions, /Ajuste solicitado agora pelo usuário: então corrige/);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.notEqual(task.taskId, analyzed.taskId, 'é uma tarefa nova, não uma continuação por status');
   assert.match(reply!.message, /arquivo/i);
 });
@@ -458,7 +459,7 @@ test('(6) "ficou bom, pode fechar" homologa e fecha na mesma mensagem', async ()
   const neuro = entries[0]!;
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'ficou bom, pode fechar', 'e2', NOW);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.equal(task.status, 'closed');
   assert.ok(task.homologatedAt, 'a homologação também deve ter sido registrada');
   assert.match(reply!.message, /Push: confirmado/);
@@ -469,16 +470,16 @@ test('(8) uma correção pedida depois de "ficou bom" invalida a homologação a
   const neuro = entries[0]!;
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   await orchestrator.handle('c1', activeOf(neuro), 'ficou bom', 'e2', NOW);
-  const homologated = orchestrator.currentTask('c1')!;
+  const homologated = (await orchestrator.currentTask('c1'))!;
   assert.ok(homologated.homologatedAt);
 
   await orchestrator.handle('c1', activeOf(neuro), 'pera, aumenta um pouco o espaçamento', 'e3', NOW);
-  const afterChange = orchestrator.currentTask('c1')!;
+  const afterChange = (await orchestrator.currentTask('c1'))!;
   assert.equal(afterChange.status, 'awaitingHomologation');
   assert.equal(afterChange.homologatedAt, undefined, 'a homologação anterior não pode sobreviver a uma nova alteração');
 
   const closeReply = await orchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e4', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'closed');
   void closeReply;
 });
 
@@ -499,7 +500,7 @@ test('(9b) "fecha" sozinho, sem o estado atual ter sido homologado, é RECUSADO 
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   const callsBefore = executor.calls.length;
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e2', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'awaitingHomologation', 'sem homologação do estado atual, "fecha" nunca fecha');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'awaitingHomologation', 'sem homologação do estado atual, "fecha" nunca fecha');
   assert.equal(executor.calls.length, callsBefore, '"fecha" recusado nunca deve virar mais uma instrução de edição');
   assert.match(reply!.message, /ainda não foi homologado/i);
   assert.equal(commitCount(neuro.workspace!.root), 1);
@@ -511,7 +512,7 @@ test('(9c) "fecha" funciona normalmente depois que o estado atual foi de fato ho
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   await orchestrator.handle('c1', activeOf(neuro), 'ficou bom', 'e2', NOW);
   const reply = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e3', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'closed');
   assert.match(reply!.message, /Push: confirmado/);
 });
 
@@ -522,12 +523,12 @@ test('(bug reportado) fluxo completo: homologa -> edita (invalida) -> "fecha" é
   // 1. "ficou bom" -> registra homologação da versão atual.
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   await orchestrator.handle('c1', activeOf(neuro), 'ficou bom', 'e2', NOW);
-  assert.ok(orchestrator.currentTask('c1')!.homologatedAt);
+  assert.ok((await orchestrator.currentTask('c1'))!.homologatedAt);
 
   // 2. "pera, muda mais uma coisa" -> FAZ, novo estado, homologação anterior invalidada.
   const editCallsBefore = executor.calls.length;
   await orchestrator.handle('c1', activeOf(neuro), 'pera, muda mais uma coisa', 'e3', NOW);
-  const afterEdit = orchestrator.currentTask('c1')!;
+  const afterEdit = (await orchestrator.currentTask('c1'))!;
   assert.equal(afterEdit.status, 'awaitingHomologation');
   assert.equal(afterEdit.homologatedAt, undefined, 'a homologação anterior nunca pode sobreviver a uma nova edição');
   assert.equal(executor.calls.length, editCallsBefore + 1);
@@ -535,20 +536,20 @@ test('(bug reportado) fluxo completo: homologa -> edita (invalida) -> "fecha" é
   // 3. "fecha" -> DEVE RECUSAR o fechamento: o estado atual ainda não foi homologado.
   const closeCallsBefore = executor.calls.length;
   const refused = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e4', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'awaitingHomologation');
-  assert.equal(orchestrator.currentTask('c1')!.commitHash, undefined, 'nenhum commit pode ter sido criado');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'awaitingHomologation');
+  assert.equal((await orchestrator.currentTask('c1'))!.commitHash, undefined, 'nenhum commit pode ter sido criado');
   assert.equal(executor.calls.length, closeCallsBefore, 'a recusa nunca deve acionar o executor');
   assert.match(refused!.message, /ainda não foi homologado/i);
   assert.equal(commitCount(neuro.workspace!.root), 1, 'nenhum commit real deve existir ainda');
 
   // 4. "agora sim, ficou bom" -> registra nova homologação, agora do estado atual.
   const reHomologated = await orchestrator.handle('c1', activeOf(neuro), 'agora sim, ficou bom', 'e5', NOW);
-  assert.ok(orchestrator.currentTask('c1')!.homologatedAt);
+  assert.ok((await orchestrator.currentTask('c1'))!.homologatedAt);
   assert.match(reHomologated!.message, /registrei/i);
 
   // 5. "fecha" -> agora sim executa FECHA TUDO.
   const closed = await orchestrator.handle('c1', activeOf(neuro), 'fecha', 'e6', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'closed');
   assert.match(closed!.message, /Push: confirmado/);
   assert.equal(commitCount(neuro.workspace!.root), 2, 'exatamente um commit real, criado só na etapa 5');
 });
@@ -559,7 +560,7 @@ test('(10) "fecha o modal" nunca é interpretado como FECHA TUDO Git, mesmo com 
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   const callsBefore = executor.calls.length;
   await orchestrator.handle('c1', activeOf(neuro), 'fecha o modal que fica aberto', 'e2', NOW);
-  const task = orchestrator.currentTask('c1')!;
+  const task = (await orchestrator.currentTask('c1'))!;
   assert.notEqual(task.status, 'closed', '"fecha o modal" nunca deve disparar o fechamento Git');
   assert.equal(task.commitHash, undefined);
   assert.equal(executor.calls.length, callsBefore + 1, 'deve ter sido tratado como mais uma instrução de edição, não Git');
@@ -571,7 +572,7 @@ test('(11) trocar de projeto na mesma conversa nunca herda o contexto/tarefa do 
   const { entries, orchestrator } = fixture({ cognitiveModelProvider: fake });
   const [neuro, lsb] = entries;
   await orchestrator.handle('c1', activeOf(neuro!), 'vê o que está acontecendo nesse gráfico do BDEFS', 'e1', NOW);
-  assert.equal(orchestrator.currentTask('c1')!.projectId, 'neuro-hub-pro');
+  assert.equal((await orchestrator.currentTask('c1'))!.projectId, 'neuro-hub-pro');
 
   // Uma mensagem curta e elíptica no LSB nunca deve ver o resumo do Neuro.
   const reply = await orchestrator.handle('c1', activeOf(lsb!), 'e essa outra parte?', 'e2', NOW);
@@ -622,7 +623,7 @@ test('(15) uma frase determinística explícita nunca gasta uma chamada semânti
   await orchestrator.handle('c1', activeOf(neuro), 'Sebastian, corrija o botão de login', 'e1', NOW);
   await orchestrator.handle('c1', activeOf(neuro), 'ficou bom, pode fechar', 'e2', NOW);
   assert.equal(executor.calls.length, 1);
-  assert.equal(orchestrator.currentTask('c1')!.status, 'closed');
+  assert.equal((await orchestrator.currentTask('c1'))!.status, 'closed');
   assert.equal(fake.classifyCalls.length, 0, 'todo o fluxo acima é resolvido deterministicamente, sem custo de modelo');
 });
 
@@ -632,7 +633,7 @@ test('FECHA TUDO detecta migration entre os arquivos da tarefa e interrompe ante
   // Executor dedicado, que escreve diretamente dentro de migrations/ (o FakeExecutor padrão não simula isso).
   const migrationOrchestrator = new ProjectTaskOrchestrator(
     registry,
-    new FileMemoryStore(join(root, 'memory-migration.json')),
+    new AsyncFileMemoryStore(new FileMemoryStore(join(root, 'memory-migration.json'))),
     {
       async execute(request) {
         mkdirSync(join(request.workspaceRoot, 'migrations'), { recursive: true });
@@ -643,12 +644,12 @@ test('FECHA TUDO detecta migration entre os arquivos da tarefa e interrompe ante
     'test',
   );
   await migrationOrchestrator.handle('c1', activeOf(neuro), 'Sebastian, cria uma tabela nova', 'e1', NOW);
-  const afterFaz = migrationOrchestrator.currentTask('c1')!;
+  const afterFaz = (await migrationOrchestrator.currentTask('c1'))!;
   assert.equal(afterFaz.status, 'awaitingHomologation');
 
   const closeReply = await migrationOrchestrator.handle('c1', activeOf(neuro), 'fecha tudo', 'e2', NOW);
   assert.match(closeReply!.message, /migration/i);
-  const afterClose = migrationOrchestrator.currentTask('c1')!;
+  const afterClose = (await migrationOrchestrator.currentTask('c1'))!;
   assert.equal(afterClose.status, 'awaitingHomologation', 'migration detectada deve manter a tarefa aberta, sem avançar para closed');
   assert.equal(commitCount(neuro.workspace!.root), 1);
 });

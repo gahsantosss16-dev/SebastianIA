@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -41,7 +42,7 @@ const silentLogger: Logger = {
 
 function createTestConversationRegistry(memoryFilePath?: string): ConversationRegistry {
   const path = memoryFilePath ?? join(mkdtempSync(join(tmpdir(), 'sebastian-conversations-')), 'memory.json');
-  const store = new FileMemoryStore(path);
+  const store = new AsyncFileMemoryStore(new FileMemoryStore(path));
   return new ConversationRegistry(store, new FileCommandContextHydrator(store));
 }
 
@@ -1351,6 +1352,32 @@ test('CONVERSATIONS: an installation that only ever had the old linear history s
       await migrated.close();
     }
   } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('CONVERSATIONS: real file corruption propagates to HTTP without a successful create or history response', async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-http-async-failure-'));
+  const application = createOnlineSebastianApplication(silentLogger, undefined, dataDir, {});
+  const registry = createConversationRegistryForDataDir(dataDir);
+  const running = await startServer(application, silentLogger, undefined, undefined, undefined, registry);
+  try {
+    const cookie = await createWebSession(running.baseUrl);
+    const conversation = await createWebConversation(running.baseUrl, cookie);
+    writeFileSync(resolveMemoryFilePath(dataDir), '{corrupted history');
+    const created = await fetch(`${running.baseUrl}/api/web/conversations`, {
+      method: 'POST', headers: { Cookie: cookie, Origin: running.baseUrl },
+    });
+    assert.equal(created.status, 500);
+    const listed = await fetch(`${running.baseUrl}/api/web/conversations`, { headers: { Cookie: cookie } });
+    assert.equal(listed.status, 500);
+    const reopened = await getWebConversation(running.baseUrl, cookie, conversation.id);
+    assert.equal(reopened.status, 500);
+    const response = await webConverse(running.baseUrl, cookie, 'Lembre que a persistência precisa funcionar.', conversation.id);
+    assert.equal(response.status, 500);
+    assert.equal(readFileSync(resolveMemoryFilePath(dataDir), 'utf8'), '{corrupted history');
+  } finally {
+    await running.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
 });

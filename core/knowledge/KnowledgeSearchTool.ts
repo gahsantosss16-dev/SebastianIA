@@ -56,11 +56,11 @@ export class KnowledgeSearchTool implements SpecializedTool {
    * objective shares at least one real, scored term with some indexed chunk,
    * regardless of what that term is or which domain it belongs to.
    */
-  public hasRelevantMatch(objective: string): boolean {
-    return searchKnowledge(this.store, { query: objective }, { topK: 1 }).length > 0;
+  public async hasRelevantMatch(objective: string): Promise<boolean> {
+    return (await searchKnowledge(this.store, { query: objective }, { topK: 1 })).length > 0;
   }
 
-  public invoke(input: SpecializedToolInvocationInput): SpecializedToolInvocationResult {
+  public async invoke(input: SpecializedToolInvocationInput): Promise<SpecializedToolInvocationResult> {
     const query = input.payload.query;
     const domain = input.payload.domain;
     const allowedKeys = new Set(['query', 'domain']);
@@ -78,7 +78,7 @@ export class KnowledgeSearchTool implements SpecializedTool {
       };
     }
 
-    const hits = searchKnowledge(this.store, { query, ...(domain === undefined ? {} : { domain }) });
+    const hits = await searchKnowledge(this.store, { query, ...(domain === undefined ? {} : { domain }) });
     if (hits.length === 0) {
       return {
         status: 'completed',

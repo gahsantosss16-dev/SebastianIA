@@ -1,40 +1,40 @@
-import type { FileMemoryStore } from '../memory/FileMemoryStore.js';
+import type { AsyncMemoryStore } from '../memory/AsyncMemoryStore.js';
 import type { KnowledgeChunkRecord, KnowledgeSourceRecord } from './KnowledgeTypes.js';
 
 const SOURCES_NAMESPACE = 'knowledge.sources';
 const CHUNKS_NAMESPACE = 'knowledge.chunks';
 
 /**
- * Thin wrapper over the existing `FileMemoryStore` (see
+ * Typed knowledge namespaces over `AsyncMemoryStore` (see
  * docs/knowledge-layer-v1.md, section 0 and 4) - no new storage engine, no
  * database, no external service. Sources and chunks are two namespaces of
  * the same generic, dependency-free, atomically-written JSON store already
  * used for conversation memory.
  */
 export class KnowledgeStore {
-  public constructor(private readonly fileStore: FileMemoryStore) {}
+  public constructor(private readonly store: AsyncMemoryStore) {}
 
-  public listSources(): readonly KnowledgeSourceRecord[] {
-    return this.fileStore.listRecords(SOURCES_NAMESPACE) as unknown as readonly KnowledgeSourceRecord[];
+  public async listSources(): Promise<readonly KnowledgeSourceRecord[]> {
+    return (await this.store.listRecords(SOURCES_NAMESPACE)) as unknown as readonly KnowledgeSourceRecord[];
   }
 
-  public getSource(sourceId: string): KnowledgeSourceRecord | undefined {
-    return this.listSources().find((source) => source.sourceId === sourceId);
+  public async getSource(sourceId: string): Promise<KnowledgeSourceRecord | undefined> {
+    return (await this.listSources()).find((source) => source.sourceId === sourceId);
   }
 
-  public upsertSource(source: KnowledgeSourceRecord): void {
-    this.fileStore.writeRecord(SOURCES_NAMESPACE, source.sourceId, source as unknown as Record<string, unknown>);
+  public async upsertSource(source: KnowledgeSourceRecord): Promise<void> {
+    await this.store.writeRecord(SOURCES_NAMESPACE, source.sourceId, source as unknown as Record<string, unknown>);
   }
 
-  public listChunks(): readonly KnowledgeChunkRecord[] {
-    return this.fileStore.listRecords(CHUNKS_NAMESPACE) as unknown as readonly KnowledgeChunkRecord[];
+  public async listChunks(): Promise<readonly KnowledgeChunkRecord[]> {
+    return (await this.store.listRecords(CHUNKS_NAMESPACE)) as unknown as readonly KnowledgeChunkRecord[];
   }
 
-  public findChunkByHash(chunkHash: string): KnowledgeChunkRecord | undefined {
-    return this.listChunks().find((chunk) => chunk.chunkHash === chunkHash);
+  public async findChunkByHash(chunkHash: string): Promise<KnowledgeChunkRecord | undefined> {
+    return (await this.listChunks()).find((chunk) => chunk.chunkHash === chunkHash);
   }
 
-  public upsertChunk(chunk: KnowledgeChunkRecord): void {
-    this.fileStore.writeRecord(CHUNKS_NAMESPACE, chunk.chunkId, chunk as unknown as Record<string, unknown>);
+  public async upsertChunk(chunk: KnowledgeChunkRecord): Promise<void> {
+    await this.store.writeRecord(CHUNKS_NAMESPACE, chunk.chunkId, chunk as unknown as Record<string, unknown>);
   }
 }

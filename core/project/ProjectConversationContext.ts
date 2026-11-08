@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { FileMemoryStore } from '../memory/FileMemoryStore.js';
+import type { AsyncMemoryStore } from '../memory/AsyncMemoryStore.js';
 import type { ProjectRegistry } from './ProjectRegistry.js';
 import { loadProjectPolicies } from './ProjectWorkspacePolicy.js';
 
@@ -26,10 +26,10 @@ export interface ProjectReply {
 
 /** Conversation binding and policy provenance, using the existing registry and memory store. No executor. */
 export class ProjectConversationContext {
-  public constructor(public readonly registry: ProjectRegistry, private readonly store: FileMemoryStore, private readonly environmentId: string) {}
+  public constructor(public readonly registry: ProjectRegistry, private readonly store: AsyncMemoryStore, private readonly environmentId: string) {}
 
-  public active(conversationId: string): ActiveProject | null {
-    const record = this.store.listRecords(SELECTIONS).find(item => item.conversationId === conversationId);
+  public async active(conversationId: string): Promise<ActiveProject | null> {
+    const record = (await this.store.listRecords(SELECTIONS)).find(item => item.conversationId === conversationId);
     const project = typeof record?.projectId === 'string' ? this.registry.getById(record.projectId) : undefined;
     return project ? { id: project.id, displayName: project.displayName, environment: project.workspace?.environment.label ?? 'não configurado', policyStatus: record?.policyStatus === 'loaded' ? 'loaded' : 'unavailable' } : null;
   }
@@ -53,7 +53,7 @@ export class ProjectConversationContext {
     return before ?? segment;
   }
 
-  public handle(conversationId: string, text: string, executionId: string, at: string): ProjectReply | undefined {
+  public async handle(conversationId: string, text: string, executionId: string, at: string): Promise<ProjectReply | undefined> {
     const query = normalize(text).replace(/^sebastian\s*[, :]\s*/, '');
     // Both `select` and the loose preposition match below are read only from
     // the message's first clause (up to its first sentence break or line
@@ -96,51 +96,52 @@ export class ProjectConversationContext {
     const newSelectionThisTurn = reference !== undefined || direct !== undefined;
     const hasRemainderThisTurn =
       newSelectionThisTurn && (boundedFirstClause !== firstClause || query.length > firstClause.length);
-    let active = this.active(conversationId);
+    let active = await this.active(conversationId);
     if (reference !== undefined || direct) {
       const target = direct ?? this.registry.resolve(reference!);
       if (!target) return { project: active, message: 'Projeto desconhecido ou ambíguo. Indique um único nome cadastrado: ' + this.registry.listDescriptors().map(item => item.displayName).join(', ') + '. A seleção anterior não foi alterada.' };
       // Persist identity before policy loading: failure must never leave the previous project's rules active.
-      this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: target.id, policyStatus: 'unavailable', selectedAt: at });
-      active = this.active(conversationId);
+      await this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: target.id, policyStatus: 'unavailable', selectedAt: at });
+      active = (await this.active(conversationId));
     }
     if (!active) return isIdentity || /regras.*projeto/.test(query) ? { project: null, message: 'Nenhum projeto está ativo nesta conversa. Diga “Use o Neuro”, “Use o LSB” ou “Use o Sebastian”.' } : undefined;
     const project = this.registry.getById(active.id)!;
+    let policies: ReturnType<typeof loadProjectPolicies>;
     try {
-      const policies = loadProjectPolicies(project, this.environmentId, text);
-      this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: project.id, policyStatus: 'loaded', selectedAt: at });
-      this.store.writeRecord(AUDIT, randomUUID(), { conversationId, executionId, projectId: project.id, environmentId: this.environmentId, at, sources: policies.map(({ path, hash }) => ({ path, hash })) });
-      const loaded = this.active(conversationId);
-      if (/regras|politica|diretrizes/.test(query)) {
-        const sections = policies.map(policy => {
-          const sections = policy.content.split(/(?=^#{1,4}\s)/m).filter(section => /banco|migration|homologa|bolt|psique|novidades|commit|push|seguran|custos/i.test(section.split('\n')[0] ?? '')).slice(0, 7);
-          const excerpts = sections.map(section => {
-            const [heading, ...body] = section.split(/\r?\n/);
-            const paragraphs = body.join('\n').split(/\n\s*\n/).map(paragraph => paragraph.trim()).filter(paragraph => paragraph && paragraph !== '---');
-            const normative = paragraphs.find(paragraph => /nunca|obrigat|autoriza|deve|antes|somente|percept|migration|homologa/i.test(paragraph)) ?? paragraphs[0] ?? '';
-            return `• ${heading?.replace(/^#+\s*/, '')}: ${normative.length > 360 ? normative.slice(0, 360) + '…' : normative}`;
-          });
-          return `${policy.path}\n${excerpts.join('\n') || policy.content.slice(0, 450)}`;
-        });
-        return { project: loaded, message: `Projeto: ${project.displayName}. Fontes canônicas carregadas integralmente; abaixo, trechos resumidos para consulta:\n${sections.join('\n')}\nAs versões das regras foram registradas. O resumo não substitui as fontes completas nem autoriza ações fora do seu pedido. Nesta etapa, apenas identificação e leitura de regras.` };
-      }
-      const explicitSelection = select || direct || isIdentity;
-      // A bare selection with nothing left over ("vamos trabalhar no Neuro
-      // Hub Pro" alone) must still end here, exactly as before - only a
-      // selection that left something behind (`hasRemainderThisTurn`)
-      // continues. In the steady-state case (no new selection this turn at
-      // all - `newSelectionThisTurn` false), any message that isn't itself an
-      // explicit identity/rules query is the same "nothing to add" situation
-      // Etapa 1 already left unaddressed, so it always continues.
-      const taskConnectionPending = newSelectionThisTurn ? hasRemainderThisTurn : !explicitSelection;
-      return {
-        project: loaded,
-        message: `Projeto: ${project.displayName}. Ambiente: ${active.environment}. Checkout: ${project.workspace!.root}. Regras-base carregadas: ${policies.map(policy => policy.path).join(', ')}.\n${explicitSelection ? 'Seleção associada somente a esta conversa.' : 'Identifiquei o projeto e suas regras.'}`,
-        ...(taskConnectionPending ? { taskConnectionPending: true } : {}),
-      };
+      policies = loadProjectPolicies(project, this.environmentId, text);
     } catch (error) {
-      this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: project.id, policyStatus: 'unavailable', selectedAt: at });
-      return { project: this.active(conversationId), message: `Projeto: ${project.displayName}. ${error instanceof Error ? error.message : 'Regras indisponíveis.'} Nenhuma regra do projeto anterior foi reaproveitada e nenhuma ação foi executada.` };
+      await this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: project.id, policyStatus: 'unavailable', selectedAt: at });
+      return { project: await this.active(conversationId), message: `Projeto: ${project.displayName}. ${error instanceof Error ? error.message : 'Regras indisponíveis.'} Nenhuma regra do projeto anterior foi reaproveitada e nenhuma ação foi executada.` };
     }
+    await this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: project.id, policyStatus: 'loaded', selectedAt: at });
+    await this.store.writeRecord(AUDIT, randomUUID(), { conversationId, executionId, projectId: project.id, environmentId: this.environmentId, at, sources: policies.map(({ path, hash }) => ({ path, hash })) });
+    const loaded = await this.active(conversationId);
+    if (/regras|politica|diretrizes/.test(query)) {
+      const sections = policies.map(policy => {
+        const sections = policy.content.split(/(?=^#{1,4}\s)/m).filter(section => /banco|migration|homologa|bolt|psique|novidades|commit|push|seguran|custos/i.test(section.split('\n')[0] ?? '')).slice(0, 7);
+        const excerpts = sections.map(section => {
+          const [heading, ...body] = section.split(/\r?\n/);
+          const paragraphs = body.join('\n').split(/\n\s*\n/).map(paragraph => paragraph.trim()).filter(paragraph => paragraph && paragraph !== '---');
+          const normative = paragraphs.find(paragraph => /nunca|obrigat|autoriza|deve|antes|somente|percept|migration|homologa/i.test(paragraph)) ?? paragraphs[0] ?? '';
+          return `• ${heading?.replace(/^#+\s*/, '')}: ${normative.length > 360 ? normative.slice(0, 360) + '…' : normative}`;
+        });
+        return `${policy.path}\n${excerpts.join('\n') || policy.content.slice(0, 450)}`;
+      });
+      return { project: loaded, message: `Projeto: ${project.displayName}. Fontes canônicas carregadas integralmente; abaixo, trechos resumidos para consulta:\n${sections.join('\n')}\nAs versões das regras foram registradas. O resumo não substitui as fontes completas nem autoriza ações fora do seu pedido. Nesta etapa, apenas identificação e leitura de regras.` };
+    }
+    const explicitSelection = select || direct || isIdentity;
+    // A bare selection with nothing left over ("vamos trabalhar no Neuro
+    // Hub Pro" alone) must still end here, exactly as before - only a
+    // selection that left something behind (`hasRemainderThisTurn`)
+    // continues. In the steady-state case (no new selection this turn at
+    // all - `newSelectionThisTurn` false), any message that isn't itself an
+    // explicit identity/rules query is the same "nothing to add" situation
+    // Etapa 1 already left unaddressed, so it always continues.
+    const taskConnectionPending = newSelectionThisTurn ? hasRemainderThisTurn : !explicitSelection;
+    return {
+      project: loaded,
+      message: `Projeto: ${project.displayName}. Ambiente: ${active.environment}. Checkout: ${project.workspace!.root}. Regras-base carregadas: ${policies.map(policy => policy.path).join(', ')}.\n${explicitSelection ? 'Seleção associada somente a esta conversa.' : 'Identifiquei o projeto e suas regras.'}`,
+      ...(taskConnectionPending ? { taskConnectionPending: true } : {}),
+    };
   }
 }

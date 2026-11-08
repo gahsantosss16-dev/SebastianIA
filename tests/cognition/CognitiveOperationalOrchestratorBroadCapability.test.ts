@@ -54,12 +54,12 @@ const KNOWLEDGE_ENTRY_WITH_PROBE = (probe: (objective: string) => boolean): Oper
   broadApplicabilityProbe: probe,
 });
 
-test('hasApplicableToolCandidate recognizes a broadApplicabilityProbe match even with zero literal term overlap between the objective and the entry description', () => {
+test('hasApplicableToolCandidate recognizes a broadApplicabilityProbe match even with zero literal term overlap between the objective and the entry description', async () => {
   const catalog: readonly OperationalToolPolicyEntry[] = [KNOWLEDGE_ENTRY_WITH_PROBE((objective) => objective.includes('OWASP'))];
   const orchestrator = new CognitiveOperationalOrchestrator(fakeTool({}), { decide: async () => ({ outcome: 'unavailable', reason: 'n/a' }) }, catalog);
 
-  assert.equal(orchestrator.hasApplicableToolCandidate('quais os principais riscos segundo o OWASP?'), true);
-  assert.equal(orchestrator.hasApplicableToolCandidate('oi, tudo bem?'), false, 'unrelated small talk must not match the probe');
+  assert.equal((await orchestrator.hasApplicableToolCandidate('quais os principais riscos segundo o OWASP?')), true);
+  assert.equal((await orchestrator.hasApplicableToolCandidate('oi, tudo bem?')), false, 'unrelated small talk must not match the probe');
 });
 
 test('a concludeCompleted decision with zero observations is not accepted when exactly one applicable capability was never tried and budget remains', async () => {

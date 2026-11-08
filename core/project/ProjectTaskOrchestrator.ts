@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { FileMemoryStore } from '../memory/FileMemoryStore.js';
+import type { AsyncMemoryStore } from '../memory/AsyncMemoryStore.js';
 import type { ProjectRegistry } from './ProjectRegistry.js';
 import type { ProjectDescriptor } from './ProjectTypes.js';
 import type { ActiveProject, ProjectReply } from './ProjectConversationContext.js';
@@ -113,7 +113,7 @@ const CLOSE_ELIGIBLE_STATUSES: readonly ProjectTaskStatus[] = ['awaitingHomologa
 export class ProjectTaskOrchestrator {
   public constructor(
     private readonly registry: ProjectRegistry,
-    private readonly store: FileMemoryStore,
+    private readonly store: AsyncMemoryStore,
     private readonly executor: ProjectTaskExecutor,
     private readonly environmentId: string,
     private readonly gitCloseOrchestrator: GitCloseOrchestrator = new GitCloseOrchestrator(),
@@ -127,8 +127,8 @@ export class ProjectTaskOrchestrator {
     private readonly cognitiveModelProvider?: CognitiveModelProvider,
   ) {}
 
-  public currentTask(conversationId: string): ProjectTaskRecord | undefined {
-    return this.store.listRecords(TASKS).find((record) => record.conversationId === conversationId) as
+  public async currentTask(conversationId: string): Promise<ProjectTaskRecord | undefined> {
+    return (await this.store.listRecords(TASKS)).find((record) => record.conversationId === conversationId) as
       | ProjectTaskRecord
       | undefined;
   }
@@ -145,7 +145,7 @@ export class ProjectTaskOrchestrator {
     const project = this.registry.getById(activeProject.id);
     if (!project) return undefined;
 
-    const existing = this.currentTask(conversationId);
+    const existing = await this.currentTask(conversationId);
     const sameProjectExisting = existing?.projectId === project.id ? existing : undefined;
 
     // Etapa 4: natural positive feedback is recognized independently of (and
@@ -156,7 +156,7 @@ export class ProjectTaskOrchestrator {
     let homologatedJustNow = false;
     if (detectHomologationFeedback(text) && sameProjectExisting?.status === 'awaitingHomologation') {
       existingAfterHomologation = { ...sameProjectExisting, homologatedAt: requestedAt, updatedAt: requestedAt };
-      this.persist(existingAfterHomologation);
+      await this.persist(existingAfterHomologation);
       homologatedJustNow = true;
     }
 
@@ -186,7 +186,7 @@ export class ProjectTaskOrchestrator {
     // exists right now, exactly like Etapa 3 already tested.
     const deterministicIntent = classifyProjectTaskIntent(text, { hasCloseEligibleTask });
     if (deterministicIntent === 'closeAll') {
-      return this.handleClose(project, activeProject, existingAfterHomologation, executionId, requestedAt);
+      return await this.handleClose(project, activeProject, existingAfterHomologation, executionId, requestedAt);
     }
 
     // The message structurally looks like a bare close confirmation but was
@@ -245,11 +245,11 @@ export class ProjectTaskOrchestrator {
         });
 
         if (resolved === 'closeAll') {
-          return this.handleClose(project, activeProject, existingAfterHomologation, executionId, requestedAt);
+          return await this.handleClose(project, activeProject, existingAfterHomologation, executionId, requestedAt);
         }
         if (resolved === 'homologate') {
           if (sameProjectExisting!.status === 'awaitingHomologation') {
-            this.persist({ ...sameProjectExisting!, homologatedAt: requestedAt, updatedAt: requestedAt });
+            await this.persist({ ...sameProjectExisting!, homologatedAt: requestedAt, updatedAt: requestedAt });
             return { project: activeProject, message: HOMOLOGATION_ACKNOWLEDGED_MESSAGE };
           }
           return undefined;
@@ -286,7 +286,7 @@ export class ProjectTaskOrchestrator {
       root = resolveValidatedWorkspaceRoot(project, this.environmentId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Checkout do projeto indisponível.';
-      this.persist({
+      await this.persist({
         conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
         status: 'failed', filesChanged: [], validations: [], summary: message, createdAt, updatedAt: requestedAt,
       });
@@ -304,14 +304,14 @@ export class ProjectTaskOrchestrator {
       const message = 'Execução bloqueada: não foi possível identificar com segurança alterações preexistentes em: ' +
         unreadablePreexistingFiles.join(', ') +
         '. Corrija ou salve essas alterações antes de tentar novamente. Nenhum arquivo foi enviado ao executor.';
-      this.persist({
+      await this.persist({
         conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
         status: 'failed', filesChanged: [], validations: [], summary: message, createdAt, updatedAt: requestedAt,
       });
       return { project: activeProject, message };
     }
 
-    this.persist({
+    await this.persist({
       conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
       status: authorization === 'writeAuthorized' ? 'writing' : 'analyzing',
       filesChanged: [], validations: [], summary: '', createdAt, updatedAt: requestedAt,
@@ -336,7 +336,7 @@ export class ProjectTaskOrchestrator {
           : statusAfterFailure.ranAsGitRepo
             ? '\nNenhuma alteração nova detectada após a falha.'
             : '\nNão foi possível verificar se a execução deixou alterações parciais.');
-      this.persist({
+      await this.persist({
         conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
         status: 'failed', filesChanged: changedAfterFailure, validations: [], summary: message, createdAt, updatedAt: requestedAt,
       });
@@ -358,7 +358,7 @@ export class ProjectTaskOrchestrator {
 
     const finalStatus: ProjectTaskStatus =
       authorization === 'writeAuthorized' && filesChanged.length > 0 ? 'awaitingHomologation' : 'completed';
-    this.persist({
+    await this.persist({
       conversationId, taskId, projectId: project.id, requestText: instructions, authorization,
       status: finalStatus, filesChanged, validations, summary: result.summary, createdAt, updatedAt: requestedAt,
     });
@@ -430,13 +430,13 @@ export class ProjectTaskOrchestrator {
    * `awaitingHomologation` or `committedPendingPush` - this is the FAZ →
    * awaitingHomologation → FECHA TUDO separation the task requires.
    */
-  private handleClose(
+  private async handleClose(
     project: ProjectDescriptor,
     activeProject: ActiveProject,
     existing: ProjectTaskRecord | undefined,
     executionId: string,
     requestedAt: string,
-  ): ProjectReply {
+  ): Promise<ProjectReply> {
     const eligible = existing !== undefined && existing.projectId === project.id && CLOSE_ELIGIBLE_STATUSES.includes(existing.status);
     if (!eligible) {
       return {
@@ -467,7 +467,7 @@ export class ProjectTaskOrchestrator {
     const nextStatus: ProjectTaskStatus =
       result.outcome === 'closed' ? 'closed' : result.outcome === 'committedPendingPush' ? 'committedPendingPush' : task.status;
 
-    this.persist({
+    await this.persist({
       ...task,
       status: nextStatus,
       updatedAt: requestedAt,
@@ -577,7 +577,7 @@ export class ProjectTaskOrchestrator {
     return lines.join('\n');
   }
 
-  private persist(record: ProjectTaskRecord): void {
-    this.store.writeRecord(TASKS, record.conversationId, record as unknown as Readonly<Record<string, unknown>>);
+  private async persist(record: ProjectTaskRecord): Promise<void> {
+    await this.store.writeRecord(TASKS, record.conversationId, record as unknown as Readonly<Record<string, unknown>>);
   }
 }

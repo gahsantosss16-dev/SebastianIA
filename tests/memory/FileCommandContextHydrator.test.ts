@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../../core/memory/AsyncMemoryStore.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -8,20 +9,20 @@ import { FileCommandResultMemoryWriter } from '../../core/memory/FileCommandResu
 import { FileMemoryStore } from '../../core/memory/FileMemoryStore.js';
 import { InvalidCommandContextHydrationRequestError } from '../../core/memory/CommandContextHydrationContractErrors.js';
 
-function withTempStore(run: (store: FileMemoryStore) => void): void {
+async function withTempStore(run: (store: AsyncFileMemoryStore) => void | Promise<void>): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'sebastian-file-hydrator-'));
   try {
-    run(new FileMemoryStore(join(dir, 'memory.json')));
+    await run(new AsyncFileMemoryStore(new FileMemoryStore(join(dir, 'memory.json'))));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test('hydrator returns absent when no fact was ever remembered', () => {
-  withTempStore((store) => {
+test('hydrator returns absent when no fact was ever remembered', async () => {
+  await withTempStore(async (store) => {
     const hydrator = new FileCommandContextHydrator(store);
 
-    const outcome = hydrator.hydrate({
+    const outcome = await hydrator.hydrate({
       commandType: 'recall',
       generatedAt: '2026-08-11T00:00:00.000Z',
     });
@@ -30,10 +31,10 @@ test('hydrator returns absent when no fact was ever remembered', () => {
   });
 });
 
-test('hydrator reconstructs remembered facts from persisted write-back records', () => {
-  withTempStore((store) => {
+test('hydrator reconstructs remembered facts from persisted write-back records', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-11T00:00:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -44,7 +45,7 @@ test('hydrator reconstructs remembered facts from persisted write-back records',
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'recall', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'recall', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -62,10 +63,10 @@ test('hydrator reconstructs remembered facts from persisted write-back records',
   });
 });
 
-test('hydrator ignores records from other command types and failed results', () => {
-  withTempStore((store) => {
+test('hydrator ignores records from other command types and failed results', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'greeting:2026-08-11T00:00:00.000Z',
       commandType: 'greeting',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -74,7 +75,7 @@ test('hydrator ignores records from other command types and failed results', () 
       output: { message: 'Hello!' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-11T00:00:01.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-11T00:00:01.000Z',
@@ -85,16 +86,16 @@ test('hydrator ignores records from other command types and failed results', () 
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'recall', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'recall', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.deepEqual(outcome, { status: 'absent' });
   });
 });
 
-test('hydrator sorts remembered facts chronologically', () => {
-  withTempStore((store) => {
+test('hydrator sorts remembered facts chronologically', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-11T00:02:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-11T00:02:00.000Z',
@@ -103,7 +104,7 @@ test('hydrator sorts remembered facts chronologically', () => {
       output: { fact: 'segundo fato' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-11T00:01:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-11T00:01:00.000Z',
@@ -114,7 +115,7 @@ test('hydrator sorts remembered facts chronologically', () => {
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'recall', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'recall', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -129,12 +130,12 @@ test('hydrator sorts remembered facts chronologically', () => {
   });
 });
 
-test('hydrator rejects invalid request with typed error', () => {
-  withTempStore((store) => {
+test('hydrator rejects invalid request with typed error', async () => {
+  await withTempStore(async (store) => {
     const hydrator = new FileCommandContextHydrator(store);
 
-    assert.throws(
-      () => hydrator.hydrate(null as never),
+    await assert.rejects(
+      async () => (await hydrator.hydrate(null as never)),
       (error: unknown) => {
         assert.ok(error instanceof InvalidCommandContextHydrationRequestError);
         return true;
@@ -143,10 +144,10 @@ test('hydrator rejects invalid request with typed error', () => {
   });
 });
 
-test('hydrator recognizes a marked memory fact produced by a non-remember command type', () => {
-  withTempStore((store) => {
+test('hydrator recognizes a marked memory fact produced by a non-remember command type', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:00:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -157,7 +158,7 @@ test('hydrator recognizes a marked memory fact produced by a non-remember comman
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -175,10 +176,10 @@ test('hydrator recognizes a marked memory fact produced by a non-remember comman
   });
 });
 
-test('hydrator merges legacy remember records and marked converse records chronologically', () => {
-  withTempStore((store) => {
+test('hydrator merges legacy remember records and marked converse records chronologically', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-11T00:01:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-11T00:01:00.000Z',
@@ -187,7 +188,7 @@ test('hydrator merges legacy remember records and marked converse records chrono
       output: { fact: 'fato via comando rígido' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:02:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:02:00.000Z',
@@ -198,7 +199,7 @@ test('hydrator merges legacy remember records and marked converse records chrono
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -213,10 +214,10 @@ test('hydrator merges legacy remember records and marked converse records chrono
   });
 });
 
-test('hydrator reconstructs a pending task from a task-creation record', () => {
-  withTempStore((store) => {
+test('hydrator reconstructs a pending task from a task-creation record', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:00:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -227,7 +228,7 @@ test('hydrator reconstructs a pending task from a task-creation record', () => {
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -241,10 +242,10 @@ test('hydrator reconstructs a pending task from a task-creation record', () => {
   });
 });
 
-test('a completed task no longer appears among pending tasks, without rewriting the creation record', () => {
-  withTempStore((store) => {
+test('a completed task no longer appears among pending tasks, without rewriting the creation record', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:00:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -253,7 +254,7 @@ test('a completed task no longer appears among pending tasks, without rewriting 
       output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'comprar leite' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:01:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:01:00.000Z',
@@ -264,14 +265,14 @@ test('a completed task no longer appears among pending tasks, without rewriting 
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     // With no facts and no pending tasks left, hydration correctly reports
     // absent - the important proof here is at the storage level: the
     // creation record itself must survive completion untouched, append-only.
     assert.deepEqual(outcome, { status: 'absent' });
 
-    const rawStore = store.listRecords('command-results');
+    const rawStore = await store.listRecords('command-results');
     assert.equal(rawStore.length, 2, 'both the creation and completion records must be preserved, never merged or removed');
 
     const creationRecord = rawStore.find((record) => record.executionId === 'converse:2026-08-11T00:00:00.000Z');
@@ -288,10 +289,10 @@ test('a completed task no longer appears among pending tasks, without rewriting 
   });
 });
 
-test('a pending task remains visible when a different task is completed', () => {
-  withTempStore((store) => {
+test('a pending task remains visible when a different task is completed', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:00:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -300,7 +301,7 @@ test('a pending task remains visible when a different task is completed', () => 
       output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'comprar leite' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:01:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:01:00.000Z',
@@ -309,7 +310,7 @@ test('a pending task remains visible when a different task is completed', () => 
       output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'pagar conta' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:02:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:02:00.000Z',
@@ -320,7 +321,7 @@ test('a pending task remains visible when a different task is completed', () => 
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -334,10 +335,10 @@ test('a pending task remains visible when a different task is completed', () => 
   });
 });
 
-test('hydrator sorts pending tasks chronologically and keeps facts alongside tasks', () => {
-  withTempStore((store) => {
+test('hydrator sorts pending tasks chronologically and keeps facts alongside tasks', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-11T00:00:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -346,7 +347,7 @@ test('hydrator sorts pending tasks chronologically and keeps facts alongside tas
       output: { fact: 'prefiro reuniões de manhã' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:02:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:02:00.000Z',
@@ -355,7 +356,7 @@ test('hydrator sorts pending tasks chronologically and keeps facts alongside tas
       output: { memoryRecordKind: 'sebastian.memory.task.created', content: 'segunda tarefa' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:01:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:01:00.000Z',
@@ -366,7 +367,7 @@ test('hydrator sorts pending tasks chronologically and keeps facts alongside tas
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -386,10 +387,10 @@ test('hydrator sorts pending tasks chronologically and keeps facts alongside tas
   });
 });
 
-test('hydrator does not treat an unrelated "fact"-shaped output as memory without the explicit discriminator', () => {
-  withTempStore((store) => {
+test('hydrator does not treat an unrelated "fact"-shaped output as memory without the explicit discriminator', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:00:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:00:00.000Z',
@@ -398,7 +399,7 @@ test('hydrator does not treat an unrelated "fact"-shaped output as memory withou
       output: { fact: 'parece um fato mas não tem o discriminador' },
       metadata: {},
     });
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-11T00:00:01.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-11T00:00:01.000Z',
@@ -409,21 +410,21 @@ test('hydrator does not treat an unrelated "fact"-shaped output as memory withou
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-11T00:05:00.000Z' });
 
     assert.deepEqual(outcome, { status: 'absent' });
   });
 });
 
-function writeExchangeRecord(
+async function writeExchangeRecord(
   writer: FileCommandResultMemoryWriter,
   executionId: string,
   recordedAt: string,
   conversationTurn: Readonly<Record<string, unknown>>,
   extraOutput: Readonly<Record<string, unknown>> = {},
   metadata: Readonly<Record<string, unknown>> = {},
-): void {
-  writer.write({
+): Promise<void> {
+  await writer.write({
     executionId,
     commandType: 'converse',
     commandGeneratedAt: recordedAt,
@@ -434,10 +435,10 @@ function writeExchangeRecord(
   });
 }
 
-test('hydrator reconstructs a recent exchange from a record carrying memoryExtras.conversationTurn (SPEC-045)', () => {
-  withTempStore((store) => {
+test('hydrator reconstructs a recent exchange from a record carrying memoryExtras.conversationTurn (SPEC-045)', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writeExchangeRecord(
+    await writeExchangeRecord(
       writer,
       'converse:2026-08-12T00:00:00.000Z',
       '2026-08-12T00:00:00.000Z',
@@ -446,7 +447,7 @@ test('hydrator reconstructs a recent exchange from a record carrying memoryExtra
     );
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -465,10 +466,10 @@ test('hydrator reconstructs a recent exchange from a record carrying memoryExtra
   });
 });
 
-test('hydrator does not treat the user-visible output alone as a recent exchange without a conversationTurn field', () => {
-  withTempStore((store) => {
+test('hydrator does not treat the user-visible output alone as a recent exchange without a conversationTurn field', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'converse:2026-08-12T00:00:00.000Z',
       commandType: 'converse',
       commandGeneratedAt: '2026-08-12T00:00:00.000Z',
@@ -479,36 +480,36 @@ test('hydrator does not treat the user-visible output alone as a recent exchange
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
 
     assert.deepEqual(outcome, { status: 'absent' });
   });
 });
 
-test('hydrator skips a malformed conversationTurn (missing required string fields) instead of crashing', () => {
-  withTempStore((store) => {
+test('hydrator skips a malformed conversationTurn (missing required string fields) instead of crashing', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writeExchangeRecord(writer, 'converse:2026-08-12T00:00:00.000Z', '2026-08-12T00:00:00.000Z', {
+    await writeExchangeRecord(writer, 'converse:2026-08-12T00:00:00.000Z', '2026-08-12T00:00:00.000Z', {
       requestText: 'oi',
       // summary intentionally missing
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
 
     assert.deepEqual(outcome, { status: 'absent' });
   });
 });
 
-test('hydrator sorts recent exchanges chronologically regardless of write order', () => {
-  withTempStore((store) => {
+test('hydrator sorts recent exchanges chronologically regardless of write order', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writeExchangeRecord(writer, 'converse:2', '2026-08-12T00:02:00.000Z', { requestText: 'b', summary: 'resposta b', kind: 'respond' });
-    writeExchangeRecord(writer, 'converse:1', '2026-08-12T00:01:00.000Z', { requestText: 'a', summary: 'resposta a', kind: 'respond' });
-    writeExchangeRecord(writer, 'converse:3', '2026-08-12T00:03:00.000Z', { requestText: 'c', summary: 'resposta c', kind: 'respond' });
+    await writeExchangeRecord(writer, 'converse:2', '2026-08-12T00:02:00.000Z', { requestText: 'b', summary: 'resposta b', kind: 'respond' });
+    await writeExchangeRecord(writer, 'converse:1', '2026-08-12T00:01:00.000Z', { requestText: 'a', summary: 'resposta a', kind: 'respond' });
+    await writeExchangeRecord(writer, 'converse:3', '2026-08-12T00:03:00.000Z', { requestText: 'c', summary: 'resposta c', kind: 'respond' });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -522,12 +523,12 @@ test('hydrator sorts recent exchanges chronologically regardless of write order'
   });
 });
 
-test('hydrator caps recent exchanges at the fixed window, keeping only the most recent ones', () => {
-  withTempStore((store) => {
+test('hydrator caps recent exchanges at the fixed window, keeping only the most recent ones', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
     for (let index = 0; index < 12; index += 1) {
       const minute = String(index).padStart(2, '0');
-      writeExchangeRecord(writer, `converse:${index}`, `2026-08-12T00:${minute}:00.000Z`, {
+      await writeExchangeRecord(writer, `converse:${index}`, `2026-08-12T00:${minute}:00.000Z`, {
         requestText: `mensagem ${index}`,
         summary: `resposta ${index}`,
         kind: 'respond',
@@ -535,7 +536,7 @@ test('hydrator caps recent exchanges at the fixed window, keeping only the most 
     }
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T01:00:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T01:00:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -550,10 +551,10 @@ test('hydrator caps recent exchanges at the fixed window, keeping only the most 
   });
 });
 
-test('hydrator reconstructs facts, tasks and recent exchanges together without interfering with each other', () => {
-  withTempStore((store) => {
+test('hydrator reconstructs facts, tasks and recent exchanges together without interfering with each other', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-12T00:00:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-12T00:00:00.000Z',
@@ -562,14 +563,14 @@ test('hydrator reconstructs facts, tasks and recent exchanges together without i
       output: { fact: 'prefiro reuniões de manhã' },
       metadata: {},
     });
-    writeExchangeRecord(writer, 'converse:2026-08-12T00:01:00.000Z', '2026-08-12T00:01:00.000Z', {
+    await writeExchangeRecord(writer, 'converse:2026-08-12T00:01:00.000Z', '2026-08-12T00:01:00.000Z', {
       requestText: 'oi',
       summary: 'olá!',
       kind: 'respond',
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
+    const outcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-12T00:05:00.000Z' });
 
     assert.equal(outcome.status, 'hydrated');
     if (outcome.status !== 'hydrated') {
@@ -584,21 +585,21 @@ test('hydrator reconstructs facts, tasks and recent exchanges together without i
   });
 });
 
-test('hydrate scopes recent exchanges to the requested conversationId, never leaking another conversation\'s turns', () => {
-  withTempStore((store) => {
+test('hydrate scopes recent exchanges to the requested conversationId, never leaking another conversation\'s turns', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writeExchangeRecord(
+    await writeExchangeRecord(
       writer, 'converse:a1', '2026-08-13T00:00:00.000Z',
       { requestText: 'pergunta em A', summary: 'resposta em A', kind: 'respond' }, {}, { conversationId: 'conversation-a' },
     );
-    writeExchangeRecord(
+    await writeExchangeRecord(
       writer, 'converse:b1', '2026-08-13T00:01:00.000Z',
       { requestText: 'pergunta em B', summary: 'resposta em B', kind: 'respond' }, {}, { conversationId: 'conversation-b' },
     );
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcomeA = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-a' });
-    const outcomeB = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-b' });
+    const outcomeA = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-a' });
+    const outcomeB = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-b' });
 
     if (outcomeA.status !== 'hydrated' || outcomeB.status !== 'hydrated') {
       assert.fail('Expected both conversations to hydrate.');
@@ -610,10 +611,10 @@ test('hydrate scopes recent exchanges to the requested conversationId, never lea
   });
 });
 
-test('hydrate keeps remembered facts global regardless of which conversationId is requested', () => {
-  withTempStore((store) => {
+test('hydrate keeps remembered facts global regardless of which conversationId is requested', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writer.write({
+    await writer.write({
       executionId: 'remember:2026-08-13T00:00:00.000Z',
       commandType: 'remember',
       commandGeneratedAt: '2026-08-13T00:00:00.000Z',
@@ -622,13 +623,13 @@ test('hydrate keeps remembered facts global regardless of which conversationId i
       output: { fact: 'prefiro reuniões de manhã' },
       metadata: {},
     });
-    writeExchangeRecord(
+    await writeExchangeRecord(
       writer, 'converse:a1', '2026-08-13T00:01:00.000Z',
       { requestText: 'pergunta em A', summary: 'resposta em A', kind: 'respond' }, {}, { conversationId: 'conversation-a' },
     );
 
     const hydrator = new FileCommandContextHydrator(store);
-    const outcomeB = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-b-brand-new' });
+    const outcomeB = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-b-brand-new' });
 
     if (outcomeB.status !== 'hydrated') {
       assert.fail('Expected the fact to make conversation B hydrate even with no exchanges of its own.');
@@ -639,18 +640,18 @@ test('hydrate keeps remembered facts global regardless of which conversationId i
   });
 });
 
-test('hydrate folds a legacy record with no conversationId at all into conversation-1, never into any other conversation', () => {
-  withTempStore((store) => {
+test('hydrate folds a legacy record with no conversationId at all into conversation-1, never into any other conversation', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
-    writeExchangeRecord(writer, 'converse:legacy', '2026-08-13T00:00:00.000Z', {
+    await writeExchangeRecord(writer, 'converse:legacy', '2026-08-13T00:00:00.000Z', {
       requestText: 'mensagem antiga sem conversationId',
       summary: 'resposta antiga',
       kind: 'respond',
     });
 
     const hydrator = new FileCommandContextHydrator(store);
-    const legacyOutcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-1' });
-    const otherOutcome = hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-other' });
+    const legacyOutcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-1' });
+    const otherOutcome = await hydrator.hydrate({ commandType: 'converse', generatedAt: '2026-08-13T00:05:00.000Z', conversationId: 'conversation-other' });
 
     if (legacyOutcome.status !== 'hydrated') {
       assert.fail('Expected legacy record to hydrate under conversation-1.');
@@ -661,24 +662,24 @@ test('hydrate folds a legacy record with no conversationId at all into conversat
   });
 });
 
-test('listConversationTurns returns one conversation\'s full, unbounded history and excludes another\'s', () => {
-  withTempStore((store) => {
+test('listConversationTurns returns one conversation\'s full, unbounded history and excludes another\'s', async () => {
+  await withTempStore(async (store) => {
     const writer = new FileCommandResultMemoryWriter(store);
     for (let index = 0; index < 12; index += 1) {
       const minute = String(index).padStart(2, '0');
-      writeExchangeRecord(
+      await writeExchangeRecord(
         writer, `converse:a${index}`, `2026-08-13T00:${minute}:00.000Z`,
         { requestText: `mensagem A ${index}`, summary: `resposta A ${index}`, kind: 'respond' }, {}, { conversationId: 'conversation-a' },
       );
     }
-    writeExchangeRecord(
+    await writeExchangeRecord(
       writer, 'converse:b0', '2026-08-13T01:00:00.000Z',
       { requestText: 'mensagem B', summary: 'resposta B', kind: 'respond' }, {}, { conversationId: 'conversation-b' },
     );
 
     const hydrator = new FileCommandContextHydrator(store);
-    const turnsA = hydrator.listConversationTurns('conversation-a');
-    const turnsB = hydrator.listConversationTurns('conversation-b');
+    const turnsA = await hydrator.listConversationTurns('conversation-a');
+    const turnsB = await hydrator.listConversationTurns('conversation-b');
 
     assert.equal(turnsA.length, 12, 'unlike hydrate(), listConversationTurns must never cap at the 8-turn cognitive window');
     assert.deepEqual(turnsA.map((t) => t.requestText), Array.from({ length: 12 }, (_, i) => `mensagem A ${i}`));

@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from './memory/AsyncMemoryStore.js';
 import type { CorePipelineDependencies } from './core.js';
 import {
   buildRegistry,
@@ -153,7 +154,7 @@ export class CorePipelineBootstrap {
         ((memoryFilePath) =>
           memoryFilePath === undefined
             ? new InMemoryCommandContextHydrator()
-            : new FileCommandContextHydrator(new FileMemoryStore(memoryFilePath))),
+            : new FileCommandContextHydrator(new AsyncFileMemoryStore(new FileMemoryStore(memoryFilePath)))),
       buildSpecializedTool:
         factories.buildSpecializedTool ??
         ((allowedFilesystemRoot, authorizedCommands) =>
@@ -177,7 +178,7 @@ export class CorePipelineBootstrap {
         ((memoryFilePath) =>
           memoryFilePath === undefined
             ? new InMemoryCommandResultMemoryWriter()
-            : new FileCommandResultMemoryWriter(new FileMemoryStore(memoryFilePath))),
+            : new FileCommandResultMemoryWriter(new AsyncFileMemoryStore(new FileMemoryStore(memoryFilePath)))),
     };
   }
 

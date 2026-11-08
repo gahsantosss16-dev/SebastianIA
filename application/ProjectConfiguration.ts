@@ -1,3 +1,4 @@
+import { AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { ProjectRegistry } from '../core/project/ProjectRegistry.js';
 import type { ProjectDescriptor } from '../core/project/ProjectTypes.js';
@@ -47,7 +48,7 @@ export function loadConfiguredProjects(registry: ProjectRegistry, env: NodeJS.Pr
 
 export function createConfiguredProjectContext(dataDir: string, env: NodeJS.ProcessEnv = process.env): ProjectConversationContext | undefined {
   if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
-  return new ProjectConversationContext(loadConfiguredProjects(createGitHubProjectRegistry(env), env), new FileMemoryStore(resolveMemoryFilePath(dataDir)), env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server');
+  return new ProjectConversationContext(loadConfiguredProjects(createGitHubProjectRegistry(env), env), new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))), env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server');
 }
 
 /**
@@ -71,7 +72,7 @@ export function createConfiguredProjectTaskOrchestrator(
   if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
   return new ProjectTaskOrchestrator(
     loadConfiguredProjects(createGitHubProjectRegistry(env), env),
-    new FileMemoryStore(resolveMemoryFilePath(dataDir)),
+    new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))),
     executor,
     env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server',
     undefined,

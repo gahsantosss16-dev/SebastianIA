@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
 
 import { createLogger } from '../core/logger.js';
 import { createOnlineSebastianApplication } from './OnlineSebastianApplication.js';
@@ -33,7 +34,7 @@ async function startOnlineServer(): Promise<void> {
     // shared in-process cache) - so the HTTP layer can list/validate/reopen
     // conversations without threading conversation CRUD through Core's
     // cognition-facing command pipeline.
-    const conversationMemoryStore = new FileMemoryStore(resolveMemoryFilePath(dataDir));
+    const conversationMemoryStore = new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir)));
     const conversationHydrator = new FileCommandContextHydrator(conversationMemoryStore);
     const conversationRegistry = new ConversationRegistry(conversationMemoryStore, conversationHydrator);
     const httpServer = new SebastianHttpServer({

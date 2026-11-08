@@ -34,17 +34,17 @@ const AUTHORITY_WEIGHT: Readonly<Record<KnowledgeAuthorityLevel, number>> = {
   book: 1.0,
 };
 
-export function searchKnowledge(
+export async function searchKnowledge(
   store: KnowledgeStore,
   query: KnowledgeSearchQuery,
   options: KnowledgeSearchOptions = {},
-): readonly KnowledgeSearchHit[] {
+): Promise<readonly KnowledgeSearchHit[]> {
   if (typeof query.query !== 'string' || query.query.trim() === '') {
     return [];
   }
 
-  const sourcesById = new Map(store.listSources().map((source) => [source.sourceId, source]));
-  const activeChunks = store.listChunks().filter((chunk) => {
+  const sourcesById = new Map((await store.listSources()).map((source) => [source.sourceId, source]));
+  const activeChunks = (await store.listChunks()).filter((chunk) => {
     if (chunk.status !== 'active') {
       return false;
     }
