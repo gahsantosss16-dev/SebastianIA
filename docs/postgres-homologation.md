@@ -41,12 +41,13 @@ O nome do segredo Vault, sozinho, não é um valor de conexão. Não conceda ao
 
 No Supabase, consulte **Connect → Direct connection** para os parâmetros e
 [Database Settings → SSL Configuration](https://supabase.com/dashboard/project/smtyixukyexezjumouvw/database/settings)
-para a CA. O endereço direto pode exigir IPv6. Se o executor não oferecer essa
-rota, use um executor com saída TCP apropriada. Um pooler IPv4 exige primeiro
-confirmar seu endpoint e o formato do usuário no painel e adaptar a lista de
-destinos permitidos do diagnóstico; este comando aceita somente o endpoint
-direto acima. Não assuma que liberar o host na lista HTTP habilita PostgreSQL:
-neste ambiente, raw TCP usa um transporte/VPN separado, atualmente indisponível.
+para a CA. O endereço direto pode exigir IPv6. O diagnóstico também aceita
+Session Pooler IPv4 com `SEBASTIAN_SUPABASE_CONNECTION_MODE=session-pooler`,
+`SEBASTIAN_SUPABASE_SESSION_POOLER_HOST` copiado do painel e login
+`sebastian_app.smtyixukyexezjumouvw`, na porta 5432. Não deduz o hostname pela
+região e não escolhe um fallback automaticamente. Consulte a
+[verificação específica do Session Pooler](postgres-session-pooler.md).
+Liberar um destino na lista HTTP não habilita raw TCP neste executor.
 
 O template [.env.homologation.example](../.env.homologation.example) não contém
 credenciais. Prefira injeção pelo gerenciador de secrets. Se usar um arquivo
