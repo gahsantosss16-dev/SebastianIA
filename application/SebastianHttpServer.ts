@@ -17,6 +17,7 @@ import {
   isValidConversationIdFormat,
   MEMORY_FACT_RECORD_KIND,
   type ConversationRegistry,
+  type AsyncMemoryStore,
   type ConversationSummaryRecord,
 } from '../core/memory/index.js';
 import { LOCAL_CONVERSE_COMMAND_TYPE } from './LocalConverseCapabilityProvider.js';
@@ -24,6 +25,8 @@ import { SEBASTIAN_WEB_HTML, SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from '
 
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
+
+export const WEB_SESSIONS_NAMESPACE = 'web-sessions';
 
 const WEB_CONVERSATION_SESSION_ID = 'session-1';
 
@@ -93,6 +96,8 @@ export interface SebastianHttpServerOptions {
   readonly requestId?: () => string;
   readonly sessionToken?: () => string;
   readonly webSessionStateFilePath?: string;
+  readonly sessionStore?: AsyncMemoryStore;
+  readonly closePersistence?: () => Promise<void>;
   readonly executionTimeoutMs?: number;
 }
 
@@ -133,6 +138,8 @@ export class SebastianHttpServer {
   private readonly createRequestId: () => string;
   private readonly createSessionToken: () => string;
   private readonly webSessionStateFilePath: string | undefined;
+  private readonly sessionStore: AsyncMemoryStore | undefined;
+  private readonly closePersistence: (() => Promise<void>) | undefined;
   private readonly executionTimeoutMs: number;
   private readonly server: Server;
   private converseInFlight = false;
@@ -178,6 +185,11 @@ export class SebastianHttpServer {
     if (options.webSessionStateFilePath !== undefined && options.webSessionStateFilePath.trim() === '') {
       throw new TypeError('Sebastian web session state file path must be non-empty when provided.');
     }
+    if (options.sessionStore !== undefined && options.webSessionStateFilePath !== undefined) {
+      throw new TypeError('Configure either sessionStore or webSessionStateFilePath, never both.');
+    }
+    this.sessionStore = options.sessionStore;
+    this.closePersistence = options.closePersistence;
     this.webSessionStateFilePath = options.webSessionStateFilePath;
     this.executionTimeoutMs = executionTimeoutMs;
     this.server = createServer((request, response) => {
@@ -244,7 +256,7 @@ export class SebastianHttpServer {
 
     if (!this.applicationShutDown) {
       this.applicationShutDown = true;
-      this.application.shutdown();
+      try { this.application.shutdown(); } finally { await this.closePersistence?.(); }
     }
   }
 
@@ -297,7 +309,7 @@ export class SebastianHttpServer {
           this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'POST' });
           return;
         }
-        if (!this.hasSameOrigin(request) || !this.hasValidWebSession(request)) {
+        if (!this.hasSameOrigin(request) || !(await this.hasValidWebSession(request))) {
           this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
           return;
         }
@@ -311,7 +323,7 @@ export class SebastianHttpServer {
         // check only applies to POST here, exactly like GET /api/web/session
         // versus its POST/DELETE siblings.
         if (request.method === 'GET') {
-          if (!this.hasValidWebSession(request)) {
+          if (!(await this.hasValidWebSession(request))) {
             this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
             return;
           }
@@ -319,7 +331,7 @@ export class SebastianHttpServer {
           return;
         }
         if (request.method === 'POST') {
-          if (!this.hasSameOrigin(request) || !this.hasValidWebSession(request)) {
+          if (!this.hasSameOrigin(request) || !(await this.hasValidWebSession(request))) {
             this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
             return;
           }
@@ -335,7 +347,7 @@ export class SebastianHttpServer {
           this.writeError(response, 405, 'METHOD_NOT_ALLOWED', 'Método não permitido.', requestId, { Allow: 'GET' });
           return;
         }
-        if (!this.hasValidWebSession(request)) {
+        if (!(await this.hasValidWebSession(request))) {
           this.writeError(response, 401, 'UNAUTHORIZED', 'Sessão inválida ou expirada.', requestId);
           return;
         }
@@ -381,7 +393,7 @@ export class SebastianHttpServer {
     requestId: string,
   ): Promise<void> {
     if (request.method === 'GET') {
-      this.writeJson(response, 200, { authenticated: this.hasValidWebSession(request) });
+      this.writeJson(response, 200, { authenticated: await this.hasValidWebSession(request) });
       return;
     }
     if (request.method === 'DELETE') {
@@ -394,8 +406,12 @@ export class SebastianHttpServer {
       const sessionToken = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
       if (sessionToken !== undefined) {
         const candidateDigest = digestToken(sessionToken).toString('base64url');
-        const remaining = this.readActiveWebSessions().filter((session) => !safelyEqualText(session.digest, candidateDigest));
-        this.writeActiveWebSessions(remaining);
+        if (this.sessionStore !== undefined) {
+          await this.sessionStore.writeRecord(WEB_SESSIONS_NAMESPACE, candidateDigest, { digest: candidateDigest, expiresAt: 0 });
+        } else {
+          const remaining = (await this.readActiveWebSessions()).filter((session) => !safelyEqualText(session.digest, candidateDigest));
+          await this.writeActiveWebSessions(remaining);
+        }
       }
       this.writeJson(response, 200, { authenticated: false }, { 'Set-Cookie': this.expiredSessionCookie() });
       return;
@@ -427,11 +443,16 @@ export class SebastianHttpServer {
     // other devices/browsers are already validly signed in, never replacing
     // them - that single-slot replacement was exactly why unlocking on one
     // device (e.g. desktop) silently signed another (e.g. a phone) back out.
-    const survivors = this.readActiveWebSessions().slice(-(MAX_ACTIVE_WEB_SESSIONS - 1));
-    this.writeActiveWebSessions([
-      ...survivors,
-      { digest: digestToken(sessionToken).toString('base64url'), expiresAt },
-    ]);
+    const active = await this.readActiveWebSessions();
+    const record = { digest: digestToken(sessionToken).toString('base64url'), expiresAt, createdAt: this.now().getTime() };
+    if (this.sessionStore !== undefined) {
+      for (const evicted of active.slice(0, Math.max(0, active.length - MAX_ACTIVE_WEB_SESSIONS + 1))) {
+        await this.sessionStore.writeRecord(WEB_SESSIONS_NAMESPACE, evicted.digest, { digest: evicted.digest, expiresAt: 0 });
+      }
+      await this.sessionStore.writeRecord(WEB_SESSIONS_NAMESPACE, record.digest, record);
+    } else {
+      await this.writeActiveWebSessions([...active.slice(-(MAX_ACTIVE_WEB_SESSIONS - 1)), record]);
+    }
     const cookieAttributes = [
       `${WEB_SESSION_COOKIE}=${sessionToken}`,
       'Path=/',
@@ -583,7 +604,7 @@ export class SebastianHttpServer {
     }
   }
 
-  private hasValidWebSession(request: IncomingMessage): boolean {
+  private async hasValidWebSession(request: IncomingMessage): Promise<boolean> {
     const candidate = readCookie(request.headers.cookie, WEB_SESSION_COOKIE);
     if (candidate === undefined) {
       return false;
@@ -603,7 +624,7 @@ export class SebastianHttpServer {
       return false;
     }
     const candidateDigest = digestToken(candidate).toString('base64url');
-    return this.readActiveWebSessions().some((session) =>
+    return (await this.readActiveWebSessions()).some((session) =>
       session.expiresAt === expiresAt && safelyEqualText(candidateDigest, session.digest));
   }
 
@@ -614,22 +635,33 @@ export class SebastianHttpServer {
   }
 
   /** Every still-unexpired device session. A legacy single-session file (from before multi-device support) is read as its one entry, migrated transparently on the next write. */
-  private readActiveWebSessions(): readonly WebSessionRecord[] {
+  private async readActiveWebSessions(): Promise<readonly WebSessionRecord[]> {
     const now = this.now().getTime();
+    if (this.sessionStore !== undefined) {
+      const sessions: WebSessionRecord[] = [];
+      for (const record of await this.sessionStore.listRecords(WEB_SESSIONS_NAMESPACE)) {
+        if (record.expiresAt === 0 && typeof record.digest === 'string' && /^[A-Za-z0-9_-]{43}$/.test(record.digest)) continue;
+        const session = parseWebSessionRecord(record);
+        if (session === undefined) throw new Error('Persisted web session record is invalid.');
+        if (session.expiresAt > now) sessions.push(session);
+      }
+      return sessions.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+    }
     if (this.webSessionStateFilePath === undefined) {
       return this.inMemoryWebSessions.filter((session) => session.expiresAt > now);
     }
     try {
       const parsed = JSON.parse(readFileSync(this.webSessionStateFilePath, 'utf8')) as unknown;
       return parseWebSessionRecords(parsed).filter((session) => session.expiresAt > now);
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw new Error('Failed to read persisted web sessions.', { cause: error });
     }
   }
 
-  private writeActiveWebSessions(sessions: readonly WebSessionRecord[]): void {
-    this.inMemoryWebSessions = sessions;
+  private async writeActiveWebSessions(sessions: readonly WebSessionRecord[]): Promise<void> {
     if (this.webSessionStateFilePath === undefined) {
+      this.inMemoryWebSessions = sessions;
       return;
     }
     mkdirSync(dirname(this.webSessionStateFilePath), { recursive: true });
@@ -683,6 +715,7 @@ export class SebastianHttpServer {
 }
 
 interface WebSessionRecord {
+  readonly createdAt?: number;
   readonly digest: string;
   readonly expiresAt: number;
 }
@@ -691,12 +724,14 @@ function parseWebSessionRecord(value: unknown): WebSessionRecord | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
-  const candidate = value as { readonly digest?: unknown; readonly expiresAt?: unknown };
+  const candidate = value as { readonly digest?: unknown; readonly expiresAt?: unknown; readonly createdAt?: unknown };
   if (typeof candidate.digest !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(candidate.digest) ||
       !Number.isSafeInteger(candidate.expiresAt) || (candidate.expiresAt as number) <= 0) {
     return undefined;
   }
-  return { digest: candidate.digest, expiresAt: candidate.expiresAt as number };
+  if (candidate.createdAt !== undefined && !Number.isSafeInteger(candidate.createdAt)) return undefined;
+  return { digest: candidate.digest, expiresAt: candidate.expiresAt as number,
+    ...(candidate.createdAt === undefined ? {} : { createdAt: candidate.createdAt as number }) };
 }
 
 /** Accepts the current array format and, for backward compatibility, a legacy single-session object (or `null`) from before multi-device support existed. */

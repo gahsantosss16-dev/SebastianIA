@@ -58,12 +58,14 @@ async function startServer(
   now: () => Date = () => new Date('2026-08-27T12:00:00.000Z'),
   webSessionStateFilePath?: string,
   conversationRegistry: ConversationRegistry = createTestConversationRegistry(),
+  sessionStore?: AsyncFileMemoryStore,
 ): Promise<RunningTestServer> {
   let sessionSequence = 0;
   const http = new SebastianHttpServer({
     application,
     apiToken: API_TOKEN,
     conversationRegistry,
+    ...(sessionStore === undefined ? {} : { sessionStore }),
     logger,
     requestId: () => 'request-test-id',
     sessionToken: () => `opaque-web-session-test-token-${sessionSequence++}`,
@@ -1380,4 +1382,49 @@ test('CONVERSATIONS: real file corruption propagates to HTTP without a successfu
     await running.close();
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test('WEB: async session records survive restart, preserve other devices and persist logout without exposing raw cookies', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-async-web-sessions-'));
+  const path = join(root, 'sessions.json');
+  const first = await startServer(successfulApplication(), silentLogger, undefined, undefined, undefined, undefined, new AsyncFileMemoryStore(new FileMemoryStore(path)));
+  let firstClosed = false;
+  try {
+    const cookieA = await createWebSession(first.baseUrl);
+    const cookieB = await createWebSession(first.baseUrl);
+    assert.equal(readFileSync(path, 'utf8').includes(cookieA.split('=')[1]!), false);
+    await first.close();
+    firstClosed = true;
+    const second = await startServer(successfulApplication(), silentLogger, undefined, undefined, undefined, undefined, new AsyncFileMemoryStore(new FileMemoryStore(path)));
+    try {
+      for (const cookie of [cookieA, cookieB]) {
+        assert.deepEqual(await (await fetch(`${second.baseUrl}/api/web/session`, { headers: { Cookie: cookie } })).json(), { authenticated: true });
+      }
+      const logout = await fetch(`${second.baseUrl}/api/web/session`, { method: 'DELETE', headers: { Cookie: cookieA, Origin: second.baseUrl } });
+      assert.equal(logout.status, 200);
+    } finally { await second.close(); }
+    const third = await startServer(successfulApplication(), silentLogger, undefined, undefined, undefined, undefined, new AsyncFileMemoryStore(new FileMemoryStore(path)));
+    try {
+      assert.deepEqual(await (await fetch(`${third.baseUrl}/api/web/session`, { headers: { Cookie: cookieA } })).json(), { authenticated: false });
+      assert.deepEqual(await (await fetch(`${third.baseUrl}/api/web/session`, { headers: { Cookie: cookieB } })).json(), { authenticated: true });
+    } finally { await third.close(); }
+  } finally {
+    if (!firstClosed) await first.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('WEB: corrupted async session storage fails login with no success cookie or file fallback', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-async-web-session-failure-'));
+  const path = join(root, 'sessions.json');
+  writeFileSync(path, '{corrupt');
+  const running = await startServer(successfulApplication(), silentLogger, undefined, undefined, undefined, undefined, new AsyncFileMemoryStore(new FileMemoryStore(path)));
+  try {
+    const response = await fetch(`${running.baseUrl}/api/web/session`, {
+      method: 'POST', headers: { Origin: running.baseUrl, 'Content-Type': 'application/json' }, body: JSON.stringify({ token: API_TOKEN }),
+    });
+    assert.equal(response.status, 500);
+    assert.equal(response.headers.get('set-cookie'), null);
+    assert.equal(readFileSync(path, 'utf8'), '{corrupt');
+  } finally { await running.close(); rmSync(root, { recursive: true, force: true }); }
 });

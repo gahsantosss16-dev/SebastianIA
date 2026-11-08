@@ -180,7 +180,10 @@ export class FileCommandContextHydrator implements CommandContextHydrator {
     for (const record of succeededRecords) {
       const output = record.output as { readonly operationEvent?: unknown } | undefined;
       const operation = this.parseOperation(output?.operationEvent);
-      if (operation) latestById.set(operation.id, operation);
+      if (operation) {
+        const previous = latestById.get(operation.id);
+        if (previous === undefined || Date.parse(operation.updatedAt) >= Date.parse(previous.updatedAt)) latestById.set(operation.id, operation);
+      }
     }
     return [...latestById.values()]
       .filter((operation) => operation.status === 'proposed')

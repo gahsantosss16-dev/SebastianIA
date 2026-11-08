@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
 
 import { createLogger } from '../core/logger.js';
 import { createOnlineSebastianApplication } from './OnlineSebastianApplication.js';
@@ -8,8 +7,8 @@ import { createOnlineCognitiveModelProvider } from './OnlineCognitiveProviderCon
 import {
   ConversationRegistry,
   FileCommandContextHydrator,
-  FileMemoryStore,
-  resolveMemoryFilePath,
+  createMemoryStoreRuntime,
+  type MemoryStoreRuntime,
   resolveSebastianDataDirectory,
 } from '../core/memory/index.js';
 import { resolveOnlineApiToken, resolveOnlinePort, SebastianHttpServer } from './SebastianHttpServer.js';
@@ -19,6 +18,7 @@ import { createConfiguredProjectContext, createConfiguredProjectTaskOrchestrator
 const logger = createLogger();
 
 async function startOnlineServer(): Promise<void> {
+  let persistence: MemoryStoreRuntime | undefined;
   try {
     const projectRuntime = inspectProjectConfiguration(process.env);
     logger.info('Project selection runtime resolved.', { ...projectRuntime });
@@ -26,17 +26,13 @@ async function startOnlineServer(): Promise<void> {
     const port = resolveOnlinePort();
     const cognitiveModelProvider = createOnlineCognitiveModelProvider(process.env, logger);
     const dataDir = resolveSebastianDataDirectory();
-    const projectContext = createConfiguredProjectContext(dataDir);
-    const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir, process.env, undefined, cognitiveModelProvider);
-    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env, projectContext, projectTaskOrchestrator);
-    // A second reader over the same memory.json document - safe by
-    // FileMemoryStore's own design (every read re-parses from disk, no
-    // shared in-process cache) - so the HTTP layer can list/validate/reopen
-    // conversations without threading conversation CRUD through Core's
-    // cognition-facing command pipeline.
-    const conversationMemoryStore = new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir)));
-    const conversationHydrator = new FileCommandContextHydrator(conversationMemoryStore);
-    const conversationRegistry = new ConversationRegistry(conversationMemoryStore, conversationHydrator);
+    persistence = createMemoryStoreRuntime(dataDir);
+    await persistence.ready();
+    const projectContext = createConfiguredProjectContext(dataDir, process.env, persistence.store);
+    const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir, process.env, undefined, cognitiveModelProvider, persistence.store);
+    const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env, projectContext, projectTaskOrchestrator, persistence.store);
+    const conversationHydrator = new FileCommandContextHydrator(persistence.store);
+    const conversationRegistry = new ConversationRegistry(persistence.store, conversationHydrator);
     const httpServer = new SebastianHttpServer({
       application,
       apiToken,
@@ -44,11 +40,14 @@ async function startOnlineServer(): Promise<void> {
       ...(projectContext === undefined ? {} : { projectContext }),
       ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
       logger,
-      webSessionStateFilePath: join(dataDir, 'web-session.json'),
+      ...(persistence.driver === 'supabase'
+        ? { sessionStore: persistence.store }
+        : { webSessionStateFilePath: join(dataDir, 'web-session.json') }),
+      closePersistence: () => persistence!.close(),
     });
     const started = await httpServer.listen(port);
     const build = resolveBuildProvenance();
-    logger.info('Sebastian online started.', { port: started.port, buildSha: build.sha, buildSource: build.source });
+    logger.info('Sebastian online started.', { port: started.port, memoryDriver: persistence.driver, buildSha: build.sha, buildSource: build.source });
 
     let stopping = false;
     const shutdown = async (signal: string): Promise<void> => {
@@ -67,6 +66,7 @@ async function startOnlineServer(): Promise<void> {
     process.once('SIGTERM', () => void shutdown('SIGTERM'));
     process.once('SIGINT', () => void shutdown('SIGINT'));
   } catch (error) {
+    await persistence?.close().catch(() => { process.exitCode = 1; });
     logger.error('Sebastian online failed to start.', {
       name: error instanceof Error ? error.name : 'UnknownError',
       message: error instanceof Error ? error.message : 'A non-Error value was thrown.',

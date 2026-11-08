@@ -1,4 +1,4 @@
-import { AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
+import { type AsyncMemoryStore, AsyncFileMemoryStore } from '../core/memory/AsyncMemoryStore.js';
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { ProjectRegistry } from '../core/project/ProjectRegistry.js';
 import type { ProjectDescriptor } from '../core/project/ProjectTypes.js';
@@ -7,7 +7,7 @@ import { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator
 import { ClaudeCliProjectTaskExecutor } from '../core/project/ClaudeCliProjectTaskExecutor.js';
 import type { ProjectTaskExecutor } from '../core/project/ProjectTaskExecutor.js';
 import type { CognitiveModelProvider } from '../core/cognition/index.js';
-import { FileMemoryStore, resolveMemoryFilePath } from '../core/memory/index.js';
+import { FileMemoryStore, resolveMemoryFilePath, resolveSebastianStoreDriver } from '../core/memory/index.js';
 import { createGitHubProjectRegistry } from './GitHubProjectRegistryConfiguration.js';
 import { loadProjectPolicies } from '../core/project/ProjectWorkspacePolicy.js';
 import { win32 } from 'node:path';
@@ -46,9 +46,12 @@ export function loadConfiguredProjects(registry: ProjectRegistry, env: NodeJS.Pr
   } catch { throw new Error('Configuração de projetos inválida (SEBASTIAN_PROJECTS_FILE). Nenhum fallback de checkout foi aplicado.'); }
 }
 
-export function createConfiguredProjectContext(dataDir: string, env: NodeJS.ProcessEnv = process.env): ProjectConversationContext | undefined {
+export function createConfiguredProjectContext(dataDir: string, env: NodeJS.ProcessEnv = process.env, memoryStore?: AsyncMemoryStore): ProjectConversationContext | undefined {
   if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
-  return new ProjectConversationContext(loadConfiguredProjects(createGitHubProjectRegistry(env), env), new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))), env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server');
+  if (resolveSebastianStoreDriver(env) === 'supabase' && memoryStore === undefined) {
+    throw new Error('Supabase project composition requires the shared async memory store.');
+  }
+  return new ProjectConversationContext(loadConfiguredProjects(createGitHubProjectRegistry(env), env), memoryStore ?? new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))), env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server');
 }
 
 /**
@@ -68,11 +71,15 @@ export function createConfiguredProjectTaskOrchestrator(
   env: NodeJS.ProcessEnv = process.env,
   executor: ProjectTaskExecutor = new ClaudeCliProjectTaskExecutor(),
   cognitiveModelProvider?: CognitiveModelProvider,
+  memoryStore?: AsyncMemoryStore,
 ): ProjectTaskOrchestrator | undefined {
   if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
+  if (resolveSebastianStoreDriver(env) === 'supabase' && memoryStore === undefined) {
+    throw new Error('Supabase project composition requires the shared async memory store.');
+  }
   return new ProjectTaskOrchestrator(
     loadConfiguredProjects(createGitHubProjectRegistry(env), env),
-    new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))),
+    memoryStore ?? new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))),
     executor,
     env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server',
     undefined,

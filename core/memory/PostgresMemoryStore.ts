@@ -11,17 +11,34 @@ export interface SqlQueryable {
 }
 
 export class PostgresMemoryStore {
+  private poolFailure: Error | undefined;
   public constructor(private readonly database: SqlQueryable) {}
 
-  public static fromConnectionString(connectionString: string): PostgresMemoryStore {
+  public static fromConnectionString(connectionString: string, ca?: string): PostgresMemoryStore {
     if (typeof connectionString !== 'string' || connectionString.trim() === '') {
       throw new TypeError('SEBASTIAN_SUPABASE_DATABASE_URL must be a non-empty PostgreSQL connection string.');
     }
-    const config: PoolConfig = { connectionString, max: 8, idleTimeoutMillis: 30_000 };
-    return new PostgresMemoryStore(new Pool(config));
+    let url: URL;
+    try { url = new URL(connectionString); } catch { throw new TypeError('Invalid PostgreSQL connection URL.'); }
+    if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname) throw new TypeError('Invalid PostgreSQL connection URL.');
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+    if (!local) {
+      // Never let connection-string SSL options disable certificate verification.
+      for (const key of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'ssl']) url.searchParams.delete(key);
+    }
+    const config: PoolConfig = {
+      connectionString: url.toString(), max: 8, idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000, query_timeout: 15_000, statement_timeout: 15_000,
+      ...(local ? {} : { ssl: { rejectUnauthorized: true, ...(ca === undefined ? {} : { ca }) } }),
+    };
+    const pool = new Pool(config);
+    const store = new PostgresMemoryStore(pool);
+    pool.on('error', (cause) => { store.poolFailure = new Error('PostgreSQL memory connection failed; restart the persistence runtime.', { cause }); });
+    return store;
   }
 
   public async listRecords(namespace: string): Promise<readonly Readonly<Record<string, unknown>>[]> {
+    this.assertAvailable();
     this.assertPart(namespace, 'namespace');
     const result = await this.database.query<{ value_json: string }>(
       'select value_json from sebastian.memory_records where namespace = $1 order by record_key asc', [namespace],
@@ -31,6 +48,7 @@ export class PostgresMemoryStore {
 
   /** Atomic upsert: concurrent writes to different keys never overwrite one another. */
   public async writeRecord(namespace: string, key: string, value: Readonly<Record<string, unknown>>): Promise<void> {
+    this.assertAvailable();
     this.assertPart(namespace, 'namespace');
     this.assertPart(key, 'key');
     let serialized: string;
@@ -42,6 +60,22 @@ export class PostgresMemoryStore {
        set value_json = excluded.value_json, updated_at = clock_timestamp()`,
       [namespace, key, serialized],
     );
+  }
+
+  /** Readiness checks schema and runtime privileges without reading stored content. */
+  public async ready(): Promise<void> {
+    this.assertAvailable();
+    const result = await this.database.query<{ ready: boolean }>(
+      `select (has_table_privilege(current_user, 'sebastian.memory_records', 'SELECT')
+        and has_table_privilege(current_user, 'sebastian.memory_records', 'INSERT')
+        and has_table_privilege(current_user, 'sebastian.memory_records', 'UPDATE')) as ready`,
+    );
+    if (result.rows[0]?.ready !== true) throw new Error('PostgreSQL memory schema or permissions are unavailable.');
+    await this.database.query('select namespace from sebastian.memory_records limit 0');
+  }
+
+  private assertAvailable(): void {
+    if (this.poolFailure !== undefined) throw this.poolFailure;
   }
 
   public async close(): Promise<void> { await this.database.end?.(); }

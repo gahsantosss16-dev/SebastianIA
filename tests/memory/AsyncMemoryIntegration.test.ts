@@ -115,3 +115,35 @@ test('async file adapter preserves corruption errors and never replaces corrupt 
     await assert.rejects(store.listRecords('command-results'));
   });
 });
+
+test('operation replay uses event timestamps rather than backend-specific key or insertion order', async () => {
+  await withFile(async (store) => {
+    const proposed = {
+      memoryRecordKind: 'sebastian.operation.event', id: 'operation-one', objectiveId: 'objective-one',
+      objective: 'Synthetic objective', proposedAction: 'Synthetic action', toolId: 'synthetic-tool', toolArguments: {},
+      validationToolId: 'synthetic-validation', risk: 'low', authorizationRequirement: 'explicitUserAuthorization',
+      status: 'proposed', createdAt: '2026-11-08T00:00:00.000Z', expiresAt: '2026-11-08T00:30:00.000Z', updatedAt: '2026-11-08T00:00:00.000Z',
+    };
+    // Write a newer terminal event first, then its older proposal. PostgreSQL key ordering
+    // can expose this sequence even when the events were originally appended in time order.
+    await store.writeRecord('command-results', 'a-completed', { resultStatus: 'succeeded', output: { operationEvent: { ...proposed, status: 'completed', updatedAt: '2026-11-08T00:01:00.000Z' } } });
+    await store.writeRecord('command-results', 'z-proposed', { resultStatus: 'succeeded', output: { operationEvent: proposed } });
+    const outcome = await new FileCommandContextHydrator(store).hydrate({ commandType: 'converse', generatedAt: '2026-11-08T00:02:00.000Z' });
+    assert.equal(outcome.status, 'absent', 'a terminal operation must never become pending again');
+  });
+});
+
+test('identical command timestamps in different conversations never overwrite each other', async () => {
+  await withFile(async (store) => {
+    const writer = new FileCommandResultMemoryWriter(store);
+    await Promise.all(['conversation-a', 'conversation-b'].map((conversationId) => writer.write({
+      ...input, metadata: { conversationId }, output: {
+        conversationTurn: { requestText: conversationId, summary: 'Synthetic answer', kind: 'conversation' },
+      },
+    })));
+    assert.equal((await store.listRecords('command-results')).length, 2);
+    const hydrator = new FileCommandContextHydrator(store);
+    assert.deepEqual((await hydrator.listConversationTurns('conversation-a')).map((turn) => turn.requestText), ['conversation-a']);
+    assert.deepEqual((await hydrator.listConversationTurns('conversation-b')).map((turn) => turn.requestText), ['conversation-b']);
+  });
+});

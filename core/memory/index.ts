@@ -17,3 +17,4 @@ export * from './PendingOperationContract.js';
 export * from './FileCommandResultMemoryWriter.js';
 export * from './FileCommandContextHydrator.js';
 export * from './ConversationRegistry.js';
+export * from './MemoryStoreRuntime.js';

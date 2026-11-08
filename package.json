@@ -15,7 +15,8 @@
     "start:online": "node ./dist/application/http.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test tests/**/*.test.ts"
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test:postgres": "tsx scripts/validate-postgres-memory.ts"
   },
   "keywords": [
     "ai",

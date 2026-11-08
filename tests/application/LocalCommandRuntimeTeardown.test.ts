@@ -49,7 +49,7 @@ test('adapter executes then shuts down exactly once before returning result', as
         events.push('execute');
         return result;
       },
-      shutdown: () => events.push('shutdown'),
+      shutdown: () => { events.push('shutdown'); },
     }),
   });
 
@@ -219,4 +219,20 @@ test('teardown behavior is deterministic for equivalent runtimes', async () => {
   };
 
   assert.deepEqual(await execute(), await execute());
+});
+
+test('adapter awaits an asynchronous factory and pool teardown before returning', async () => {
+  const events: string[] = [];
+  const adapter = new LocalCommandInvocationAdapter({
+    createApplication: async () => {
+      await Promise.resolve();
+      events.push('created');
+      return {
+        executeCommand: async () => { events.push('executed'); return result; },
+        shutdown: async () => { await Promise.resolve(); events.push('closed'); },
+      };
+    },
+  });
+  assert.equal(await adapter.execute(['greeting']), result);
+  assert.deepEqual(events, ['created', 'executed', 'closed']);
 });
