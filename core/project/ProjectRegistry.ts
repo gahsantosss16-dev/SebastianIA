@@ -173,8 +173,8 @@ export class ProjectRegistry {
       );
     }
 
-    if (!descriptor.permissions || descriptor.permissions.access !== 'read-only') {
-      throw new InvalidProjectRegistrationError('Project descriptor permissions.access must be "read-only".');
+    if (!descriptor.permissions || (descriptor.permissions.access !== 'read-only' && descriptor.permissions.access !== 'controlled-write')) {
+      throw new InvalidProjectRegistrationError('Project descriptor permissions.access must be "read-only" or "controlled-write".');
     }
 
     if (descriptor.localAgentPath !== undefined && (typeof descriptor.localAgentPath !== 'string' || descriptor.localAgentPath.trim() === '')) {

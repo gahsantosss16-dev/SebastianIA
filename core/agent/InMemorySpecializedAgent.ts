@@ -199,7 +199,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const cognitiveRelevantFacts = this.selectCognitiveRelevantFacts(text, rememberedFacts);
     const budgetedCognitiveRecentExchanges = this.applyConversationContextBudget(cognitiveRecentExchanges);
 
-    const pendingResponse = this.handlePendingOperationResponse(input, text, pendingOperations);
+    const pendingResponse = await this.handlePendingOperationResponse(input, text, pendingOperations);
     if (pendingResponse) return pendingResponse;
 
     const decision = await modelProvider.interpret({
@@ -779,11 +779,11 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     });
   }
 
-  private handlePendingOperationResponse(
+  private async handlePendingOperationResponse(
     input: SpecializedAgentHandoffInput,
     text: string,
     pendingOperations: readonly PendingOperationRecord[],
-  ): SpecializedAgentHandoffResult | undefined {
+  ): Promise<SpecializedAgentHandoffResult | undefined> {
     const intent = this.classifyAuthorizationResponse(text);
     if (intent === 'unrelated' || pendingOperations.length === 0) return undefined;
     if (pendingOperations.length !== 1) {
@@ -814,7 +814,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       return this.operationResponse('A operação não está disponível neste ambiente e não foi executada.', undefined, text);
     }
 
-    const execution = this.cognitiveOperationalOrchestrator.executeAuthorized(operation, {
+    const execution = await this.cognitiveOperationalOrchestrator.executeAuthorized(operation, {
       executionId: input.executionId,
       responsibilityId: input.responsibilityId,
       requestedAt: input.requestedAt,

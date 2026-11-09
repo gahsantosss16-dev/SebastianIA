@@ -28,7 +28,8 @@ export interface GitHubRemoteRepository {
  * this machine, never the GitHub API/token this field gates.
  */
 export interface ProjectPermissions {
-  readonly access: 'read-only';
+  /** `controlled-write` is still closed by the online composition until its explicit deployment flag is enabled. */
+  readonly access: 'read-only' | 'controlled-write';
 }
 
 /**

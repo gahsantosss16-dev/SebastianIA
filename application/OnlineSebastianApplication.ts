@@ -19,7 +19,8 @@ import {
 import type { CognitiveModelProvider, OperationalToolPolicyEntry } from '../core/cognition/index.js';
 import { KNOWLEDGE_SEARCH_TOOL_ID, KnowledgeSearchTool, KnowledgeStore } from '../core/knowledge/index.js';
 import { FileMemoryStore, resolveMemoryFilePath, resolveSebastianStoreDriver } from '../core/memory/index.js';
-import { createGitHubProjectRegistry, createGitHubReadOnlyTool } from './GitHubProjectRegistryConfiguration.js';
+import { createGitHubControlledWriteTool, createGitHubProjectRegistry, createGitHubReadOnlyTool } from './GitHubProjectRegistryConfiguration.js';
+import { GITHUB_CREATE_BRANCH_TOOL_ID, GITHUB_OPEN_PULL_REQUEST_TOOL_ID, GITHUB_UPSERT_FILE_TOOL_ID } from '../core/tool/GitHubControlledWriteTool.js';
 import { createSebastianApplication } from './SebastianApplication.js';
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
@@ -264,6 +265,7 @@ export function createOnlineSebastianApplication(
   // (below, catalog + Tool omit it entirely) while Gemini, conversation,
   // memory and every local/read-only Tool continue exactly as before.
   let githubTool;
+  let githubWriteTool;
   let registeredGitHubProjects: readonly ProjectDescriptor[] = [];
   try {
     const projectRegistry = projectContext?.registry ?? createGitHubProjectRegistry(env, logger);
@@ -274,6 +276,7 @@ export function createOnlineSebastianApplication(
     githubTool = registeredProjects.length > 0
       ? createGitHubReadOnlyTool(env, projectRegistry, logger)
       : undefined;
+    githubWriteTool = registeredProjects.length > 0 ? createGitHubControlledWriteTool(env, projectRegistry, logger) : undefined;
     // Only set a deterministic default when exactly one project is
     // registered - with more than one, guessing which one a bare mention of
     // "GitHub" refers to would be inventing a target, never done here.
@@ -281,6 +284,7 @@ export function createOnlineSebastianApplication(
   } catch {
     logger?.warn('GitHub integration disabled: invalid project registry configuration');
     githubTool = undefined;
+    githubWriteTool = undefined;
     registeredGitHubProjects = [];
   }
 
@@ -295,11 +299,16 @@ export function createOnlineSebastianApplication(
     ...(projectTaskOrchestrator === undefined ? {} : { projectTaskOrchestrator }),
     ...(logger === undefined ? {} : { logger }),
     authorizedCommands: [],
-    specializedTool: new OnlineReadOnlyTool(root, validations, githubTool, knowledgeTool),
+    specializedTool: new OnlineReadOnlyTool(root, validations, githubTool, knowledgeTool, githubWriteTool),
     ...(cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider }),
     cognitiveOperationalTools: [
       ...LOCAL_OPERATIONAL_TOOLS,
       ...(githubTool === undefined ? [] : githubOperationalTools(registeredGitHubProjects)),
+      ...(githubWriteTool === undefined ? [] : [
+        { toolId: GITHUB_CREATE_BRANCH_TOOL_ID, description: 'Cria uma branch sebastian/ isolada a partir da branch principal; exige autorização explícita.', requiresAuthorization: true, validationToolId: VALIDATION_TEST_TOOL_ID, risk: 'cria uma branch remota sem modificar a main', requiredStringArguments: ['projectId', 'branch'], applicabilityTerms: ['branch', 'criar branch', 'alteração'] },
+        { toolId: GITHUB_UPSERT_FILE_TOOL_ID, description: 'Cria ou edita um arquivo não sensível em uma branch sebastian/ e registra um commit; exige autorização explícita.', requiresAuthorization: true, validationToolId: VALIDATION_TEST_TOOL_ID, risk: 'grava arquivo e commit somente em branch de tarefa', requiredStringArguments: ['projectId', 'branch', 'path', 'content', 'message'], applicabilityTerms: ['editar arquivo', 'criar arquivo', 'alteração'] },
+        { toolId: GITHUB_OPEN_PULL_REQUEST_TOOL_ID, description: 'Abre pull request de uma branch sebastian/ para revisão; exige autorização explícita.', requiresAuthorization: true, validationToolId: VALIDATION_TEST_TOOL_ID, risk: 'abre PR sem merge ou deploy', requiredStringArguments: ['projectId', 'branch', 'title'], applicabilityTerms: ['pull request', 'abrir pr'] },
+      ]),
       ...(knowledgeTool === undefined ? [] : knowledgeOperationalTools(knowledgeTool)),
     ],
     ...(dataDir === undefined ? {} : { dataDir }),

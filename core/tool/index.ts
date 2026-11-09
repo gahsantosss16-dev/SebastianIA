@@ -11,3 +11,4 @@ export * from './LocalToolDispatcher.js';
 export * from './RestrictedOnlineTool.js';
 export * from './OnlineReadOnlyTool.js';
 export * from './GitHubReadOnlyTool.js';
+export * from './GitHubControlledWriteTool.js';

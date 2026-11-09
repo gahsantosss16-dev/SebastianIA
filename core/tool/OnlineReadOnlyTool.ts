@@ -8,6 +8,7 @@ import { GIT_DIFF_TOOL_ID, GIT_STATUS_TOOL_ID, LocalGitInspectionTool } from './
 import { RestrictedOnlineTool } from './RestrictedOnlineTool.js';
 import type { SpecializedTool, SpecializedToolInvocationInput, SpecializedToolInvocationResult } from './SpecializedToolInvocationContract.js';
 import { KNOWLEDGE_SEARCH_TOOL_ID } from '../knowledge/KnowledgeSearchTool.js';
+import { GITHUB_CREATE_BRANCH_TOOL_ID, GITHUB_OPEN_PULL_REQUEST_TOOL_ID, GITHUB_UPSERT_FILE_TOOL_ID } from './GitHubControlledWriteTool.js';
 
 export const PROJECT_SEARCH_TEXT_TOOL_ID = 'fs.searchText';
 const GITHUB_TOOL_ID_PREFIX = 'github.';
@@ -32,12 +33,14 @@ export class OnlineReadOnlyTool implements SpecializedTool {
   private readonly restricted = new RestrictedOnlineTool();
   private readonly github: SpecializedTool | undefined;
   private readonly knowledge: SpecializedTool | undefined;
+  private readonly githubWrite: SpecializedTool | undefined;
 
   public constructor(
     allowedRoot: string,
     commands: readonly AuthorizedCommandDefinition[] = [],
     githubTool?: SpecializedTool,
     knowledgeTool?: SpecializedTool,
+    githubWriteTool?: SpecializedTool,
   ) {
     this.root = canonicalizeAllowedRoot(allowedRoot);
     this.git = new LocalGitInspectionTool(this.root);
@@ -45,6 +48,7 @@ export class OnlineReadOnlyTool implements SpecializedTool {
     this.validations = new LocalAuthorizedCommandTool(this.root, commands);
     this.github = githubTool;
     this.knowledge = knowledgeTool;
+    this.githubWrite = githubWriteTool;
   }
 
   public invoke(
@@ -67,6 +71,9 @@ export class OnlineReadOnlyTool implements SpecializedTool {
       return Object.keys(input.payload).length === 0 ? this.validations.invoke(input) : this.invalidPayload(input.toolId);
     }
     if (input.toolId.startsWith(GITHUB_TOOL_ID_PREFIX)) {
+      if (input.toolId === GITHUB_CREATE_BRANCH_TOOL_ID || input.toolId === GITHUB_UPSERT_FILE_TOOL_ID || input.toolId === GITHUB_OPEN_PULL_REQUEST_TOOL_ID) {
+        return this.githubWrite ? this.githubWrite.invoke(input) : this.restricted.invoke(input);
+      }
       return this.github ? this.github.invoke(input) : this.restricted.invoke(input);
     }
     return this.restricted.invoke(input);

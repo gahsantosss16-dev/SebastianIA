@@ -488,10 +488,10 @@ export class CognitiveOperationalOrchestrator {
     return fallbackAnswer;
   }
 
-  public executeAuthorized(
+  public async executeAuthorized(
     operation: PendingOperationRecord,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string },
-  ): { readonly answer: string; readonly operation: PendingOperationRecord } {
+  ): Promise<{ readonly answer: string; readonly operation: PendingOperationRecord }> {
     if (operation.status !== 'proposed' || Date.parse(context.requestedAt) >= Date.parse(operation.expiresAt)) {
       return { answer: 'A proposta expirou e não foi executada.', operation: this.transition(operation, 'expired', context.requestedAt) };
     }
@@ -503,28 +503,24 @@ export class CognitiveOperationalOrchestrator {
       return { answer: 'O escopo armazenado da proposta é inválido e não foi executado.', operation: this.transition(operation, 'failed', context.requestedAt) };
     }
 
-    const action = requireSynchronousToolInvocationResult(
-      this.tool.invoke({
+    const action = await this.tool.invoke({
         toolId: operation.toolId,
         executionId: context.executionId,
         responsibilityId: context.responsibilityId,
         requestedAt: context.requestedAt,
         payload: operation.toolArguments,
-      }),
-    );
+      });
     if (action.status !== 'completed' || action.output.outcome !== 'ok') {
       return { answer: 'A alteração autorizada falhou e não foi considerada resolvida.', operation: this.transition(operation, 'failed', context.requestedAt) };
     }
 
-    const validation = requireSynchronousToolInvocationResult(
-      this.tool.invoke({
+    const validation = await this.tool.invoke({
         toolId: operation.validationToolId,
         executionId: context.executionId,
         responsibilityId: context.responsibilityId,
         requestedAt: context.requestedAt,
         payload: {},
-      }),
-    );
+      });
     const output = validation.status === 'completed' ? validation.output : undefined;
     const validated = output?.outcome === 'ok' &&
       (output.succeeded === undefined || output.succeeded === true) &&

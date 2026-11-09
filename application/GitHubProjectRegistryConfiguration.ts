@@ -1,11 +1,13 @@
 import type { Logger } from '../core/logger.js';
 import { GitHubReadOnlyTool } from '../core/tool/GitHubReadOnlyTool.js';
+import { GitHubControlledWriteTool } from '../core/tool/GitHubControlledWriteTool.js';
 import { ProjectRegistry } from '../core/project/index.js';
 import type { ProjectDescriptor } from '../core/project/index.js';
 
 export const SEBASTIAN_GITHUB_TOKEN_ENV_VAR = 'SEBASTIAN_GITHUB_TOKEN';
 /** JSON array of closed, read-only project descriptors for multi-project deployments. */
 export const SEBASTIAN_GITHUB_PROJECTS_ENV_VAR = 'SEBASTIAN_GITHUB_PROJECTS';
+export const SEBASTIAN_GITHUB_WRITE_ENABLED_ENV_VAR = 'SEBASTIAN_GITHUB_WRITE_ENABLED';
 
 /**
  * Simple, flat env vars describing exactly one authorized GitHub project -
@@ -35,7 +37,7 @@ function parseAliases(raw: string | undefined): readonly string[] {
   return raw.split(',').map((alias) => alias.trim()).filter((alias) => alias !== '');
 }
 
-function parseMultiProjectConfiguration(raw: string | undefined): readonly ProjectDescriptor[] | undefined {
+function parseMultiProjectConfiguration(raw: string | undefined, writeEnabled: boolean): readonly ProjectDescriptor[] | undefined {
   if (!isNonEmptyString(raw)) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -43,26 +45,33 @@ function parseMultiProjectConfiguration(raw: string | undefined): readonly Proje
       ? parsed
       : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { projects?: unknown }).projects)
         ? (parsed as { projects: unknown[] }).projects
-        : undefined;
+        : parsed !== null && typeof parsed === 'object'
+          ? Object.entries(parsed as Record<string, unknown>).map(([id, entry]) => ({ id, ...(entry !== null && typeof entry === 'object' && !Array.isArray(entry) ? entry : {}) }))
+          : undefined;
     if (entries === undefined || entries.length === 0) return undefined;
     return entries.map((entry): ProjectDescriptor => {
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('invalid entry');
       const value = entry as Record<string, unknown>;
       const remote = value.remoteRepository;
-      if (remote === null || typeof remote !== 'object' || Array.isArray(remote)) throw new Error('invalid repository');
-      const repository = remote as Record<string, unknown>;
-      if (typeof value.id !== 'string' || typeof value.displayName !== 'string' ||
+      const repository = remote !== null && typeof remote === 'object' && !Array.isArray(remote)
+        ? remote as Record<string, unknown>
+        : value;
+      const id = typeof value.id === 'string' ? value.id : typeof value.projectId === 'string' ? value.projectId : undefined;
+      const displayName = typeof value.displayName === 'string' ? value.displayName : typeof value.name === 'string' ? value.name : undefined;
+      const repositoryName = typeof repository.repository === 'string' ? repository.repository : typeof repository.repo === 'string' ? repository.repo : undefined;
+      const defaultBranch = typeof repository.defaultBranch === 'string' ? repository.defaultBranch : typeof repository.branch === 'string' ? repository.branch : undefined;
+      if (typeof id !== 'string' || typeof displayName !== 'string' ||
         !Array.isArray(value.aliases) || value.aliases.some((alias) => typeof alias !== 'string') ||
-        typeof repository.owner !== 'string' || typeof repository.repository !== 'string' || typeof repository.defaultBranch !== 'string') {
+        typeof repository.owner !== 'string' || typeof repositoryName !== 'string' || typeof defaultBranch !== 'string') {
         throw new Error('invalid project shape');
       }
       return {
-        id: value.id,
-        displayName: value.displayName,
+        id,
+        displayName,
         aliases: value.aliases as string[],
         resourceKind: 'github-repository',
-        remoteRepository: { owner: repository.owner, repository: repository.repository, defaultBranch: repository.defaultBranch },
-        permissions: { access: 'read-only' },
+        remoteRepository: { owner: repository.owner, repository: repositoryName, defaultBranch },
+        permissions: { access: writeEnabled ? 'controlled-write' : 'read-only' },
       };
     });
   } catch {
@@ -80,7 +89,8 @@ function parseMultiProjectConfiguration(raw: string | undefined): readonly Proje
  * configuration.
  */
 export function createGitHubProjectRegistry(env: NodeJS.ProcessEnv = process.env, logger?: Logger): ProjectRegistry {
-  const multiProjectEntries = parseMultiProjectConfiguration(env[SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]);
+  const writeEnabled = env[SEBASTIAN_GITHUB_WRITE_ENABLED_ENV_VAR] === 'true';
+  const multiProjectEntries = parseMultiProjectConfiguration(env[SEBASTIAN_GITHUB_PROJECTS_ENV_VAR], writeEnabled);
   if (multiProjectEntries !== undefined) {
     try {
       const registry = new ProjectRegistry({ readOnly: true, entries: multiProjectEntries });
@@ -125,7 +135,7 @@ export function createGitHubProjectRegistry(env: NodeJS.ProcessEnv = process.env
           repository: repository.trim(),
           defaultBranch: defaultBranch.trim(),
         },
-        permissions: { access: 'read-only' },
+        permissions: { access: writeEnabled ? 'controlled-write' : 'read-only' },
       },
     ],
   });
@@ -153,4 +163,23 @@ export function createGitHubReadOnlyTool(
 
   logger?.info('GitHub read-only tool resolved.', { outcome: 'configured' });
   return new GitHubReadOnlyTool({ token, registry, ...(logger === undefined ? {} : { logger }) });
+}
+
+/** Write capability is absent unless the operator explicitly enables it; the same token is never logged. */
+export function createGitHubControlledWriteTool(
+  env: NodeJS.ProcessEnv = process.env,
+  registry: ProjectRegistry,
+  logger?: Logger,
+): GitHubControlledWriteTool | undefined {
+  if (env[SEBASTIAN_GITHUB_WRITE_ENABLED_ENV_VAR] !== 'true') {
+    logger?.info('GitHub controlled-write tool resolved.', { outcome: 'notEnabled' });
+    return undefined;
+  }
+  const token = env[SEBASTIAN_GITHUB_TOKEN_ENV_VAR];
+  if (!isNonEmptyString(token) || !registry.listDescriptors().some((project) => project.permissions.access === 'controlled-write')) {
+    logger?.warn('GitHub controlled-write tool unavailable.', { outcome: 'notConfigured' });
+    return undefined;
+  }
+  logger?.info('GitHub controlled-write tool resolved.', { outcome: 'configured' });
+  return new GitHubControlledWriteTool(token, registry);
 }
