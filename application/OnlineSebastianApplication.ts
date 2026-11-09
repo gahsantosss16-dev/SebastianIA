@@ -162,6 +162,31 @@ function projectReferencePattern(project: ProjectDescriptor): string {
   return `(?:${references.join('|')})`;
 }
 
+/**
+ * Lookahead that is satisfied only by a real mention of the project. A
+ * leading vocative addressing the assistant itself ("Sebastian, ...") is
+ * not a project reference, even when a project alias shares that name -
+ * otherwise "Sebastian, no projeto LUMARKIS ..." silently targets the
+ * SebastianIA repository.
+ */
+function projectMentionLookahead(project: ProjectDescriptor): string {
+  const reference = projectReferencePattern(project);
+  return `(?=.*?(?:(?<!^\\s*)${reference}|${reference}(?!\\s*[,:!])))`;
+}
+
+/**
+ * Extracts the element/text the user explicitly asked to locate inside a
+ * named file ("localize o botão Salvar cliente", "encontre \"X\""), so the
+ * file read can return the real matching lines. Undefined when none is named.
+ */
+export function extractExplicitLocateTarget(objective: string): string | undefined {
+  const quoted = /(?:localiz\w*|encontr\w*|procur\w*|busqu\w*|busc\w*|ach\w*)[^"“”]{0,40}["“]([^"“”]{2,80})["”]/iu.exec(objective);
+  if (quoted?.[1] !== undefined) return quoted[1].trim();
+  const named = /(?:localiz\w*|encontr\w*|procur\w*|busqu\w*|busc\w*|ach\w*)\s+(?:(?:o|a|os|as)\s+)?(?:(?:botão|botao|botões|campo|função|funcao|texto|elemento|link|seção|secao|título|titulo|rótulo|rotulo)\s+)?(?:(?:de|do|da)\s+)?([^,.;:!?\n]{2,80}?)(?=\s*(?:[,.;:!?\n]|\s+e\s+(?:informe|diga|me|mostre|proponha))|$)/iu.exec(objective);
+  const target = named?.[1]?.trim();
+  return target === undefined || target === '' ? undefined : target;
+}
+
 /** Extracts only a bounded relative file path explicitly supplied by the user. */
 export function extractExplicitGitHubPath(objective: string): string | undefined {
   const match = /(?:\barquivo\s+)?([A-Za-z0-9][A-Za-z0-9._/-]*\.[A-Za-z0-9]{1,10})\b/u.exec(objective);
@@ -204,10 +229,10 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
     },
   };
   const namedRoutes = projects.length > 1 ? projects.flatMap((project) => {
-    const reference = projectReferencePattern(project);
-    const namedProjectPattern = new RegExp(`(?=.*${reference})(?=.*\\b(?:projet\\w*|repo(?:sitório)?|veja|ver|acess\\w*|github)\\b)(?!.*\\bcommits?\\b)`, 'iu');
-    const namedCommitPattern = new RegExp(`(?=.*${reference})(?=.*\\bcommits?\\b)`, 'iu');
-    const namedFilePattern = new RegExp(`(?=.*${reference})(?=.*\\b(?:arquivo\\s+)?[A-Za-z0-9][A-Za-z0-9._/-]*\\.[A-Za-z0-9]{1,10}\\b)`, 'iu');
+    const mention = projectMentionLookahead(project);
+    const namedProjectPattern = new RegExp(`${mention}(?=.*\\b(?:projet\\w*|repo(?:sitório)?|veja|ver|acess\\w*|github)\\b)(?!.*\\bcommits?\\b)`, 'iu');
+    const namedCommitPattern = new RegExp(`${mention}(?=.*\\bcommits?\\b)`, 'iu');
+    const namedFilePattern = new RegExp(`${mention}(?=.*\\b(?:arquivo\\s+)?[A-Za-z0-9][A-Za-z0-9._/-]*\\.[A-Za-z0-9]{1,10}\\b)`, 'iu');
     return [
       {
         toolId: GITHUB_READ_FILE_TOOL_ID,
@@ -215,10 +240,22 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
         description: 'Lê um arquivo explicitamente nomeado no projeto GitHub autorizado.',
         requiresAuthorization: false,
         requiredStringArguments: ['projectId', 'path'],
+        optionalStringArguments: ['query'],
         deterministicIntent: {
           pattern: namedFilePattern,
-          buildArguments: (objective: string) => ({ projectId: project.id, path: extractExplicitGitHubPath(objective) ?? '' }),
-          answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
+          buildArguments: (objective: string) => {
+            const query = extractExplicitLocateTarget(objective);
+            const path = extractExplicitGitHubPath(objective) ?? '';
+            return query === undefined ? { projectId: project.id, path } : { projectId: project.id, path, query };
+          },
+          // With a located target, the evidence-only fallback is the matched
+          // excerpt itself, never a dump of the file's first characters.
+          answerFromSuccessfulObservation: (observation: { readonly summary: string }) =>
+            observation.summary.startsWith('Trechos de ') || / não foi encontrado em /u.test(observation.summary.split('\n')[0] ?? '')
+              ? observation.summary.split('\n\nConteúdo de ')[0]!
+              : observation.summary,
+          answerFromRejectedObservation: (observation: { readonly summary: string }, objective: string) =>
+            `Não consegui ler "${extractExplicitGitHubPath(objective) ?? 'o arquivo indicado'}" no projeto ${project.displayName} (repositório autorizado ${project.remoteRepository.owner}/${project.remoteRepository.repository}, branch ${project.remoteRepository.defaultBranch}): ${observation.summary}`,
         },
       },
       {

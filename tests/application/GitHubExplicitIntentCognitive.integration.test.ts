@@ -260,7 +260,7 @@ test('exact LUMARKIS file request reads js/app.js before project metadata or syn
   ]);
   const first = routes.find((route) => route.deterministicIntent?.pattern.test(request));
   assert.equal(first?.toolId, 'github.readFile');
-  assert.deepEqual(first?.deterministicIntent?.buildArguments(request), { projectId: 'lumarkis-financeiro', path: 'js/app.js' });
+  assert.deepEqual(first?.deterministicIntent?.buildArguments(request), { projectId: 'lumarkis-financeiro', path: 'js/app.js', query: 'Salvar cliente' });
   assert.equal(extractExplicitGitHubPath(request), 'js/app.js');
 });
 

@@ -29,6 +29,8 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
    * integer) rather than a general "any extra argument goes" escape hatch.
    */
   readonly optionalNumberArguments?: readonly string[];
+  /** Optional non-empty string arguments a route may supply (e.g. a text to locate). */
+  readonly optionalStringArguments?: readonly string[];
   readonly validationToolId?: string;
   readonly risk?: string;
   /**
@@ -58,6 +60,13 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
      * synthesis is absent or fails; rejected/failed Tool outcomes never use it.
      */
     readonly answerFromSuccessfulObservation?: (observation: CognitiveObservationRecord) => string;
+    /**
+     * Opt-in honest answer for a REJECTED deterministic observation (e.g. a
+     * file not found in the explicitly named project). When present, the
+     * rejection is reported as-is instead of handing the turn to `decide`,
+     * which could otherwise paraphrase the user's own instructions.
+     */
+    readonly answerFromRejectedObservation?: (observation: CognitiveObservationRecord, objective: string) => string;
     /**
      * Opt-in, per-route escape hatch from the otherwise-unconditional
      * `synthesize()` call this formatter's answer would normally go through.
@@ -426,6 +435,9 @@ export class CognitiveOperationalOrchestrator {
       toolOutcome,
     });
     const successfulObservation = observations[observations.length - 1]!;
+    if (toolOutcome === 'rejected' && route.deterministicIntent.answerFromRejectedObservation !== undefined) {
+      return { toolCalls: 1, answer: route.deterministicIntent.answerFromRejectedObservation(successfulObservation, objective) };
+    }
     const fallbackAnswer = toolOutcome === 'ok'
       ? route.deterministicIntent.answerFromSuccessfulObservation?.(successfulObservation)
       : undefined;
@@ -588,9 +600,11 @@ export class CognitiveOperationalOrchestrator {
 
   private argumentsMatchPolicy(policy: OperationalToolPolicyEntry, args: Readonly<Record<string, unknown>>): boolean {
     const optionalNumberArguments = policy.optionalNumberArguments ?? [];
+    const optionalStringArguments = policy.optionalStringArguments ?? [];
     return policy.requiredStringArguments.every((name) => typeof args[name] === 'string') &&
       Object.keys(args).every((name) =>
         policy.requiredStringArguments.includes(name) ||
+        (optionalStringArguments.includes(name) && typeof args[name] === 'string' && (args[name] as string).trim() !== '') ||
         (optionalNumberArguments.includes(name) && typeof args[name] === 'number' && Number.isInteger(args[name])));
   }
 

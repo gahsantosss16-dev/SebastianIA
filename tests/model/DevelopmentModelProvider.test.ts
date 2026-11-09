@@ -343,6 +343,18 @@ test('interpret recognizes the "leia o arquivo" marker as a useTool readFile dec
   });
 });
 
+test('"leia o arquivo ... no GitHub" is never claimed as a local filesystem read', async () => {
+  const provider = new DevelopmentModelProvider();
+
+  const decision = await provider.interpret({
+    text: 'Sebastian, no projeto LUMARKIS Gestão Financeira, leia o arquivo js/app.js no GitHub. Localize o botão Salvar cliente.',
+    rememberedFacts: [],
+    requestedAt: '2026-11-09T23:50:00.000Z',
+  });
+
+  assert.notEqual(decision.intent === 'useTool' ? decision.toolId : undefined, 'fs.readFile');
+});
+
 test('interpret falls back to a generic response when "leia o arquivo" has no path', async () => {
   const provider = new DevelopmentModelProvider();
 

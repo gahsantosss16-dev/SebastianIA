@@ -313,3 +313,30 @@ test('the GitHub token never appears in any tool output, across success, rejecti
     assert.equal(JSON.stringify(output).includes(SECRET_TOKEN), false);
   }
 });
+
+test('github.readFile with query searches the full file (beyond the preview cap) and lists matches first', async () => {
+  const text = `${'x\n'.repeat(40_000)}<button class="btn primary">Salvar cliente</button>\n`;
+  const tool = new GitHubReadOnlyTool({
+    token: SECRET_TOKEN,
+    registry: registry(),
+    fetchImpl: async () => jsonResponse(200, { type: 'file', encoding: 'base64', content: Buffer.from(text, 'utf8').toString('base64'), path: 'js/app.js' }),
+  });
+
+  const output = await outcomeOf(await tool.invoke(invocation(GITHUB_READ_FILE_TOOL_ID, { projectId: 'neuro-hub-pro', path: 'js/app.js', query: 'salvar CLIENTE' })));
+
+  assert.equal(output.outcome, 'ok');
+  assert.equal(output.truncated, true);
+  assert.equal(output.matchCount, 1);
+  assert.match(String(output.message), /^Trechos de "js\/app\.js" que contêm "salvar CLIENTE" \(1 ocorrência\(s\), arquivo lido integralmente\):\nlinha 40001: <button class="btn primary">Salvar cliente<\/button>/u);
+});
+
+test('github.readFile rejects a non-string or oversized query without calling the network', async () => {
+  let fetchCalls = 0;
+  const tool = new GitHubReadOnlyTool({ token: SECRET_TOKEN, registry: registry(), fetchImpl: async () => { fetchCalls += 1; throw new Error('must not be called'); } });
+
+  for (const query of [42, '', 'x'.repeat(121)]) {
+    const output = await outcomeOf(await tool.invoke(invocation(GITHUB_READ_FILE_TOOL_ID, { projectId: 'neuro-hub-pro', path: 'a.ts', query })));
+    assert.equal(output.outcome, 'rejected');
+  }
+  assert.equal(fetchCalls, 0);
+});

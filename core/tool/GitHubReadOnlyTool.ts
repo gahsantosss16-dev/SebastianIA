@@ -23,6 +23,9 @@ const MAX_COMMITS = 20;
 const DEFAULT_COMMITS_LIMIT = 10;
 const MAX_PATH_CHARS = 400;
 const MAX_PROJECT_ID_CHARS = 200;
+const MAX_QUERY_CHARS = 120;
+const MAX_QUERY_MATCHES = 5;
+const MAX_EXCERPT_LINE_CHARS = 400;
 const REF_PATTERN = /^[A-Za-z0-9._/-]{1,200}$/;
 const CONTROL_CHARACTER_PATTERN = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}]`);
 
@@ -192,10 +195,14 @@ export class GitHubReadOnlyTool implements SpecializedTool {
   }
 
   private async readFile(payload: Readonly<Record<string, unknown>>): Promise<Record<string, unknown>> {
-    const projectId = this.readProjectId(payload, ['projectId', 'path']);
+    const projectId = this.readProjectId(payload, ['projectId', 'path', 'query']);
     if (projectId === undefined) return this.invalidPayload();
     const path = this.readRequiredPath(payload);
     if (path === undefined) return this.invalidPayload();
+    const query = payload.query;
+    if (query !== undefined && (typeof query !== 'string' || query.trim() === '' || query.length > MAX_QUERY_CHARS || CONTROL_CHARACTER_PATTERN.test(query))) {
+      return this.invalidPayload();
+    }
 
     const project = this.resolveOrReject(projectId);
     if ('rejected' in project) return project.rejected;
@@ -221,6 +228,28 @@ export class GitHubReadOnlyTool implements SpecializedTool {
     }
     const truncated = decoded.length > MAX_FILE_CONTENT_CHARS;
     const content = truncated ? decoded.slice(0, MAX_FILE_CONTENT_CHARS) : decoded;
+    const header = `Conteúdo de "${path}" (projeto "${project.value.id}", branch "${project.value.remoteRepository.defaultBranch}")${truncated ? ', truncado' : ''}`;
+    if (typeof query === 'string') {
+      // Searches the FULL decoded file, never the truncated preview, so a
+      // located element beyond the preview cap is still real evidence; the
+      // excerpts come first so any downstream observation cap keeps them.
+      const matches = findQueryMatches(decoded, query.trim());
+      const excerpt = matches.length === 0
+        ? `O texto "${query.trim()}" não foi encontrado em "${path}" (${decoded.length} caracteres lidos integralmente).`
+        : `Trechos de "${path}" que contêm "${query.trim()}" (${matches.length} ocorrência(s), arquivo lido integralmente):\n${matches.map((match) => `linha ${match.line}: ${match.text}`).join('\n')}`;
+      return {
+        operation: 'readFile',
+        outcome: 'ok',
+        projectId: project.value.id,
+        path,
+        query: query.trim(),
+        matchCount: matches.length,
+        matches,
+        content,
+        truncated,
+        message: `${excerpt}\n\n${header}:\n${content}`,
+      };
+    }
     return {
       operation: 'readFile',
       outcome: 'ok',
@@ -228,7 +257,7 @@ export class GitHubReadOnlyTool implements SpecializedTool {
       path,
       content,
       truncated,
-      message: `Conteúdo de "${path}" (branch "${project.value.remoteRepository.defaultBranch}")${truncated ? ', truncado' : ''}:\n${content}`,
+      message: `${header}:\n${content}`,
     };
   }
 
@@ -487,4 +516,20 @@ function categorizeGitHubStatus(status: number): { readonly reasonCode: string; 
   if (status === 429) return { reasonCode: 'upstreamRateLimited', message: 'Limite de requisições do GitHub atingido; tente novamente mais tarde.' };
   if (status >= 500) return { reasonCode: 'upstreamServerError', message: 'O GitHub está indisponível no momento.' };
   return { reasonCode: 'upstreamClientError', message: `O GitHub rejeitou a requisição (HTTP ${status}).` };
+}
+
+/** Case-insensitive literal matches with 1-based line numbers, each line bounded around the match. */
+function findQueryMatches(content: string, query: string): readonly { readonly line: number; readonly text: string }[] {
+  const needle = query.toLocaleLowerCase('pt-BR');
+  const matches: { line: number; text: string }[] = [];
+  const lines = content.split(/\r?\n/);
+  for (let index = 0; index < lines.length && matches.length < MAX_QUERY_MATCHES; index += 1) {
+    const line = lines[index]!;
+    const position = line.toLocaleLowerCase('pt-BR').indexOf(needle);
+    if (position < 0) continue;
+    const start = Math.max(0, Math.min(position - Math.floor((MAX_EXCERPT_LINE_CHARS - needle.length) / 2), line.length - MAX_EXCERPT_LINE_CHARS));
+    const text = line.slice(start, start + MAX_EXCERPT_LINE_CHARS).trim();
+    matches.push({ line: index + 1, text: `${start > 0 ? '…' : ''}${text}${start + MAX_EXCERPT_LINE_CHARS < line.length ? '…' : ''}` });
+  }
+  return matches;
 }

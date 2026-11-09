@@ -59,6 +59,7 @@ export const MEMORY_WRITE_NOT_UNDERSTOOD_ANSWER =
   'Não registrei nada: não consegui identificar exatamente o que guardar. Diga, por exemplo: "guarde na memória que minha cor favorita é azul".';
 const LIST_DIRECTORY_MARKER = 'arquivos existem';
 const READ_FILE_MARKER = 'leia o arquivo';
+const GITHUB_REFERENCE_PATTERN = /\bgithub\b/i;
 const ADD_TASK_MARKER = 'adiciona uma tarefa';
 const LIST_TASKS_MARKER = 'minhas tarefas';
 const COMPLETE_TASK_PATTERN = /marca\s+(.+?)\s+como feita/i;
@@ -348,6 +349,12 @@ export class DevelopmentModelProvider implements ModelProvider {
   private extractReadFilePath(text: string): string | undefined {
     const markerIndex = text.toLowerCase().indexOf(READ_FILE_MARKER);
     if (markerIndex === -1) {
+      return undefined;
+    }
+    // A file explicitly requested "no GitHub" belongs to a registered remote
+    // project, never to the local workspace: claiming it here would read the
+    // whole remaining sentence as a local path and answer "Não encontrei ...".
+    if (GITHUB_REFERENCE_PATTERN.test(text)) {
       return undefined;
     }
 
