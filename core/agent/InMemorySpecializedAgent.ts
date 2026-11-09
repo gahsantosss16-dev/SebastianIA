@@ -234,7 +234,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     // provider path is absent/unavailable, retain the existing operational
     // planner as a fail-soft recovery instead of surfacing the limited local
     // fallback. A successful conversational answer never pays for `decide`.
-    const effectiveDecision = conversationalDecision === decision && operationalDecision === decision
+    // Only the generic "not understood" local answer may be replaced this
+    // way. A deterministic decision - above all `remember` (a permanent
+    // memory write), task writes and deterministic memory answers - must
+    // never be overridden by `decide`, or the write is silently dropped and
+    // the model's free text ("não tenho memória persistente") is shown instead.
+    const replaceableByOperationalFallback = decision.intent === 'respond' && decision.cognitiveFallbackEligible === true;
+    const effectiveDecision = replaceableByOperationalFallback && conversationalDecision === decision && operationalDecision === decision
       ? await this.applyCognitiveOperationalDecision(
           decision, text, input.requestedAt, input.executionId, input.responsibilityId, budgetedCognitiveRecentExchanges, abortSignal, true,
           immediatePreviousExchange, cognitiveRelevantFacts,
