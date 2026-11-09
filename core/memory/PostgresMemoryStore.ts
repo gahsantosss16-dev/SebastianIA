@@ -63,6 +63,35 @@ export class PostgresMemoryStore {
     );
   }
 
+  /** Reads one record by its natural key; undefined when absent. */
+  public async readRecord(namespace: string, key: string): Promise<Readonly<Record<string, unknown>> | undefined> {
+    this.assertAvailable();
+    this.assertPart(namespace, 'namespace');
+    this.assertPart(key, 'key');
+    const result = await this.database.query<{ value_json: string }>(
+      'select value_json from sebastian.memory_records where namespace = $1 and record_key = $2', [namespace, key],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : this.parseValue(row.value_json);
+  }
+
+  /** Never overwrites: inserts only when the natural key is absent. Returns true when a row was inserted. */
+  public async insertRecordIfAbsent(namespace: string, key: string, value: Readonly<Record<string, unknown>>): Promise<boolean> {
+    this.assertAvailable();
+    this.assertPart(namespace, 'namespace');
+    this.assertPart(key, 'key');
+    let serialized: string;
+    try { serialized = JSON.stringify(structuredClone(value)); } catch (cause) { throw new TypeError('Memory record must be JSON-serializable.', { cause }); }
+    const result = await this.database.query<{ record_key: string }>(
+      `insert into sebastian.memory_records (namespace, record_key, value_json)
+       values ($1, $2, $3)
+       on conflict (namespace, record_key) do nothing
+       returning record_key`,
+      [namespace, key, serialized],
+    );
+    return result.rows.length === 1;
+  }
+
   /** Readiness checks schema and runtime privileges without reading stored content. */
   public async ready(): Promise<void> {
     this.assertAvailable();
