@@ -847,7 +847,7 @@ test('interpret reports no prior context for a bare continuation reference with 
   });
 });
 
-test('interpret degrades gracefully to the most recent fact for a vague question with no keyword overlap, preserving prior behavior', async () => {
+test('general owner recall lists stored facts even without keyword overlap', async () => {
   const provider = new DevelopmentModelProvider();
 
   const decision = await provider.interpret({
@@ -861,7 +861,7 @@ test('interpret degrades gracefully to the most recent fact for a vague question
 
   assert.deepEqual(decision, {
     intent: 'respond',
-    answer: 'Sobre isso, você registrou: "gosto de café".',
+    answer: 'Você me pediu para lembrar:\n- gosto de café\n- prefiro reuniões de manhã',
     recordable: true,
   });
 });
@@ -1102,4 +1102,42 @@ test('interpret never performs network I/O and resolves purely locally', async (
   });
 
   assert.ok(Date.now() - start < 50, 'interpretation should resolve near-instantly with no I/O');
+});
+
+
+test('general owner recall lists all unique facts, newest first, without exchange contamination', async () => {
+  const provider = new DevelopmentModelProvider();
+  for (const text of ['O que você lembra sobre mim?', 'O que voce sabe sobre mim?', 'Sebastian, o que você lembra sobre mim?']) {
+    const decision = await provider.interpret({
+      text,
+      rememberedFacts: [fact('prefiro manhãs', '1'), fact('gosto de café', '2'), fact(' PREFIRO   MANHÃS ', '3')],
+      recentExchanges: [exchange('e', text, 'resposta antiga sobre mim', '2026-11-09T00:00:00.000Z')],
+      requestedAt: '2026-11-09T00:00:01.000Z',
+    });
+    assert.equal(decision.intent, 'respond');
+    if (decision.intent !== 'respond') throw new Error('expected response');
+    assert.equal(decision.answer, 'Você me pediu para lembrar:\n- PREFIRO   MANHÃS\n- gosto de café');
+    assert.equal(decision.cognitiveFallbackEligible, undefined);
+  }
+});
+
+test('general owner recall bounds a large memory and reports omitted or abbreviated facts', async () => {
+  const provider = new DevelopmentModelProvider();
+  for (const facts of [Array.from({ length: 100 }, (_, i) => fact(`fato ${i}: ${'x'.repeat(500)}`, String(i))), [fact('x'.repeat(20_000))]]) {
+    const decision = await provider.interpret({ text: 'O que você lembra sobre mim?', rememberedFacts: facts, requestedAt: '2026-11-09T00:00:01.000Z' });
+    assert.equal(decision.intent, 'respond');
+    if (decision.intent !== 'respond') throw new Error('expected response');
+    assert.ok(decision.answer.length <= 12_000);
+    assert.match(decision.answer, /Limite de contexto: mostrando/);
+    assert.match(decision.answer, /última abreviada/);
+  }
+});
+
+test('general owner recall with empty memory does not infer facts from conversation history', async () => {
+  const decision = await new DevelopmentModelProvider().interpret({
+    text: 'O que você lembra sobre mim?', rememberedFacts: [],
+    recentExchanges: [exchange('e', 'meu nome é Fulano', 'nome não registrado como fato', '2026-11-09T00:00:00.000Z')],
+    requestedAt: '2026-11-09T00:00:01.000Z',
+  });
+  assert.deepEqual(decision, { intent: 'respond', answer: 'Ainda não tenho nenhuma memória registrada sobre isso.', recordable: false });
 });

@@ -1,4 +1,4 @@
-import type { PendingTaskRecord } from '../memory/index.js';
+import type { PendingTaskRecord, RememberedFactRecord } from '../memory/index.js';
 import type {
   ModelInterpretationDecision,
   ModelInterpretationRequest,
@@ -65,6 +65,9 @@ const MAX_TASK_CONTENT_LENGTH = 500;
 const MAX_LISTED_PENDING_TASKS = 500;
 const NO_MATCH_ANSWER = 'Ainda não sei responder a isso.';
 const NO_MEMORY_ANSWER = 'Ainda não tenho nenhuma memória registrada sobre isso.';
+const MAX_GENERAL_MEMORY_ANSWER_CHARS = 12_000;
+/** Anchored so a specific subject or an additional question keeps its existing routing. */
+const GENERAL_OWNER_MEMORY_QUESTION = /^(?:sebastian\s*[,:-]?\s*)?o\s+que\s+voc[eê]\s+(?:lembra|sabe)\s+sobre\s+mim\s*[?!.]*$/iu;
 const NO_PENDING_TASKS_ANSWER = 'Você não tem nenhuma tarefa pendente.';
 const EXPLICIT_MEMORY_QUESTION_MARKERS: readonly string[] = [
   'o que você sabe sobre',
@@ -256,6 +259,10 @@ export class DevelopmentModelProvider implements ModelProvider {
     // ("O que você sabe sobre mim?") can also satisfy once there is recent
     // conversation history. No longer gated on composed.intent === 'question'
     // for the same reason - the marker match itself is already the real gate.
+    if (GENERAL_OWNER_MEMORY_QUESTION.test(request.text.trim().normalize('NFC'))) {
+      return { intent: 'respond', ...this.composeGeneralMemoryAnswer(request.rememberedFacts) };
+    }
+
     if (this.isExplicitMemoryQuestion(request.text)) {
       return { intent: 'respond', ...this.composeMemoryAnswer(composed) };
     }
@@ -661,13 +668,46 @@ export class DevelopmentModelProvider implements ModelProvider {
     return withoutQuotes.replace(/[.?!]+$/, '').trim();
   }
 
+  private composeGeneralMemoryAnswer(facts: readonly RememberedFactRecord[]): RecordableAnswer {
+    const seen = new Set<string>();
+    const unique = [...facts].reverse()
+      .sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))
+      .filter((fact) => {
+        const key = fact.content.normalize('NFC').trim().toLowerCase().replace(/\s+/gu, ' ');
+        if (key === '' || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    if (unique.length === 0) return { answer: NO_MEMORY_ANSWER, recordable: false };
+
+    let answer = 'Você me pediu para lembrar:\n';
+    let listed = 0;
+    let partial = false;
+    // Reserve space for the explicit limit notice, including its counts.
+    const contentLimit = MAX_GENERAL_MEMORY_ANSWER_CHARS - 160;
+    for (const fact of unique) {
+      const line = `- ${fact.content.trim()}\n`;
+      const remaining = contentLimit - answer.length;
+      if (remaining < 4) break;
+      listed += 1;
+      if (line.length > remaining) {
+        answer += `${line.slice(0, remaining - 2)}…\n`;
+        partial = true;
+        break;
+      }
+      answer += line;
+    }
+    if (partial || listed < unique.length) {
+      answer += `(Limite de contexto: mostrando ${listed} de ${unique.length} memórias${partial ? ', com a última abreviada' : ''}.)`;
+    }
+    return { answer: answer.trimEnd(), recordable: true };
+  }
+
   /**
    * Answers a question using genuinely relevant memory (keyword-overlap
    * selection from ConversationContextComposer) when any was found -
-   * otherwise degrades gracefully to the most recent remembered fact, which
-   * is what this method did unconditionally before this block. That fallback
-   * keeps a vague, keyword-less question ("O que você sabe sobre mim?")
-   * still answerable instead of refusing outright.
+   * otherwise keeps the existing most-recent-fact fallback for other explicit
+   * memory questions. General owner recall is handled separately above.
    */
   private composeMemoryAnswer(composed: ComposedConversationContext): RecordableAnswer {
     const [top] = composed.relevantMemories;

@@ -63,6 +63,41 @@ const stores: readonly [string, () => { store: AsyncMemoryStore; dataDir: string
 ];
 
 for (const [driver, create] of stores) {
+  test(`[${driver}] general owner recall recovers multiple unique facts across conversations and application restarts`, async () => {
+    const { store, dataDir } = create();
+    const first = createOnlineSebastianApplication(logger, recordingProvider().provider, dataDir, {}, undefined, undefined, store);
+    const contents = ['minha cor favorita é verde-água', 'prefiro reuniões de manhã', 'meu animal favorito é jabuti', ...Array.from({ length: 5 }, (_, i) => `meu item pessoal ${i} é ${i + 20}`)];
+    for (const content of [...contents, contents[0]!]) {
+      await first.executeCommand({ ...command(`lembra que ${content}`), conversation: { conversationId: 'owner-a' }, session: { conversationId: 'owner-a', sessionId: 'session-a' } });
+    }
+    // Reopen the real file, not just the application, for the file driver.
+    const reopened = driver === 'file'
+      ? new AsyncFileMemoryStore(new FileMemoryStore(join(dataDir, 'memory.json')))
+      : store;
+    const { provider, respondRequests, decideRequests } = recordingProvider();
+    const restarted = createOnlineSebastianApplication(logger, provider, dataDir, {}, undefined, undefined, reopened);
+    for (let repeat = 0; repeat < 2; repeat += 1) {
+      const answer = await restarted.executeCommand({ ...command('O que você lembra sobre mim?'), conversation: { conversationId: 'owner-b' }, session: { conversationId: 'owner-b', sessionId: 'session-b' } });
+      const message = String(answer.output.message);
+      for (const content of contents) assert.equal(message.split(content).length - 1, 1, content);
+      assert.equal(message.split('\n- ').length - 1, contents.length);
+    }
+    assert.equal(respondRequests.length, 0, 'general recall stays deterministic');
+    assert.ok(decideRequests.every((request) => request.relevantMemory.length <= 9));
+    await restarted.executeCommand(command('qual é minha cor favorita?'));
+    assert.deepEqual(respondRequests.at(-1)?.relevantFacts?.map((fact) => fact.content), [contents[0]]);
+  });
+
+  test(`[${driver}] general owner recall on empty memory is explicit and local`, async () => {
+    const { store, dataDir } = create();
+    const { provider, respondRequests, decideRequests } = recordingProvider();
+    const app = createOnlineSebastianApplication(logger, provider, dataDir, {}, undefined, undefined, store);
+    const result = await app.executeCommand(command('O que você lembra sobre mim?'));
+    assert.equal(result.output.message, 'Ainda não tenho nenhuma memória registrada sobre isso.');
+    assert.equal(respondRequests.length, 0);
+    assert.ok(decideRequests.every((request) => request.relevantMemory.length <= 9));
+  });
+
   test(`[${driver}] a fact saved with "lembra que" reaches the cognitive provider after a restart`, async () => {
     const { store, dataDir } = create();
     const first = createOnlineSebastianApplication(logger, recordingProvider().provider, dataDir, {}, undefined, undefined, store);
