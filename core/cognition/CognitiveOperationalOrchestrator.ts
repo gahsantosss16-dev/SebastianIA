@@ -91,6 +91,17 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
    * from a curated per-topic keyword/phrase list.
    */
   readonly broadApplicabilityProbe?: (objective: string) => boolean | Promise<boolean>;
+  /**
+   * Opt-in domain vocabulary for the term-overlap fallback (pre-model gate,
+   * recovery and unique-capability routing). When present, ONLY these terms
+   * are compared with the objective - never the free-text `description`,
+   * whose qualifiers ("atual", "texto", "projeto", "programação") are
+   * ordinary words that sent plain conversation into the slow `decide` loop.
+   * Matching is accent- and case-insensitive with the same light plural
+   * normalization. Omitted: the original id/description overlap is kept.
+   * The `description` itself is unchanged and still what `decide` sees.
+   */
+  readonly applicabilityTerms?: readonly string[];
 }
 
 export type CognitiveOperationalResult =
@@ -136,10 +147,27 @@ export class CognitiveOperationalOrchestrator {
       entry.deterministicIntent?.immediateContext?.objectivePattern.test(objective) === true &&
       entry.deterministicIntent.immediateContext.contextPattern.test(immediateContext) === true) return true;
     if ((await entry.broadApplicabilityProbe?.(objective)) === true) return true;
+    return this.termOverlap(entry, objective);
+  }
+
+  /** Term-overlap check: the entry's declared vocabulary when present, else its id/description. */
+  private termOverlap(entry: OperationalToolPolicyEntry, objective: string): boolean {
+    if (entry.applicabilityTerms !== undefined) {
+      const objectiveTokens = this.vocabularyTokens(objective);
+      return entry.applicabilityTerms.some((term) => {
+        const termTokens = [...this.vocabularyTokens(term)];
+        return termTokens.length > 0 && termTokens.every((token) => objectiveTokens.has(token));
+      });
+    }
     const objectiveTerms = this.catalogTerms(objective);
     if (objectiveTerms.size === 0) return false;
     const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
     return [...objectiveTerms].some((term) => capabilityTerms.has(term));
+  }
+
+  private vocabularyTokens(text: string): ReadonlySet<string> {
+    const tokens = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^\p{L}\p{N}]+/u).filter((term) => term !== '');
+    return new Set(tokens.map((term) => (term.length > 4 && term.endsWith('s') ? term.slice(0, -1) : term)));
   }
 
   /**
@@ -428,15 +456,7 @@ export class CognitiveOperationalOrchestrator {
    * unambiguous - anything murkier still goes through `decide`.
    */
   private findUniqueCapabilityMatchRoute(objective: string): OperationalToolPolicyEntry | undefined {
-    const objectiveTerms = this.catalogTerms(objective);
-    if (objectiveTerms.size === 0) {
-      return undefined;
-    }
-    const candidates = this.catalog.filter((entry) => {
-      if (!entry.deterministicIntent) return false;
-      const capabilityTerms = this.catalogTerms(`${entry.toolId} ${entry.description}`);
-      return [...objectiveTerms].some((term) => capabilityTerms.has(term));
-    });
+    const candidates = this.catalog.filter((entry) => entry.deterministicIntent !== undefined && this.termOverlap(entry, objective));
     return candidates.length === 1 ? candidates[0] : undefined;
   }
 

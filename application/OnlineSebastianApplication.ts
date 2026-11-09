@@ -32,13 +32,13 @@ import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchest
  * outside this profile.
  */
 const LOCAL_OPERATIONAL_TOOLS: readonly OperationalToolPolicyEntry[] = [
-  { toolId: GIT_STATUS_TOOL_ID, description: 'Consulta branch e alterações pendentes do repositório atual.', requiresAuthorization: false, requiredStringArguments: [] },
-  { toolId: GIT_DIFF_TOOL_ID, description: 'Lê o diff Git atual, limitado e sem modificar o repositório.', requiresAuthorization: false, requiredStringArguments: [] },
-  { toolId: PROJECT_SEARCH_TEXT_TOOL_ID, description: 'Busca texto em arquivos permitidos do projeto; exige query.', requiresAuthorization: false, requiredStringArguments: ['query'] },
-  { toolId: FILESYSTEM_READ_FILE_TOOL_ID, description: 'Lê arquivo textual não sensível dentro da raiz permitida; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['path'] },
-  { toolId: VALIDATION_TYPECHECK_TOOL_ID, description: 'Executa somente o typecheck previamente cadastrado.', requiresAuthorization: false, requiredStringArguments: [] },
-  { toolId: VALIDATION_BUILD_TOOL_ID, description: 'Executa somente o build previamente cadastrado.', requiresAuthorization: false, requiredStringArguments: [] },
-  { toolId: VALIDATION_TEST_TOOL_ID, description: 'Executa somente os testes previamente cadastrados, com timeout rígido.', requiresAuthorization: false, requiredStringArguments: [] },
+  { toolId: GIT_STATUS_TOOL_ID, description: 'Consulta branch e alterações pendentes do repositório atual.', requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['git', 'status', 'branch', 'repositório', 'repo', 'alterações pendentes', 'working tree', 'commit'] },
+  { toolId: GIT_DIFF_TOOL_ID, description: 'Lê o diff Git atual, limitado e sem modificar o repositório.', requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['git', 'diff', 'repositório', 'repo', 'alterações no código', 'mudanças no código'] },
+  { toolId: PROJECT_SEARCH_TEXT_TOOL_ID, description: 'Busca texto em arquivos permitidos do projeto; exige query.', requiresAuthorization: false, requiredStringArguments: ['query'], applicabilityTerms: ['código', 'codebase', 'grep', 'arquivos do projeto', 'código do projeto', 'repositório', 'repo'] },
+  { toolId: FILESYSTEM_READ_FILE_TOOL_ID, description: 'Lê arquivo textual não sensível dentro da raiz permitida; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['path'], applicabilityTerms: ['arquivo', 'readme', 'json', 'ts', 'md', 'código'] },
+  { toolId: VALIDATION_TYPECHECK_TOOL_ID, description: 'Executa somente o typecheck previamente cadastrado.', requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['typecheck', 'tsc', 'tipagem'] },
+  { toolId: VALIDATION_BUILD_TOOL_ID, description: 'Executa somente o build previamente cadastrado.', requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['build', 'compilação', 'compilar'] },
+  { toolId: VALIDATION_TEST_TOOL_ID, description: 'Executa somente os testes previamente cadastrados, com timeout rígido.', requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['testes', 'teste', 'test', 'suíte'] },
 ];
 
 /**
@@ -63,6 +63,8 @@ function knowledgeOperationalTools(knowledgeTool: KnowledgeSearchTool): readonly
       requiresAuthorization: false,
       requiredStringArguments: ['query'],
       broadApplicabilityProbe: async (objective: string) => (await knowledgeTool.hasRelevantMatch(objective)),
+      // Relevance comes from the real indexed corpus (probe above) or explicit references to documentation.
+      applicabilityTerms: ['documentação', 'norma', 'normas', 'referência técnica', 'biblioteca de conhecimento'],
     },
   ];
 }
@@ -142,7 +144,9 @@ export function extractRequestedQuantity(objective: string, countedNoun: RegExp)
  * consulted, so a model's first `concludeCompleted` can never claim missing
  * GitHub access without that Tool having actually been tried first.
  */
-function githubOperationalTools(defaultProjectId: string | undefined): readonly OperationalToolPolicyEntry[] {
+function githubOperationalTools(defaultProjectId: string | undefined, projectTerms: readonly string[] = []): readonly OperationalToolPolicyEntry[] {
+  // Domain vocabulary plus the real names/aliases of the registered projects.
+  const githubTerms = ['github', ...projectTerms];
   const generalRoute = defaultProjectId === undefined ? {} : {
     deterministicIntent: {
       pattern: GITHUB_GENERAL_INTENT_PATTERN,
@@ -174,11 +178,11 @@ function githubOperationalTools(defaultProjectId: string | undefined): readonly 
     },
   };
   return [
-    { toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...generalRoute },
-    { toolId: GITHUB_LIST_TREE_TOOL_ID, description: 'Lista arquivos e pastas de um diretório do projeto GitHub autorizado; path vazio lista a raiz.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
-    { toolId: GITHUB_READ_FILE_TOOL_ID, description: 'Lê um arquivo do projeto GitHub autorizado; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
-    { toolId: GITHUB_LIST_COMMITS_TOOL_ID, description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], optionalNumberArguments: ['limit'], ...commitRoute },
-    { toolId: GITHUB_COMPARE_BRANCH_TOOL_ID, description: 'Compara a branch principal do projeto GitHub autorizado com outra ref; exige ref.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'ref'] },
+    { toolId: GITHUB_GET_PROJECT_TOOL_ID, applicabilityTerms: [...githubTerms, 'repositório', 'repo'], description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...generalRoute },
+    { toolId: GITHUB_LIST_TREE_TOOL_ID, applicabilityTerms: [...githubTerms, 'pasta', 'pastas', 'diretório', 'estrutura de arquivos'], description: 'Lista arquivos e pastas de um diretório do projeto GitHub autorizado; path vazio lista a raiz.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
+    { toolId: GITHUB_READ_FILE_TOOL_ID, applicabilityTerms: [...githubTerms, 'arquivo', 'readme'], description: 'Lê um arquivo do projeto GitHub autorizado; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
+    { toolId: GITHUB_LIST_COMMITS_TOOL_ID, applicabilityTerms: [...githubTerms, 'commit'], description: 'Lista commits recentes do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], optionalNumberArguments: ['limit'], ...commitRoute },
+    { toolId: GITHUB_COMPARE_BRANCH_TOOL_ID, applicabilityTerms: [...githubTerms, 'branch', 'pull request', 'merge'], description: 'Compara a branch principal do projeto GitHub autorizado com outra ref; exige ref.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'ref'] },
   ];
 }
 
@@ -207,6 +211,7 @@ export function createOnlineSebastianApplication(
   // memory and every local/read-only Tool continue exactly as before.
   let githubTool;
   let defaultGitHubProjectId: string | undefined;
+  let githubProjectTerms: readonly string[] = [];
   try {
     const projectRegistry = projectContext?.registry ?? createGitHubProjectRegistry(env, logger);
     const registeredProjects = projectRegistry.listDescriptors();
@@ -220,6 +225,7 @@ export function createOnlineSebastianApplication(
     // registered - with more than one, guessing which one a bare mention of
     // "GitHub" refers to would be inventing a target, never done here.
     defaultGitHubProjectId = registeredProjects.length === 1 ? registeredProjects[0]!.id : undefined;
+    githubProjectTerms = registeredProjects.flatMap((project) => [project.id, project.displayName, ...project.aliases]);
   } catch {
     logger?.warn('GitHub integration disabled: invalid project registry configuration');
     githubTool = undefined;
@@ -241,7 +247,7 @@ export function createOnlineSebastianApplication(
     ...(cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider }),
     cognitiveOperationalTools: [
       ...LOCAL_OPERATIONAL_TOOLS,
-      ...(githubTool === undefined ? [] : githubOperationalTools(defaultGitHubProjectId)),
+      ...(githubTool === undefined ? [] : githubOperationalTools(defaultGitHubProjectId, githubProjectTerms)),
       ...(knowledgeTool === undefined ? [] : knowledgeOperationalTools(knowledgeTool)),
     ],
     ...(dataDir === undefined ? {} : { dataDir }),
