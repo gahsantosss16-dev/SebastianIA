@@ -32,7 +32,31 @@ import {
  * keeps the parser ergonomic without treating personal statements or memory
  * questions (for example, "você lembra que...") as writes.
  */
-const REMEMBER_COMMAND_PATTERN = /^(?:sebastian\s*[,:-]?\s*)?(?:lembra\s+(?:que|q)\s+|guarde\s+(?:na\s+)?(?:sua\s+)?mem[oó]ria\s+(?:que|q)\s+|guarda\s+(?:na\s+)?(?:sua\s+)?mem[oó]ria\s+(?:(?:que|q)\s+)?|guarda\s+q\s+|memorize\s+(?:que|q)\s+|salve\s+esta\s+informa(?:ç|c)[aã]o\s*(?::\s*|(?:que|q)\s+)|anota\s+a[ií]\s+(?:que|q)\s+)(.+)$/iu;
+const REMEMBER_COMMAND_PATTERN = new RegExp(
+  '^(?:sebastian\\s*[,:-]?\\s*)?(?:' +
+    [
+      'lembra\\s+(?:que|q)\\s+',
+      '(?:lembre|lembre-se|lembra-se)\\s+(?:de\\s+)?(?:que|q)\\s+',
+      'n[aã]o\\s+(?:se\\s+)?(?:esque[cç]a|esquece)\\s+(?:de\\s+)?(?:que|q)\\s+',
+      'quero\\s+que\\s+voc[eê]\\s+(?:lembre|guarde|grave|salve|anote|registre|memorize)(?:\\s+(?:na|em)\\s+(?:sua\\s+)?mem[oó]ria)?\\s+(?:que|q)\\s+',
+      '(?:guarda|guarde|grava|grave|salva|salve|registra|registre|anota|anote|armazena|armazene|coloca|coloque|ponha)\\s+(?:(?:isto|isso|esta\\s+informa(?:ç|c)[aã]o)\\s+)?(?:na|em)\\s+(?:sua\\s+)?mem[oó]ria\\s*(?::\\s*|,\\s*|-\\s*|(?:que|q)\\s+)?',
+      'guarda\\s+q\\s+',
+      '(?:memorize|memoriza)\\s+(?:(?:que|q)\\s+|:\\s*)',
+      '(?:salve|salva|guarde|guarda|anote|anota|registre|registra)\\s+(?:esta|essa)\\s+informa(?:ç|c)[aã]o\\s*(?::\\s*|(?:que|q)\\s+)',
+      '(?:anota|anote)\\s+a[ií]\\s*(?::\\s*|(?:que|q)\\s+)',
+    ].join('|') +
+    ')(.+)$',
+  'iu',
+);
+/**
+ * An explicit request to write to memory whose content could not be safely
+ * extracted (e.g. "guarda isso na memória"). It must never reach the
+ * conversational model, which could claim a write that never happened.
+ */
+const MEMORY_WRITE_REQUEST_HINT =
+  /^(?:sebastian\s*[,:-]?\s*)?(?:quero\s+que\s+voc[eê]\s+)?(?:guard|grav|salv|registr|anot|armazen|memoriz|coloc|ponha)\S*\s.*\bmem[oó]ria\b/iu;
+export const MEMORY_WRITE_NOT_UNDERSTOOD_ANSWER =
+  'Não registrei nada: não consegui identificar exatamente o que guardar. Diga, por exemplo: "guarde na memória que minha cor favorita é azul".';
 const LIST_DIRECTORY_MARKER = 'arquivos existem';
 const READ_FILE_MARKER = 'leia o arquivo';
 const ADD_TASK_MARKER = 'adiciona uma tarefa';
@@ -133,6 +157,9 @@ export class DevelopmentModelProvider implements ModelProvider {
     const rememberContent = this.extractRememberContent(request.text);
     if (rememberContent !== undefined) {
       return { intent: 'remember', content: rememberContent };
+    }
+    if (this.isUnextractableMemoryWriteRequest(request.text)) {
+      return { intent: 'respond', answer: MEMORY_WRITE_NOT_UNDERSTOOD_ANSWER, recordable: false };
     }
 
     const addTaskContent = this.extractAddTaskContent(request.text);
@@ -281,6 +308,11 @@ export class DevelopmentModelProvider implements ModelProvider {
       recordable: false,
       cognitiveFallbackEligible: true,
     };
+  }
+
+  private isUnextractableMemoryWriteRequest(text: string): boolean {
+    const trimmed = text.trim();
+    return !trimmed.endsWith('?') && MEMORY_WRITE_REQUEST_HINT.test(trimmed.normalize('NFC'));
   }
 
   private extractRememberContent(text: string): string | undefined {
