@@ -23,6 +23,7 @@ import { createGitHubProjectRegistry, createGitHubReadOnlyTool } from './GitHubP
 import { createSebastianApplication } from './SebastianApplication.js';
 import type { ProjectConversationContext } from '../core/project/ProjectConversationContext.js';
 import type { ProjectTaskOrchestrator } from '../core/project/ProjectTaskOrchestrator.js';
+import type { ProjectDescriptor } from '../core/project/ProjectTypes.js';
 
 /**
  * Online composition root. It uses the same SebastianApplication/Core/Agent
@@ -151,7 +152,16 @@ export function extractRequestedQuantity(objective: string, countedNoun: RegExp)
  * consulted, so a model's first `concludeCompleted` can never claim missing
  * GitHub access without that Tool having actually been tried first.
  */
-function githubOperationalTools(defaultProjectId: string | undefined, projectTerms: readonly string[] = []): readonly OperationalToolPolicyEntry[] {
+function projectReferencePattern(project: ProjectDescriptor): string {
+  const references = [project.id, project.displayName, ...project.aliases]
+    .sort((left, right) => right.length - left.length)
+    .map((reference) => reference.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return `(?:${references.join('|')})`;
+}
+
+export function githubOperationalTools(projects: readonly ProjectDescriptor[]): readonly OperationalToolPolicyEntry[] {
+  const defaultProjectId = projects.length === 1 ? projects[0]!.id : undefined;
+  const projectTerms = projects.flatMap((project) => [project.id, project.displayName, ...project.aliases]);
   // Domain vocabulary plus the real names/aliases of the registered projects.
   const githubTerms = ['github', ...projectTerms];
   const generalRoute = defaultProjectId === undefined ? {} : {
@@ -184,7 +194,44 @@ function githubOperationalTools(defaultProjectId: string | undefined, projectTer
       requiresSynthesis: (objective: string) => extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN) === undefined,
     },
   };
+  const namedRoutes = projects.length > 1 ? projects.flatMap((project) => {
+    const reference = projectReferencePattern(project);
+    const namedProjectPattern = new RegExp(`(?=.*${reference})(?=.*\\b(?:projet\\w*|repo(?:sitório)?|veja|ver|acess\\w*|github)\\b)(?!.*\\bcommits?\\b)`, 'iu');
+    const namedCommitPattern = new RegExp(`(?=.*${reference})(?=.*\\bcommits?\\b)`, 'iu');
+    return [
+      {
+        toolId: GITHUB_GET_PROJECT_TOOL_ID,
+        applicabilityTerms: [project.id, project.displayName, ...project.aliases, 'projeto', 'repo'],
+        description: 'Resolve um projeto GitHub autorizado explicitamente nomeado.',
+        requiresAuthorization: false,
+        requiredStringArguments: ['projectId'],
+        deterministicIntent: {
+          pattern: namedProjectPattern,
+          buildArguments: () => ({ projectId: project.id }),
+          answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
+        },
+      },
+      {
+        toolId: GITHUB_LIST_COMMITS_TOOL_ID,
+        applicabilityTerms: [project.id, project.displayName, ...project.aliases, 'commit'],
+        description: 'Lista commits do projeto GitHub autorizado explicitamente nomeado.',
+        requiresAuthorization: false,
+        requiredStringArguments: ['projectId'],
+        optionalNumberArguments: ['limit'],
+        deterministicIntent: {
+          pattern: namedCommitPattern,
+          buildArguments: (objective: string) => {
+            const quantity = extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN);
+            return quantity === undefined ? { projectId: project.id } : { projectId: project.id, limit: quantity };
+          },
+          answerFromSuccessfulObservation: (observation: { readonly summary: string }) => `Commits recentes no GitHub:\n${observation.summary}`,
+          requiresSynthesis: (objective: string) => extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN) === undefined,
+        },
+      },
+    ] satisfies OperationalToolPolicyEntry[];
+  }) : [];
   return [
+    ...namedRoutes,
     { toolId: GITHUB_GET_PROJECT_TOOL_ID, applicabilityTerms: [...githubTerms, 'repositório', 'repo'], description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...generalRoute },
     { toolId: GITHUB_LIST_TREE_TOOL_ID, applicabilityTerms: [...githubTerms, 'pasta', 'pastas', 'diretório', 'estrutura de arquivos'], description: 'Lista arquivos e pastas de um diretório do projeto GitHub autorizado; path vazio lista a raiz.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
     { toolId: GITHUB_READ_FILE_TOOL_ID, applicabilityTerms: [...githubTerms, 'arquivo', 'readme'], description: 'Lê um arquivo do projeto GitHub autorizado; exige path relativo.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
@@ -217,8 +264,7 @@ export function createOnlineSebastianApplication(
   // (below, catalog + Tool omit it entirely) while Gemini, conversation,
   // memory and every local/read-only Tool continue exactly as before.
   let githubTool;
-  let defaultGitHubProjectId: string | undefined;
-  let githubProjectTerms: readonly string[] = [];
+  let registeredGitHubProjects: readonly ProjectDescriptor[] = [];
   try {
     const projectRegistry = projectContext?.registry ?? createGitHubProjectRegistry(env, logger);
     const registeredProjects = projectRegistry.listDescriptors();
@@ -231,12 +277,11 @@ export function createOnlineSebastianApplication(
     // Only set a deterministic default when exactly one project is
     // registered - with more than one, guessing which one a bare mention of
     // "GitHub" refers to would be inventing a target, never done here.
-    defaultGitHubProjectId = registeredProjects.length === 1 ? registeredProjects[0]!.id : undefined;
-    githubProjectTerms = registeredProjects.flatMap((project) => [project.id, project.displayName, ...project.aliases]);
+    registeredGitHubProjects = registeredProjects;
   } catch {
     logger?.warn('GitHub integration disabled: invalid project registry configuration');
     githubTool = undefined;
-    defaultGitHubProjectId = undefined;
+    registeredGitHubProjects = [];
   }
 
   const knowledgeStore = memoryStore ?? (dataDir === undefined
@@ -254,7 +299,7 @@ export function createOnlineSebastianApplication(
     ...(cognitiveModelProvider === undefined ? {} : { cognitiveModelProvider }),
     cognitiveOperationalTools: [
       ...LOCAL_OPERATIONAL_TOOLS,
-      ...(githubTool === undefined ? [] : githubOperationalTools(defaultGitHubProjectId, githubProjectTerms)),
+      ...(githubTool === undefined ? [] : githubOperationalTools(registeredGitHubProjects)),
       ...(knowledgeTool === undefined ? [] : knowledgeOperationalTools(knowledgeTool)),
     ],
     ...(dataDir === undefined ? {} : { dataDir }),

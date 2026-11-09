@@ -8,6 +8,7 @@ import {
   SEBASTIAN_GITHUB_PROJECT_ALIASES_ENV_VAR,
   SEBASTIAN_GITHUB_PROJECT_ID_ENV_VAR,
   SEBASTIAN_GITHUB_PROJECT_NAME_ENV_VAR,
+  SEBASTIAN_GITHUB_PROJECTS_ENV_VAR,
   SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR,
   SEBASTIAN_GITHUB_TOKEN_ENV_VAR,
 } from '../../application/GitHubProjectRegistryConfiguration.js';
@@ -77,6 +78,29 @@ test('SEBASTIAN_GITHUB_PROJECT_ALIASES accepts a plain comma-separated list, not
   assert.equal(registry.resolve('Sebastian')?.id, 'sebastiania');
   assert.equal(registry.resolve('Sebastian IA')?.id, 'sebastiania');
   assert.deepEqual(registry.getById('sebastiania')?.aliases, ['Sebastian', 'Sebastian IA']);
+});
+
+test('SEBASTIAN_GITHUB_PROJECTS registers a closed, read-only multi-project registry with unique aliases', () => {
+  const projects = [
+    { id: 'sebastiania', displayName: 'SebastianIA', aliases: ['Sebastian'], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'SebastianIA', defaultBranch: 'main' } },
+    { id: 'lumarkis-financeiro', displayName: 'LUMARKIS Gestão Financeira', aliases: ['LUMARKIS', 'Financeiro Lumarkis'], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'financeiro-lumarkis', defaultBranch: 'main' } },
+    { id: 'lsb-service', displayName: 'LSB Service', aliases: ['LSB', 'Manutenção Inteligente'], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'manuten-o-inteligente', defaultBranch: 'main' } },
+    { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro', 'Neuro Hub'], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'neuro-hub-pro', defaultBranch: 'main' } },
+  ];
+  const registry = createGitHubProjectRegistry({ [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: JSON.stringify(projects) });
+
+  assert.equal(registry.listDescriptors().length, 4);
+  assert.equal(registry.resolve('Neuro')?.id, 'neuro-hub-pro');
+  assert.equal(registry.resolve('LSB')?.id, 'lsb-service');
+  assert.equal(registry.resolve('LUMARKIS')?.id, 'lumarkis-financeiro');
+  assert.equal(registry.resolve('Sebastian')?.id, 'sebastiania');
+  assert.equal(registry.resolve('Neuro')?.permissions.access, 'read-only');
+});
+
+test('an invalid multi-project value safely preserves the complete legacy registration', () => {
+  const registry = createGitHubProjectRegistry({ ...validProjectEnv(), [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: '{not-json' });
+  assert.equal(registry.listDescriptors().length, 1);
+  assert.equal(registry.resolve('sebastiania')?.id, 'sebastiania');
 });
 
 for (const missingVar of [

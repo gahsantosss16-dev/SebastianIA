@@ -18,6 +18,7 @@ import {
   GITHUB_COMMIT_NOUN_PATTERN,
   GITHUB_GENERAL_INTENT_PATTERN,
   extractRequestedQuantity,
+  githubOperationalTools,
 } from '../../application/OnlineSebastianApplication.js';
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -216,6 +217,21 @@ test('configured project-capability questions and the short "No GitHub?" continu
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('named multi-project routes select Neuro commits and LSB project without cross-project fallback', () => {
+  const projects = [
+    { id: 'sebastiania', displayName: 'SebastianIA', aliases: ['Sebastian'], resourceKind: 'github-repository' as const, remoteRepository: { owner: 'o', repository: 'sebastian', defaultBranch: 'main' }, permissions: { access: 'read-only' as const } },
+    { id: 'lsb-service', displayName: 'LSB Service', aliases: ['LSB'], resourceKind: 'github-repository' as const, remoteRepository: { owner: 'o', repository: 'lsb', defaultBranch: 'main' }, permissions: { access: 'read-only' as const } },
+    { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro', 'Neuro Hub'], resourceKind: 'github-repository' as const, remoteRepository: { owner: 'o', repository: 'neuro', defaultBranch: 'main' }, permissions: { access: 'read-only' as const } },
+  ];
+  const routes = githubOperationalTools(projects);
+  const neuroRoute = routes.find((route) => route.toolId === GITHUB_LIST_COMMITS_TOOL_ID && route.deterministicIntent?.pattern.test('Qual o último commit do Neuro?'));
+  const lsbRoute = routes.find((route) => route.toolId === GITHUB_GET_PROJECT_TOOL_ID && route.deterministicIntent?.pattern.test('Veja o projeto LSB'));
+
+  assert.deepEqual(neuroRoute?.deterministicIntent?.buildArguments('Qual o último commit do Neuro?'), { projectId: 'neuro-hub-pro', limit: 1 });
+  assert.deepEqual(lsbRoute?.deterministicIntent?.buildArguments('Veja o projeto LSB'), { projectId: 'lsb-service' });
+  assert.equal(routes.some((route) => route.deterministicIntent?.pattern.test('Qual o último commit do Neuro?') && route.deterministicIntent.buildArguments('Qual o último commit do Neuro?').projectId === 'lsb-service'), false);
 });
 
 test('evidence synthesis is proportional for singular, plural and explicit quantity requests', async () => {

@@ -1,8 +1,11 @@
 import type { Logger } from '../core/logger.js';
 import { GitHubReadOnlyTool } from '../core/tool/GitHubReadOnlyTool.js';
 import { ProjectRegistry } from '../core/project/index.js';
+import type { ProjectDescriptor } from '../core/project/index.js';
 
 export const SEBASTIAN_GITHUB_TOKEN_ENV_VAR = 'SEBASTIAN_GITHUB_TOKEN';
+/** JSON array of closed, read-only project descriptors for multi-project deployments. */
+export const SEBASTIAN_GITHUB_PROJECTS_ENV_VAR = 'SEBASTIAN_GITHUB_PROJECTS';
 
 /**
  * Simple, flat env vars describing exactly one authorized GitHub project -
@@ -32,6 +35,41 @@ function parseAliases(raw: string | undefined): readonly string[] {
   return raw.split(',').map((alias) => alias.trim()).filter((alias) => alias !== '');
 }
 
+function parseMultiProjectConfiguration(raw: string | undefined): readonly ProjectDescriptor[] | undefined {
+  if (!isNonEmptyString(raw)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const entries = Array.isArray(parsed)
+      ? parsed
+      : parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { projects?: unknown }).projects)
+        ? (parsed as { projects: unknown[] }).projects
+        : undefined;
+    if (entries === undefined || entries.length === 0) return undefined;
+    return entries.map((entry): ProjectDescriptor => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('invalid entry');
+      const value = entry as Record<string, unknown>;
+      const remote = value.remoteRepository;
+      if (remote === null || typeof remote !== 'object' || Array.isArray(remote)) throw new Error('invalid repository');
+      const repository = remote as Record<string, unknown>;
+      if (typeof value.id !== 'string' || typeof value.displayName !== 'string' ||
+        !Array.isArray(value.aliases) || value.aliases.some((alias) => typeof alias !== 'string') ||
+        typeof repository.owner !== 'string' || typeof repository.repository !== 'string' || typeof repository.defaultBranch !== 'string') {
+        throw new Error('invalid project shape');
+      }
+      return {
+        id: value.id,
+        displayName: value.displayName,
+        aliases: value.aliases as string[],
+        resourceKind: 'github-repository',
+        remoteRepository: { owner: repository.owner, repository: repository.repository, defaultBranch: repository.defaultBranch },
+        permissions: { access: 'read-only' },
+      };
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Builds the closed, read-only registry of projects the online cognitive
  * loop may investigate, from the flat `SEBASTIAN_GITHUB_*` env vars above.
@@ -42,6 +80,20 @@ function parseAliases(raw: string | undefined): readonly string[] {
  * configuration.
  */
 export function createGitHubProjectRegistry(env: NodeJS.ProcessEnv = process.env, logger?: Logger): ProjectRegistry {
+  const multiProjectEntries = parseMultiProjectConfiguration(env[SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]);
+  if (multiProjectEntries !== undefined) {
+    try {
+      const registry = new ProjectRegistry({ readOnly: true, entries: multiProjectEntries });
+      logger?.info('GitHub project registry resolved.', { projectCount: multiProjectEntries.length, outcome: 'configuredMultiProject' });
+      return registry;
+    } catch {
+      // A malformed optional multi-project value must not disable the known-good
+      // legacy project during a rolling configuration update.
+      logger?.warn('GitHub multi-project registry ignored; using legacy configuration.');
+    }
+  } else if (isNonEmptyString(env[SEBASTIAN_GITHUB_PROJECTS_ENV_VAR])) {
+    logger?.warn('GitHub multi-project registry ignored; using legacy configuration.');
+  }
   const id = env[SEBASTIAN_GITHUB_PROJECT_ID_ENV_VAR];
   const displayName = env[SEBASTIAN_GITHUB_PROJECT_NAME_ENV_VAR];
   const owner = env[SEBASTIAN_GITHUB_OWNER_ENV_VAR];
