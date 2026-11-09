@@ -89,6 +89,6 @@ test('runner invokes the real npm diagnostic and sanitizes its failure without a
     assert.equal(result.stdout.includes(secret), false);
     assert.equal(result.stdout.includes('CREDENTIAL_SENTINEL'), false);
     assert.equal(result.stdout.includes('postgresql://'), false);
-    assert.deepEqual(JSON.parse(result.stdout), { status: 'failed', code: 'POSTGRES_CHECK_FAILED' });
+    assert.deepEqual(JSON.parse(result.stdout), { status: 'failed', code: 'POSTGRES_CHECK_FAILED', stage: 'connect' });
   });
 });
