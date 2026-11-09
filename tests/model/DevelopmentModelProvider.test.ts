@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DevelopmentModelProvider } from '../../core/model/DevelopmentModelProvider.js';
+import { DevelopmentModelProvider, MEMORY_WRITE_NOT_UNDERSTOOD_ANSWER } from '../../core/model/DevelopmentModelProvider.js';
 import { InvalidModelInterpretationRequestError } from '../../core/model/ModelProviderContractErrors.js';
 import type { PendingTaskRecord, RecentExchangeRecord, RememberedFactRecord } from '../../core/memory/index.js';
 
@@ -62,6 +62,45 @@ test('interpret recognizes bounded natural-language memory commands and common q
   for (const [text, content] of examples) {
     const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-11-08T00:00:00.000Z' });
     assert.deepEqual(decision, { intent: 'remember', content });
+  }
+});
+
+test('interpret recognizes the explicit memory-save phrasings observed in production (salva/grava/registra na memória, "Guarde na sua memória:", "quero que você lembre que")', async () => {
+  const provider = new DevelopmentModelProvider();
+  const examples = [
+    ['Guarda na sua memória que minha cor favorita é azul.', 'minha cor favorita é azul.'],
+    ['guarde na memoria q minha cor é azul', 'minha cor é azul'],
+    ['Guarde na sua memória: meu time é o Santos', 'meu time é o Santos'],
+    ['Sebastian, salva na memória que eu moro em Curitiba', 'eu moro em Curitiba'],
+    ['Grave na memória que meu cachorro se chama Thor', 'meu cachorro se chama Thor'],
+    ['Registra na sua memória que sou alérgico a camarão', 'sou alérgico a camarão'],
+    ['Quero que você lembre que meu aniversário é 3 de maio', 'meu aniversário é 3 de maio'],
+    ['Lembre-se de que prefiro respostas curtas', 'prefiro respostas curtas'],
+    ['Não esqueça que tenho dentista na sexta', 'tenho dentista na sexta'],
+    ['Anote na memória: placa do carro ABC1D23', 'placa do carro ABC1D23'],
+  ] as const;
+  for (const [text, content] of examples) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-11-09T00:00:00.000Z' });
+    assert.deepEqual(decision, { intent: 'remember', content }, text);
+  }
+});
+
+test('an explicit memory-save request without extractable content never reaches the model and never claims a write', async () => {
+  const provider = new DevelopmentModelProvider();
+  for (const text of ['guarda isso na memória', 'Sebastian, salva isso na sua memória']) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-11-09T00:00:00.000Z' });
+    assert.equal(decision.intent, 'respond', text);
+    assert.equal(decision.intent === 'respond' ? decision.answer : '', MEMORY_WRITE_NOT_UNDERSTOOD_ANSWER);
+    assert.equal(decision.intent === 'respond' ? decision.cognitiveFallbackEligible : undefined, undefined);
+  }
+});
+
+test('memory questions about saving are not treated as writes or as failed writes', async () => {
+  const provider = new DevelopmentModelProvider();
+  for (const text of ['Você salvou na memória minha cor?', 'Você lembra que eu gosto de café', 'O que tem na sua memória sobre mim?']) {
+    const decision = await provider.interpret({ text, rememberedFacts: [], requestedAt: '2026-11-09T00:00:00.000Z' });
+    assert.notEqual(decision.intent, 'remember', text);
+    assert.notEqual(decision.intent === 'respond' ? decision.answer : '', MEMORY_WRITE_NOT_UNDERSTOOD_ANSWER, text);
   }
 });
 
