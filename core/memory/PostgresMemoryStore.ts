@@ -11,6 +11,8 @@ export interface SqlQueryable {
   end?(): Promise<void>;
 }
 
+const BATCH_SIZE = 500;
+
 export class PostgresMemoryStore {
   private poolFailure: Error | undefined;
   public constructor(private readonly database: SqlQueryable, private readonly pool?: Pool, private readonly tlsHostname?: string) {}
@@ -90,6 +92,47 @@ export class PostgresMemoryStore {
       [namespace, key, serialized],
     );
     return result.rows.length === 1;
+  }
+
+  /** Batch read by natural key; returns `namespace\u0000key` → value for the rows that exist. */
+  public async readRecordsByKey(keys: readonly { readonly namespace: string; readonly key: string }[]): Promise<Map<string, Readonly<Record<string, unknown>>>> {
+    this.assertAvailable();
+    const found = new Map<string, Readonly<Record<string, unknown>>>();
+    for (let start = 0; start < keys.length; start += BATCH_SIZE) {
+      const batch = keys.slice(start, start + BATCH_SIZE);
+      for (const { namespace, key } of batch) { this.assertPart(namespace, 'namespace'); this.assertPart(key, 'key'); }
+      const result = await this.database.query<{ namespace: string; record_key: string; value_json: string }>(
+        `select m.namespace, m.record_key, m.value_json
+         from sebastian.memory_records m
+         join unnest($1::text[], $2::text[]) as k(namespace, record_key) using (namespace, record_key)`,
+        [batch.map((entry) => entry.namespace), batch.map((entry) => entry.key)],
+      );
+      for (const row of result.rows) found.set(`${row.namespace}\u0000${row.record_key}`, this.parseValue(row.value_json));
+    }
+    return found;
+  }
+
+  /** Batch insert that never overwrites: returns the `namespace\u0000key` ids actually inserted. */
+  public async insertRecordsIfAbsent(records: readonly { readonly namespace: string; readonly key: string; readonly value: Readonly<Record<string, unknown>> }[]): Promise<Set<string>> {
+    this.assertAvailable();
+    const inserted = new Set<string>();
+    for (let start = 0; start < records.length; start += BATCH_SIZE) {
+      const batch = records.slice(start, start + BATCH_SIZE);
+      const serialized = batch.map(({ namespace, key, value }) => {
+        this.assertPart(namespace, 'namespace');
+        this.assertPart(key, 'key');
+        try { return JSON.stringify(structuredClone(value)); } catch (cause) { throw new TypeError('Memory record must be JSON-serializable.', { cause }); }
+      });
+      const result = await this.database.query<{ namespace: string; record_key: string }>(
+        `insert into sebastian.memory_records (namespace, record_key, value_json)
+         select * from unnest($1::text[], $2::text[], $3::text[])
+         on conflict (namespace, record_key) do nothing
+         returning namespace, record_key`,
+        [batch.map((entry) => entry.namespace), batch.map((entry) => entry.key), serialized],
+      );
+      for (const row of result.rows) inserted.add(`${row.namespace}\u0000${row.record_key}`);
+    }
+    return inserted;
   }
 
   /** Readiness checks schema and runtime privileges without reading stored content. */

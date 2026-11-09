@@ -83,29 +83,35 @@ export async function migrateFileMemoryToPostgres(
 ): Promise<MemoryMigrationReport> {
   const { document, found } = readSourceDocument(filePath);
   const backupPath = mode === 'copy' && found ? writeBackup(filePath, now) : null;
+  const entries = Object.keys(document).sort().flatMap((namespace) =>
+    Object.keys(document[namespace]!).sort().map((key) => ({ namespace, key, value: document[namespace]![key]! })));
+  const id = (namespace: string, key: string): string => `${namespace}\u0000${key}`;
+  // Two round trips in total (per 500 records): one insert, one read-back.
+  const inserted = mode === 'copy' ? await store.insertRecordsIfAbsent(entries) : new Set<string>();
+  const stored = await store.readRecordsByKey(entries);
+
   const namespaces: Record<string, NamespaceMigrationReport> = {};
   const totals = { fileRecords: 0, inserted: 0, alreadyIdentical: 0, conflicts: 0, pendingInsert: 0 };
   let verified = true;
-
-  for (const namespace of Object.keys(document).sort()) {
-    const records = document[namespace]!;
-    const report = { fileRecords: 0, inserted: 0, alreadyIdentical: 0, conflicts: 0, pendingInsert: 0 };
-    for (const key of Object.keys(records).sort()) {
-      const value = records[key]!;
-      report.fileRecords += 1;
-      if (mode === 'copy' && await store.insertRecordIfAbsent(namespace, key, value)) {
-        report.inserted += 1;
-        const stored = await store.readRecord(namespace, key);
-        if (!isDeepStrictEqual(stored, value)) verified = false;
-        continue;
-      }
-      const existing = await store.readRecord(namespace, key);
-      if (existing === undefined) report.pendingInsert += 1;
-      else if (isDeepStrictEqual(existing, value)) report.alreadyIdentical += 1;
-      else report.conflicts += 1;
+  for (const { namespace, key, value } of entries) {
+    const report = (namespaces[namespace] ??= { fileRecords: 0, inserted: 0, alreadyIdentical: 0, conflicts: 0, pendingInsert: 0 }) as {
+      fileRecords: number; inserted: number; alreadyIdentical: number; conflicts: number; pendingInsert: number;
+    };
+    const existing = stored.get(id(namespace, key));
+    report.fileRecords += 1;
+    if (inserted.has(id(namespace, key))) {
+      report.inserted += 1;
+      if (!isDeepStrictEqual(existing, value)) verified = false;
+    } else if (existing === undefined) {
+      report.pendingInsert += 1;
+      if (mode === 'copy') verified = false;
+    } else if (isDeepStrictEqual(existing, value)) {
+      report.alreadyIdentical += 1;
+    } else {
+      report.conflicts += 1;
     }
-    if (mode === 'copy' && report.pendingInsert > 0) verified = false;
-    namespaces[namespace] = report;
+  }
+  for (const report of Object.values(namespaces)) {
     for (const field of Object.keys(totals) as (keyof typeof totals)[]) totals[field] += report[field];
   }
 
