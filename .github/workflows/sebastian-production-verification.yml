@@ -1,0 +1,58 @@
+name: SebastianIA production verification
+on:
+  push:
+    branches: [codex/production-memory-verification]
+    paths: ['.github/workflows/sebastian-production-verification.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  deployments: read
+jobs:
+  verify-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify existing production without changing facts or configuration
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set +x
+          node --input-type=module <<'NODE'
+          const origin = 'https://darkgreen-yak-122236.hostingersite.com';
+          const expectedSha = '0fb20cf229f2fdba032453397f2fa397bbc70387';
+          const emit = (report) => console.log(JSON.stringify(report));
+          async function getJson(url, headers = {}) {
+            const response = await fetch(url, { headers, signal: AbortSignal.timeout(30000), redirect: 'error' });
+            return { response, body: await response.json().catch(() => null) };
+          }
+          const report = { expectedSha, checkedAt: new Date().toISOString() };
+          try {
+            const {response, body} = await getJson(`${origin}/health`);
+            report.health = { httpStatus: response.status, passed: response.ok && body?.status === 'ok' };
+          } catch { report.health = { passed: false, code: 'HEALTH_REQUEST_FAILED' }; }
+          try {
+            const base = `https://api.github.com/repos/${process.env.REPOSITORY}`;
+            const headers = { authorization: `Bearer ${process.env.GH_READ_TOKEN}`, accept: 'application/vnd.github+json' };
+            const {response, body} = await getJson(`${base}/deployments?per_page=20`, headers);
+            report.deployments = { httpStatus: response.status, production: [] };
+            if (Array.isArray(body)) for (const deployment of body) {
+              const result = await getJson(`${base}/deployments/${deployment.id}/statuses?per_page=1`, headers);
+              const status = result.body?.[0];
+              if (status?.environment_url?.replace(/\/$/, '') === origin) {
+                report.deployments.production.push({ sha: deployment.sha, state: status.state, updatedAt: status.updated_at, expectedCommit: deployment.sha === expectedSha });
+              }
+            }
+          } catch { report.deployments = { code: 'DEPLOYMENT_LOOKUP_FAILED' }; }
+          report.authenticatedQueries = 'not attempted: no credentials accessed by this public probe';
+          report.runtimeSha = 'unverified: not exposed by the existing health endpoint';
+          report.memoryDriver = 'unverified: requires hosting runtime logs';
+          report.restartPersistence = 'unverified: no hosting restart or deployment evidence';
+          emit(report);
+          await import('node:fs/promises').then(fs => fs.appendFile(process.env.GITHUB_STEP_SUMMARY, '```json\n' + JSON.stringify(report, null, 2) + '\n```\n'));
+          if (!report.health?.passed) process.exitCode = 1;
+          NODE
