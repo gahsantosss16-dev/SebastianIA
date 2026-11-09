@@ -13,6 +13,8 @@ import type {
 } from './CognitiveModelProviderContract.js';
 
 export const MAX_OPERATIONAL_DECISIONS = 4;
+/** Extra `decide` calls the loop may spend recovering from a provider timeout (see `execute`). */
+export const MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES = 1;
 const MAX_OBSERVATION_CHARS = 2_000;
 
 export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
@@ -220,10 +222,22 @@ export class CognitiveOperationalOrchestrator {
       return this.finish({ outcome: 'answered', answer: deterministic.answer, toolCalls });
     }
 
+    // At most one extra `decide` per execution, and only after a genuine
+    // provider timeout (never after caller cancellation, never after
+    // `unavailable`/`invalidResponse`). If the retry also fails, the run still
+    // ends as `unavailable` exactly as before - the failure is not masked.
+    let timeoutRetryAvailable = true;
     for (let attempt = 0; attempt < this.maxDecisions; attempt += 1) {
       let result;
       try {
-        result = await this.provider.decide(this.request(objective, context.requestedAt, observations, context.relevantMemory ?? [], context.signal));
+        const decisionRequest = this.request(objective, context.requestedAt, observations, context.relevantMemory ?? [], context.signal);
+        result = await this.provider.decide(decisionRequest);
+        if (result.outcome === 'timeout' && timeoutRetryAvailable && context.signal?.aborted !== true) {
+          timeoutRetryAvailable = false;
+          this.logger?.warn('Cognitive operational decision timed out; retrying once.', { attempt, toolCalls });
+          result = await this.provider.decide(decisionRequest);
+          this.logger?.info('Cognitive operational decision retry completed.', { attempt, outcome: result.outcome });
+        }
       } catch {
         this.logStep(attempt, { nextAction: 'n/a', toolId: undefined, toolInvoked: false, toolOutcome: undefined }, toolCalls);
         return this.finish({ outcome: 'unavailable', toolCalls });
