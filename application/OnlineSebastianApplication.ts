@@ -162,6 +162,12 @@ function projectReferencePattern(project: ProjectDescriptor): string {
   return `(?:${references.join('|')})`;
 }
 
+/** Extracts only a bounded relative file path explicitly supplied by the user. */
+export function extractExplicitGitHubPath(objective: string): string | undefined {
+  const match = /(?:\barquivo\s+)?([A-Za-z0-9][A-Za-z0-9._/-]*\.[A-Za-z0-9]{1,10})\b/u.exec(objective);
+  return match?.[1];
+}
+
 export function githubOperationalTools(projects: readonly ProjectDescriptor[]): readonly OperationalToolPolicyEntry[] {
   const defaultProjectId = projects.length === 1 ? projects[0]!.id : undefined;
   const projectTerms = projects.flatMap((project) => [project.id, project.displayName, ...project.aliases]);
@@ -201,7 +207,20 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
     const reference = projectReferencePattern(project);
     const namedProjectPattern = new RegExp(`(?=.*${reference})(?=.*\\b(?:projet\\w*|repo(?:sitório)?|veja|ver|acess\\w*|github)\\b)(?!.*\\bcommits?\\b)`, 'iu');
     const namedCommitPattern = new RegExp(`(?=.*${reference})(?=.*\\bcommits?\\b)`, 'iu');
+    const namedFilePattern = new RegExp(`(?=.*${reference})(?=.*\\b(?:arquivo\\s+)?[A-Za-z0-9][A-Za-z0-9._/-]*\\.[A-Za-z0-9]{1,10}\\b)`, 'iu');
     return [
+      {
+        toolId: GITHUB_READ_FILE_TOOL_ID,
+        applicabilityTerms: [project.id, project.displayName, ...project.aliases, 'arquivo'],
+        description: 'Lê um arquivo explicitamente nomeado no projeto GitHub autorizado.',
+        requiresAuthorization: false,
+        requiredStringArguments: ['projectId', 'path'],
+        deterministicIntent: {
+          pattern: namedFilePattern,
+          buildArguments: (objective: string) => ({ projectId: project.id, path: extractExplicitGitHubPath(objective) ?? '' }),
+          answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
+        },
+      },
       {
         toolId: GITHUB_GET_PROJECT_TOOL_ID,
         applicabilityTerms: [project.id, project.displayName, ...project.aliases, 'projeto', 'repo'],

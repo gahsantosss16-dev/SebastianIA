@@ -20,6 +20,7 @@ import {
   GITHUB_LIST_PROJECTS_INTENT_PATTERN,
   extractRequestedQuantity,
   githubOperationalTools,
+  extractExplicitGitHubPath,
 } from '../../application/OnlineSebastianApplication.js';
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -247,6 +248,20 @@ test('all-authorized-projects intent selects the closed deterministic listing ro
   assert.equal(route?.toolId, 'github.listProjects');
   assert.deepEqual(route?.deterministicIntent?.buildArguments('Liste todos os projetos GitHub autorizados'), {});
   assert.equal(route?.deterministicIntent?.requiresSynthesis?.('Liste todos os projetos GitHub autorizados'), false);
+});
+
+test('exact LUMARKIS file request reads js/app.js before project metadata or synthesis', () => {
+  const request = 'Sebastian, no projeto LUMARKIS Gestão Financeira, consulte o arquivo js/app.js no GitHub e encontre o botão Salvar cliente. Informe a classe CSS atual e proponha alterar somente a cor de fundo desse botão para verde. Não modifique nada.';
+  const routes = githubOperationalTools([
+    { id: 'sebastiania', displayName: 'SebastianIA', aliases: ['Sebastian'], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'a', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+    { id: 'lumarkis-financeiro', displayName: 'LUMARKIS Gestão Financeira', aliases: ['LUMARKIS'], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'b', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+    { id: 'lsb-service', displayName: 'LSB Service', aliases: ['LSB'], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'c', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+    { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro'], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'd', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+  ]);
+  const first = routes.find((route) => route.deterministicIntent?.pattern.test(request));
+  assert.equal(first?.toolId, 'github.readFile');
+  assert.deepEqual(first?.deterministicIntent?.buildArguments(request), { projectId: 'lumarkis-financeiro', path: 'js/app.js' });
+  assert.equal(extractExplicitGitHubPath(request), 'js/app.js');
 });
 
 test('evidence synthesis is proportional for singular, plural and explicit quantity requests', async () => {
