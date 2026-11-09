@@ -11,6 +11,7 @@ jobs:
   verify-production:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: sebastian-homologation
     steps:
       - uses: actions/setup-node@v4
         with:
@@ -19,6 +20,8 @@ jobs:
         env:
           GH_READ_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          API_SECRET_CONFIGURED: ${{ secrets.SEBASTIAN_API_TOKEN != '' }}
+          HOSTING_SECRET_CONFIGURED: ${{ secrets.HOSTINGER_API_TOKEN != '' }}
         shell: bash
         run: |
           set +x
@@ -48,6 +51,7 @@ jobs:
               }
             }
           } catch { report.deployments = { code: 'DEPLOYMENT_LOOKUP_FAILED' }; }
+          report.existingSecretAvailability = { api: process.env.API_SECRET_CONFIGURED === 'true', hosting: process.env.HOSTING_SECRET_CONFIGURED === 'true' };
           report.authenticatedQueries = 'not attempted: no credentials accessed by this public probe';
           report.runtimeSha = 'unverified: not exposed by the existing health endpoint';
           report.memoryDriver = 'unverified: requires hosting runtime logs';
