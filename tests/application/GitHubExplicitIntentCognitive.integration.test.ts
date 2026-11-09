@@ -14,7 +14,11 @@ import {
   OnlineReadOnlyTool,
   type SpecializedToolInvocationInput,
 } from '../../core/tool/index.js';
-import { GITHUB_COMMIT_NOUN_PATTERN, extractRequestedQuantity } from '../../application/OnlineSebastianApplication.js';
+import {
+  GITHUB_COMMIT_NOUN_PATTERN,
+  GITHUB_GENERAL_INTENT_PATTERN,
+  extractRequestedQuantity,
+} from '../../application/OnlineSebastianApplication.js';
 
 const logger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -24,7 +28,7 @@ const githubCatalog = [
   {
     toolId: GITHUB_GET_PROJECT_TOOL_ID, description: 'Resolve um projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId'],
     deterministicIntent: {
-      pattern: /^\s*github\s*[?!.]*\s*$|^(?=.*\bgithub\b)(?=.*\b(?:projet\w*|acesso|acessar)\b|.*\bconsegue\s+ver\b)(?!.*\bcommits?\b)/i,
+      pattern: GITHUB_GENERAL_INTENT_PATTERN,
       buildArguments: () => ({ projectId: DEFAULT_PROJECT_ID }),
       answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
     },
@@ -186,6 +190,29 @@ test('an explicit GitHub request for recent commits calls github.listCommits and
     assert.equal(decideCalls, 0);
     assert.match(String(result.output.message), /corrige timeout do provider cognitivo/);
     assert.doesNotMatch(String(result.output.message), /não consegui concluir|ainda não sei responder/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('configured project-capability questions and the short "No GitHub?" continuation resolve through github.getProject without decide', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sebastian-github-capability-question-'));
+  try {
+    let decideCalls = 0;
+    const provider: CognitiveModelProvider = {
+      decide: async () => { decideCalls += 1; throw new Error('deterministic project capability route must not call decide'); },
+      respond: async () => ({ outcome: 'responded', answer: 'Não tenho acesso a sistemas externos.' }),
+    };
+    const { app, invoked } = buildApp(provider, commitsFetchImpl(), root);
+
+    const capability = await app.executeCommand(input('Você consegue ver meus projetos?', 10));
+    const followUp = await app.executeCommand(input('No GitHub?', 11));
+
+    assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_GET_PROJECT_TOOL_ID]);
+    assert.equal(decideCalls, 0);
+    assert.match(String(capability.output.message), /SebastianIA|gahsantosss16-dev/i);
+    assert.match(String(followUp.output.message), /SebastianIA|gahsantosss16-dev/i);
+    assert.doesNotMatch(String(followUp.output.message), /não consegui concluir|não possuo acesso/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -80,7 +80,14 @@ const GITHUB_COMMIT_CONTINUATION_PATTERN = /(?:último|ultimo|recentes?|mais\s+r
 const GITHUB_IMMEDIATE_CONTEXT_PATTERN = /\bgithub\b/i;
 export const GITHUB_COMMIT_NOUN_PATTERN = /commits?/i;
 /** A direct GitHub capability/project-access question; broader semantic questions remain cognitive. */
-const GITHUB_GENERAL_INTENT_PATTERN = /^\s*github\s*[?!.]*\s*$|^(?=.*\bgithub\b)(?=.*\b(?:projet\w*|acesso|acessar)\b|.*\bconsegue\s+ver\b)(?!.*\bcommits?\b)/i;
+/**
+ * Read-only project-capability questions for the single configured GitHub
+ * project. These are deterministic so an ordinary `respond` turn cannot
+ * falsely deny the configured integration, and a short "No GitHub?"
+ * continuation never asks the model to invent the mandatory projectId.
+ */
+export const GITHUB_GENERAL_INTENT_PATTERN =
+  /^\s*(?:github|(?:e\s+)?no\s+github)\s*[?!.]*\s*$|^\s*(?:você\s+)?consegue\s+(?:ver|acessar)\s+(?:os?\s+)?(?:meus?\s+)?projet\w*\s*[?!.]*$|^(?=.*\bgithub\b)(?=.*\b(?:projet\w*|acesso|acessar)\b|.*\bconsegue\s+ver\b)(?!.*\bcommits?\b)/i;
 
 /**
  * Generic "how many" extraction for a deterministic route's built argument -
