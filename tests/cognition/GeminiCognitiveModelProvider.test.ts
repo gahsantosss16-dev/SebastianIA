@@ -592,3 +592,22 @@ test('Gemini falls back to an alternate model after three primary 503 responses'
   assert.equal(urls.filter((url) => url.includes(MODEL)).length, 3);
   assert.equal(urls.filter((url) => url.includes('gemini-3-flash')).length, 1);
 });
+
+test('Gemini conversation payload carries remembered facts only when provided', async () => {
+  const bodies: string[] = [];
+  const cognitive = provider(async (_url, init) => {
+    bodies.push(init.body as string);
+    return response(200, geminiEnvelope({ answer: 'JABUTI-2611.' }));
+  });
+
+  await cognitive.respond?.({
+    text: 'qual código JABUTI eu te pedi para lembrar?',
+    requestedAt: '2026-11-09T00:40:00.000Z',
+    relevantFacts: [{ content: 'o código de homologação da memória é JABUTI-2611', recordedAt: '2026-11-09T00:32:30.000Z' }],
+  });
+  await cognitive.respond?.({ text: 'oi', requestedAt: '2026-11-09T00:41:00.000Z', relevantFacts: [] });
+
+  assert.equal(bodies[0]?.includes('JABUTI-2611'), true);
+  assert.equal(bodies[0]?.includes('\\"relevantFacts\\"'), true);
+  assert.equal(bodies[1]?.includes('\\"relevantFacts\\"'), false);
+});

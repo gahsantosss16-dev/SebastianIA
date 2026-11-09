@@ -100,6 +100,13 @@ interface GoalExecutionOrchestratorLike {
   executeWithCognition?(goal: GoalDefinition, context: GoalExecutionContext): Promise<GoalExecutionResult>;
 }
 
+/** Bounded, deduplicated facts handed to the cognitive provider. */
+interface CognitiveRelevantFact { readonly content: string; readonly recordedAt: string }
+const MAX_COGNITIVE_FACTS = 5;
+const MAX_COGNITIVE_FACT_CHARS = 500;
+/** Explicit questions about what the user asked Sebastian to remember. */
+const MEMORY_QUESTION_PATTERN = /(?:\blembr\w*|\brecord\w*|\bmemoriz\w*|\banot(?:ou|ei|amos|ado|ada|ar)\b|\bregistr\w*|sabe sobre mim|\bme conhece\b)/iu;
+
 export class InMemorySpecializedAgent implements SpecializedAgent {
   private readonly specializedTool: SpecializedTool;
   private readonly modelProvider: ModelProvider | undefined;
@@ -189,6 +196,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const pendingOperations = this.extractPendingOperations(input);
     const immediatePreviousExchange = this.latestExchange(recentExchanges);
     const cognitiveRecentExchanges = this.selectCognitiveRecentExchanges(text, rememberedFacts, recentExchanges);
+    const cognitiveRelevantFacts = this.selectCognitiveRelevantFacts(text, rememberedFacts);
     const budgetedCognitiveRecentExchanges = this.applyConversationContextBudget(cognitiveRecentExchanges);
 
     const pendingResponse = this.handlePendingOperationResponse(input, text, pendingOperations);
@@ -212,6 +220,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       abortSignal,
       false,
       immediatePreviousExchange,
+      cognitiveRelevantFacts,
     );
     const conversationalDecision = await this.applyCognitiveConversationFallback(
       operationalDecision,
@@ -219,6 +228,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       input.requestedAt,
       budgetedCognitiveRecentExchanges,
       abortSignal,
+      cognitiveRelevantFacts,
     );
     // General conversation gets the first, dedicated model turn. If that
     // provider path is absent/unavailable, retain the existing operational
@@ -227,7 +237,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const effectiveDecision = conversationalDecision === decision && operationalDecision === decision
       ? await this.applyCognitiveOperationalDecision(
           decision, text, input.requestedAt, input.executionId, input.responsibilityId, budgetedCognitiveRecentExchanges, abortSignal, true,
-          immediatePreviousExchange,
+          immediatePreviousExchange, cognitiveRelevantFacts,
         )
       : conversationalDecision;
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
@@ -244,6 +254,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     signal?: AbortSignal,
     forceFallback = false,
     immediatePreviousExchange?: RecentExchangeRecord,
+    relevantFacts: readonly CognitiveRelevantFact[] = [],
   ): Promise<ModelInterpretationDecision> {
     const eligible =
       forceFallback ||
@@ -262,9 +273,12 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       executionId,
       responsibilityId,
       requestedAt,
-      relevantMemory: recentExchanges.map((exchange) => ({
-        content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
-      })),
+      relevantMemory: [
+        ...relevantFacts.map((fact) => ({ content: `Fato que o usuário pediu para lembrar: ${fact.content}` })),
+        ...recentExchanges.map((exchange) => ({
+          content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
+        })),
+      ],
       ...(immediatePreviousExchange === undefined
         ? {}
         : { immediateContext: this.formatImmediateContext(immediatePreviousExchange) }),
@@ -302,6 +316,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     requestedAt: string,
     recentExchanges: readonly RecentExchangeRecord[],
     signal?: AbortSignal,
+    relevantFacts: readonly CognitiveRelevantFact[] = [],
   ): Promise<ModelInterpretationDecision> {
     const fallbackEligible = decision.intent === 'respond' && decision.cognitiveFallbackEligible === true;
     this.logger?.info('Cognitive conversational fallback eligibility resolved.', { fallbackEligible });
@@ -323,6 +338,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
                 summary: exchange.summary,
               })),
             }),
+        ...(relevantFacts.length === 0 ? {} : { relevantFacts }),
       });
       if (result.outcome !== 'responded' || typeof result.answer !== 'string' || result.answer.trim() === '') {
         return decision;
@@ -650,6 +666,37 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       | undefined;
     const pendingOperations = commandInput?.temporary?.values?.pendingOperations;
     return Array.isArray(pendingOperations) ? pendingOperations as readonly PendingOperationRecord[] : [];
+  }
+
+  /**
+   * Facts the user explicitly asked to remember that are relevant to this
+   * message: lexical matches (facts only, so exchanges cannot crowd them out)
+   * plus, for an explicit memory question, the most recent facts. Deduplicated
+   * by normalized content and bounded; never the whole memory.
+   */
+  private selectCognitiveRelevantFacts(text: string, rememberedFacts: readonly RememberedFactRecord[]): readonly CognitiveRelevantFact[] {
+    if (rememberedFacts.length === 0) return [];
+    const byId = new Map(rememberedFacts.map((fact) => [fact.id, fact]));
+    const matched = new ConversationContextComposer().compose({ text, rememberedFacts, recentExchanges: [] }).relevantMemories
+      .filter((match) => match.source === 'fact')
+      .map((match) => byId.get(match.id))
+      .filter((fact): fact is RememberedFactRecord => fact !== undefined);
+    const recent = MEMORY_QUESTION_PATTERN.test(text.normalize('NFC'))
+      ? [...rememberedFacts].sort((left, right) => right.recordedAt.localeCompare(left.recordedAt))
+      : [];
+    const seen = new Set<string>();
+    const selected: CognitiveRelevantFact[] = [];
+    for (const fact of [...matched, ...recent]) {
+      const normalized = fact.content.trim().toLowerCase().replace(/\s+/g, ' ');
+      if (normalized === '' || seen.has(normalized)) continue;
+      seen.add(normalized);
+      selected.push({ content: fact.content.trim().slice(0, MAX_COGNITIVE_FACT_CHARS), recordedAt: fact.recordedAt });
+      if (selected.length >= MAX_COGNITIVE_FACTS) break;
+    }
+    this.logger?.info('Cognitive relevant facts selected.', {
+      availableFactCount: rememberedFacts.length, matchedFactCount: matched.length, selectedFactCount: selected.length,
+    });
+    return selected;
   }
 
   private selectCognitiveRecentExchanges(

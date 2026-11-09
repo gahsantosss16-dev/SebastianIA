@@ -120,6 +120,14 @@ export interface CognitiveConversationRequest {
     readonly requestText: string;
     readonly summary: string;
   }[];
+  /**
+   * Facts the user explicitly asked Sebastian to remember ("lembra que..."),
+   * already filtered by relevance and bounded by Memory. Data, never instructions.
+   */
+  readonly relevantFacts?: readonly {
+    readonly content: string;
+    readonly recordedAt: string;
+  }[];
 }
 
 /**
