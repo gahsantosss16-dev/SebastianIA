@@ -15,9 +15,29 @@ test('sidebar keeps its footer fixed and reserves an independently scrollable mi
   assert.match(SEBASTIAN_WEB_STYLES, /\.conversation-list \{[^}]*min-height: 0;[^}]*overflow-y: auto;/);
   assert.match(SEBASTIAN_WEB_STYLES, /\.sidebar-footer \{[^}]*flex-shrink: 0;/);
   assert.match(SEBASTIAN_WEB_HTML, /<nav class="conversation-list" id="conversation-list"[^>]*><\/nav>[\s\S]*<div class="sidebar-footer">/);
-  // The narrow layout never redesigns the compact header - the full list is
-  // simply hidden there, exactly like the brand name and the composer hint.
+  // The narrow layout moves the sidebar into an off-canvas drawer: the list
+  // stays hidden while the drawer is closed and is shown only when it opens,
+  // so the conversation history is reachable on mobile without ever pushing
+  // the chat layout.
   assert.match(SEBASTIAN_WEB_STYLES, /@media \(max-width: 760px\)[\s\S]*\.conversation-list \{ display: none; \}/);
+  assert.match(SEBASTIAN_WEB_STYLES, /@media \(max-width: 760px\)[\s\S]*\.workspace\.drawer-open \.conversation-list \{ display: flex; \}/);
+  assert.match(SEBASTIAN_WEB_HTML, /id="drawer-toggle"[^>]*aria-controls="sidebar"[^>]*aria-expanded="false"/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /drawerToggle\.setAttribute\('aria-expanded', String\(open\)\)/);
+});
+
+test('sidebar search filters conversations by title and groups them by period without any client-side storage', () => {
+  assert.match(SEBASTIAN_WEB_HTML, /<input id="conversation-search" type="search"/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /searchInput\.addEventListener\('input'/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /normalizeText\(item\.title\)\.includes\(query\)/);
+  for (const label of ['Hoje', 'Ontem', 'Últimos 7 dias', 'Últimos 30 dias', 'Anteriores']) {
+    assert.ok(SEBASTIAN_WEB_SCRIPT.includes(`'${label}'`), label);
+  }
+  assert.match(SEBASTIAN_WEB_SCRIPT, /item\.lastActivityAt \|\| item\.createdAt/);
+});
+
+test('welcome shortcuts only pre-fill the composer and never send a message on their own', () => {
+  assert.match(SEBASTIAN_WEB_SCRIPT, /chip\.addEventListener\('click', \(\) => \{\s*if \(input\.disabled\) return;\s*input\.value = prompt\.text;\s*resizeInput\(\);\s*input\.focus\(\);\s*\}\);/);
+  assert.doesNotMatch(SEBASTIAN_WEB_SCRIPT, /chip[\s\S]{0,200}requestSubmit/);
 });
 
 test('sidebar renders real, persisted conversations - listing, opening and creating them through the actual API, with the active one visually marked', () => {
