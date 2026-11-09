@@ -8,6 +8,7 @@ import {
 import { InvalidSpecializedToolInvocationInputError } from './SpecializedToolInvocationErrors.js';
 
 export const GITHUB_GET_PROJECT_TOOL_ID = 'github.getProject';
+export const GITHUB_LIST_PROJECTS_TOOL_ID = 'github.listProjects';
 export const GITHUB_LIST_TREE_TOOL_ID = 'github.listTree';
 export const GITHUB_READ_FILE_TOOL_ID = 'github.readFile';
 export const GITHUB_LIST_COMMITS_TOOL_ID = 'github.listCommits';
@@ -88,6 +89,9 @@ export class GitHubReadOnlyTool implements SpecializedTool {
       if (input.toolId === GITHUB_GET_PROJECT_TOOL_ID) {
         return this.completed(await this.getProject(input.payload));
       }
+      if (input.toolId === GITHUB_LIST_PROJECTS_TOOL_ID) {
+        return this.completed(this.listProjects(input.payload));
+      }
       if (input.toolId === GITHUB_LIST_TREE_TOOL_ID) {
         return this.completed(await this.listTree(input.payload));
       }
@@ -124,6 +128,25 @@ export class GitHubReadOnlyTool implements SpecializedTool {
       defaultBranch: project.remoteRepository.defaultBranch,
       access: project.permissions.access,
       message: `Projeto "${project.displayName}" (${project.remoteRepository.owner}/${project.remoteRepository.repository}, branch "${project.remoteRepository.defaultBranch}", acesso ${project.permissions.access}).`,
+    };
+  }
+
+  private listProjects(payload: Readonly<Record<string, unknown>>): Record<string, unknown> {
+    if (Object.keys(payload).length !== 0) return this.invalidPayload();
+    const projects = this.registry.listDescriptors().map((project) => ({
+      id: project.id,
+      displayName: project.displayName,
+      aliases: project.aliases,
+      owner: project.remoteRepository.owner,
+      repository: project.remoteRepository.repository,
+      defaultBranch: project.remoteRepository.defaultBranch,
+      access: project.permissions.access,
+    }));
+    return {
+      operation: 'listProjects', outcome: 'ok', projects,
+      message: projects.length === 0
+        ? 'Não há projetos GitHub autorizados.'
+        : `Projetos GitHub autorizados (${projects.length}):\n${projects.map((project) => `- ${project.displayName} [${project.id}] (${project.owner}/${project.repository}, branch ${project.defaultBranch}, acesso ${project.access})`).join('\n')}`,
     };
   }
 

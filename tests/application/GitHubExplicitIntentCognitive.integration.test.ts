@@ -17,6 +17,7 @@ import {
 import {
   GITHUB_COMMIT_NOUN_PATTERN,
   GITHUB_GENERAL_INTENT_PATTERN,
+  GITHUB_LIST_PROJECTS_INTENT_PATTERN,
   extractRequestedQuantity,
   githubOperationalTools,
 } from '../../application/OnlineSebastianApplication.js';
@@ -232,6 +233,20 @@ test('named multi-project routes select Neuro commits and LSB project without cr
   assert.deepEqual(neuroRoute?.deterministicIntent?.buildArguments('Qual o último commit do Neuro?'), { projectId: 'neuro-hub-pro', limit: 1 });
   assert.deepEqual(lsbRoute?.deterministicIntent?.buildArguments('Veja o projeto LSB'), { projectId: 'lsb-service' });
   assert.equal(routes.some((route) => route.deterministicIntent?.pattern.test('Qual o último commit do Neuro?') && route.deterministicIntent.buildArguments('Qual o último commit do Neuro?').projectId === 'lsb-service'), false);
+});
+
+test('all-authorized-projects intent selects the closed deterministic listing route', () => {
+  const routes = githubOperationalTools([
+    { id: 'sebastiania', displayName: 'SebastianIA', aliases: [], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'a', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+    { id: 'lumarkis-financeiro', displayName: 'LUMARKIS Gestão Financeira', aliases: [], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'b', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+    { id: 'lsb-service', displayName: 'LSB Service', aliases: [], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'c', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+    { id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: [], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'd', defaultBranch: 'main' }, permissions: { access: 'read-only' } },
+  ]);
+  const route = routes.find((entry) => entry.deterministicIntent?.pattern.test('Liste todos os projetos GitHub autorizados'));
+  assert.ok(GITHUB_LIST_PROJECTS_INTENT_PATTERN.test('Liste todos os projetos GitHub autorizados'));
+  assert.equal(route?.toolId, 'github.listProjects');
+  assert.deepEqual(route?.deterministicIntent?.buildArguments('Liste todos os projetos GitHub autorizados'), {});
+  assert.equal(route?.deterministicIntent?.requiresSynthesis?.('Liste todos os projetos GitHub autorizados'), false);
 });
 
 test('evidence synthesis is proportional for singular, plural and explicit quantity requests', async () => {

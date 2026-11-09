@@ -4,6 +4,7 @@ import {
   GITHUB_COMPARE_BRANCH_TOOL_ID,
   GITHUB_GET_PROJECT_TOOL_ID,
   GITHUB_LIST_COMMITS_TOOL_ID,
+  GITHUB_LIST_PROJECTS_TOOL_ID,
   GITHUB_LIST_TREE_TOOL_ID,
   GITHUB_READ_FILE_TOOL_ID,
   GitHubReadOnlyTool,
@@ -60,6 +61,24 @@ test('github.getProject resolves a registered project by alias without any netwo
   assert.equal(output.repository, 'neuro-hub');
   assert.equal(output.defaultBranch, 'main');
   assert.equal(output.access, 'read-only');
+  assert.equal(fetchCalls, 0);
+});
+
+test('github.listProjects returns every one of four registered projects, without a network call or inferred entries', async () => {
+  const projects = ['SebastianIA', 'LUMARKIS Gestão Financeira', 'LSB Service', 'Neuro Hub Pro'];
+  const four = new ProjectRegistry({ readOnly: true, entries: projects.map((displayName, index) => ({
+    id: ['sebastiania', 'lumarkis-financeiro', 'lsb-service', 'neuro-hub-pro'][index]!, displayName, aliases: [], resourceKind: 'github-repository' as const,
+    remoteRepository: { owner: 'gahsantosss16-dev', repository: `repo-${index}`, defaultBranch: 'main' }, permissions: { access: 'read-only' as const },
+  })) });
+  let fetchCalls = 0;
+  const tool = new GitHubReadOnlyTool({ token: SECRET_TOKEN, registry: four, fetchImpl: async () => { fetchCalls += 1; throw new Error('must not be called'); } });
+  const output = await outcomeOf(await tool.invoke(invocation(GITHUB_LIST_PROJECTS_TOOL_ID)));
+  assert.equal(output.outcome, 'ok');
+  assert.equal((output.projects as unknown[]).length, 4);
+  assert.match(String(output.message), /SebastianIA/);
+  assert.match(String(output.message), /LUMARKIS Gestão Financeira/);
+  assert.match(String(output.message), /LSB Service/);
+  assert.match(String(output.message), /Neuro Hub Pro/);
   assert.equal(fetchCalls, 0);
 });
 

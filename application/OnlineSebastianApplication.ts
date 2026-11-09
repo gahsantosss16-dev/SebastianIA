@@ -6,6 +6,7 @@ import {
   GIT_STATUS_TOOL_ID,
   GITHUB_COMPARE_BRANCH_TOOL_ID,
   GITHUB_GET_PROJECT_TOOL_ID,
+  GITHUB_LIST_PROJECTS_TOOL_ID,
   GITHUB_LIST_COMMITS_TOOL_ID,
   GITHUB_LIST_TREE_TOOL_ID,
   GITHUB_READ_FILE_TOOL_ID,
@@ -90,6 +91,7 @@ export const GITHUB_COMMIT_NOUN_PATTERN = /commits?/i;
  */
 export const GITHUB_GENERAL_INTENT_PATTERN =
   /^\s*(?:github|(?:e\s+)?no\s+github)\s*[?!.]*\s*$|^\s*(?:você\s+)?consegue\s+(?:ver|acessar)\s+(?:os?\s+)?(?:meus?\s+)?projet\w*\s*[?!.]*$|^(?=.*\bgithub\b)(?=.*\b(?:projet\w*|acesso|acessar)\b|.*\bconsegue\s+ver\b)(?!.*\bcommits?\b)/i;
+export const GITHUB_LIST_PROJECTS_INTENT_PATTERN = /(?=.*\b(?:todos?|listar|liste|quais)\b)(?=.*\bprojet\w*\b)(?=.*\b(?:github|autorizad\w*|cadastrad\w*)\b)/iu;
 
 /**
  * Generic "how many" extraction for a deterministic route's built argument -
@@ -232,6 +234,19 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
     ] satisfies OperationalToolPolicyEntry[];
   }) : [];
   return [
+    {
+      toolId: GITHUB_LIST_PROJECTS_TOOL_ID,
+      applicabilityTerms: ['todos os projetos', 'projetos github', 'projetos autorizados'],
+      description: 'Lista exatamente todos os projetos GitHub autorizados no cadastro fechado.',
+      requiresAuthorization: false,
+      requiredStringArguments: [],
+      deterministicIntent: {
+        pattern: GITHUB_LIST_PROJECTS_INTENT_PATTERN,
+        buildArguments: () => ({}),
+        answerFromSuccessfulObservation: (observation: { readonly summary: string }) => observation.summary,
+        requiresSynthesis: () => false,
+      },
+    },
     ...namedRoutes,
     { toolId: GITHUB_GET_PROJECT_TOOL_ID, applicabilityTerms: [...githubTerms, 'repositório', 'repo'], description: 'Resolve um projeto GitHub autorizado por id, nome ou apelido cadastrado.', requiresAuthorization: false, requiredStringArguments: ['projectId'], ...generalRoute },
     { toolId: GITHUB_LIST_TREE_TOOL_ID, applicabilityTerms: [...githubTerms, 'pasta', 'pastas', 'diretório', 'estrutura de arquivos'], description: 'Lista arquivos e pastas de um diretório do projeto GitHub autorizado; path vazio lista a raiz.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'] },
