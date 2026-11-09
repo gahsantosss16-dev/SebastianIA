@@ -316,7 +316,7 @@ export class DevelopmentModelProvider implements ModelProvider {
   }
 
   private extractRememberContent(text: string): string | undefined {
-    const trimmed = text.trim();
+    const trimmed = text.trim().normalize('NFC');
     // A question mark makes an otherwise imperative-looking phrase a query;
     // do not turn "Lembra que eu...?" into a persistent write.
     if (trimmed.endsWith('?')) {
