@@ -13,25 +13,32 @@ function fakeDatabase(initial: Record<string, Record<string, unknown>> = {}) {
     for (const [key, value] of Object.entries(records)) rows.set(`${namespace}\u0000${key}`, JSON.stringify(value));
   }
   const writes: string[] = [];
+  const queries: string[] = [];
   const database: SqlQueryable = {
     query: async (text: string, values: readonly unknown[] = []) => {
-      const [namespace, key, json] = values as string[];
-      const id = `${namespace}\u0000${key}`;
-      if (text.includes('on conflict (namespace, record_key) do nothing')) {
+      queries.push(text);
+      if (text.includes('select * from unnest($1::text[], $2::text[], $3::text[])') && text.includes('do nothing')) {
         writes.push(text);
-        if (rows.has(id)) return { rows: [] };
-        rows.set(id, json!);
-        return { rows: [{ record_key: key }] as never[] };
+        const [namespaces, keys, jsons] = values as string[][];
+        const out: { namespace: string; record_key: string }[] = [];
+        namespaces!.forEach((namespace, index) => {
+          const id = `${namespace}\u0000${keys![index]}`;
+          if (!rows.has(id)) { rows.set(id, jsons![index]!); out.push({ namespace, record_key: keys![index]! }); }
+        });
+        return { rows: out as never[] };
       }
-      if (text.includes('do update')) { writes.push(text); rows.set(id, json!); return { rows: [] }; }
-      if (text.includes('where namespace = $1 and record_key = $2')) {
-        const found = rows.get(id);
-        return { rows: (found === undefined ? [] : [{ value_json: found }]) as never[] };
+      if (text.includes('join unnest($1::text[], $2::text[])')) {
+        const [namespaces, keys] = values as string[][];
+        const out = namespaces!.flatMap((namespace, index) => {
+          const found = rows.get(`${namespace}\u0000${keys![index]}`);
+          return found === undefined ? [] : [{ namespace, record_key: keys![index]!, value_json: found }];
+        });
+        return { rows: out as never[] };
       }
       throw new Error(`unexpected query: ${text}`);
     },
   };
-  return { store: new PostgresMemoryStore(database), rows, writes };
+  return { store: new PostgresMemoryStore(database), rows, writes, queries };
 }
 
 function sourceFile(document: unknown): { dir: string; file: string } {
@@ -118,4 +125,15 @@ test('reports never contain record keys or values', async () => {
   const report = await migrateFileMemoryToPostgres(file, fakeDatabase().store, 'copy');
   const serialized = JSON.stringify(report);
   for (const secret of ['conv-1', 'converse:1', 'verde-água', 'Cor favorita']) assert.equal(serialized.includes(secret), false);
+});
+
+test('migration uses a constant number of round trips regardless of record count', async () => {
+  const many: Record<string, Record<string, unknown>> = { 'command-results': {} };
+  for (let index = 0; index < 1_200; index += 1) many['command-results']![`converse:${index}`] = { index };
+  const { file } = sourceFile(many);
+  const { store, queries } = fakeDatabase();
+  const report = await migrateFileMemoryToPostgres(file, store, 'copy');
+  assert.equal(report.verified, true);
+  assert.equal(report.totals.inserted, 1_200);
+  assert.equal(queries.length, 6); // 3 insert batches + 3 read-back batches of 500
 });

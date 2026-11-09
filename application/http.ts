@@ -33,10 +33,6 @@ async function startOnlineServer(): Promise<void> {
     const dataDir = resolveSebastianDataDirectory();
     persistence = createMemoryStoreRuntime(dataDir);
     await persistence.ready();
-    if (persistence.driver === 'supabase' && process.env.SEBASTIAN_MEMORY_MIGRATION === 'copy') {
-      // Cutover: copy the final file snapshot before serving. Fails closed; the file is never modified.
-      await runFileToSupabaseMigration(dataDir, 'copy', true);
-    }
     const projectContext = createConfiguredProjectContext(dataDir, process.env, persistence.store);
     const projectTaskOrchestrator = createConfiguredProjectTaskOrchestrator(dataDir, process.env, undefined, cognitiveModelProvider, persistence.store);
     const application = createOnlineSebastianApplication(logger, cognitiveModelProvider, dataDir, process.env, projectContext, projectTaskOrchestrator, persistence.store);
@@ -57,6 +53,18 @@ async function startOnlineServer(): Promise<void> {
     const started = await httpServer.listen(port);
     const build = resolveBuildProvenance();
     logger.info('Sebastian online started.', { port: started.port, memoryDriver: persistence.driver, buildSha: build.sha, buildSource: build.source });
+    if (persistence.driver === 'supabase' && process.env.SEBASTIAN_MEMORY_MIGRATION === 'copy') {
+      // Cutover right after listen (hosts require listen() within seconds). The file is never
+      // modified; if verification fails the server stops instead of serving incomplete memory.
+      try {
+        await runFileToSupabaseMigration(dataDir, 'copy', true);
+      } catch (error) {
+        logger.error('Memory migration failed; stopping server. Set SEBASTIAN_STORE_DRIVER=file to roll back.', safeError(error));
+        process.exitCode = 1;
+        await started.close().catch(() => undefined);
+        return;
+      }
+    }
     if (persistence.driver === 'file' && process.env.SEBASTIAN_SUPABASE_DATABASE_URL?.trim()) {
       // Background preflight while still serving from the file: never affects availability.
       void runSupabasePreflight(dataDir);
