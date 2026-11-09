@@ -9,6 +9,7 @@ import type { Logger } from '../core/logger.js';
 import {
   DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS,
   DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS,
+  MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES,
   MAX_OPERATIONAL_DECISIONS,
 } from '../core/cognition/index.js';
 import { DEFAULT_GITHUB_TIMEOUT_MS } from '../core/tool/index.js';
@@ -51,7 +52,7 @@ export const HTTP_BODY_TIMEOUT_MS = 10_000;
  */
 export const HTTP_EXECUTION_TIMEOUT_MS =
   DEFAULT_GITHUB_TIMEOUT_MS + // the deterministic pre-fetch Tool call, before `decide` is ever consulted
-  MAX_OPERATIONAL_DECISIONS * DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS + // every `decide` call in the loop
+  (MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES) * DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS + // every `decide` call in the loop, plus the single timeout retry
   (MAX_OPERATIONAL_DECISIONS - 1) * DEFAULT_GITHUB_TIMEOUT_MS + // a Tool call between each pair of `decide` calls
   DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS + // the final synthesis of a successful conclusion
   2_000; // margin for non-Gemini overhead; `respond`'s single-call budget is already well under this ceiling
