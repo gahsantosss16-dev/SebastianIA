@@ -145,6 +145,11 @@ button { cursor: pointer; }
 .conversation-item:hover { background: rgba(255, 255, 255, 0.045); }
 .conversation-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .conversation-item[aria-current="true"] { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* Keep each conversation at its natural height; only the list scrolls.
+   Flex items previously shrank to fit the sidebar and overlapped text. */
+.conversation-list > * { flex: 0 0 auto; min-height: 38px; }
+.conversation-list { overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: rgba(200,164,99,.35) transparent; }
+.conversation-item { min-height: 38px; line-height: 19px; padding-block: 9px; }
 .conversation-list-empty { padding: 9px 10px; color: var(--muted); font-size: 12px; }
 .sidebar-footer { flex-shrink: 0; min-width: 0; display: grid; gap: 4px; }
 .sidebar-status { display: flex; align-items: center; gap: 8px; padding: 8px 6px; color: var(--muted); font-size: 12px; }
