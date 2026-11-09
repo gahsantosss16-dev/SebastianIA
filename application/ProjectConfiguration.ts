@@ -47,10 +47,11 @@ export function loadConfiguredProjects(registry: ProjectRegistry, env: NodeJS.Pr
 }
 
 export function createConfiguredProjectContext(dataDir: string, env: NodeJS.ProcessEnv = process.env, memoryStore?: AsyncMemoryStore): ProjectConversationContext | undefined {
-  if (env.SEBASTIAN_PROJECTS_FILE === undefined) return undefined;
   if (resolveSebastianStoreDriver(env) === 'supabase' && memoryStore === undefined) {
     throw new Error('Supabase project composition requires the shared async memory store.');
   }
+  // Remote GitHub projects have no local checkout/policy file in production,
+  // but still need a durable per-conversation selection for read-only work.
   return new ProjectConversationContext(loadConfiguredProjects(createGitHubProjectRegistry(env), env), memoryStore ?? new AsyncFileMemoryStore(new FileMemoryStore(resolveMemoryFilePath(dataDir))), env.SEBASTIAN_ENVIRONMENT_ID ?? 'unidentified-server');
 }
 

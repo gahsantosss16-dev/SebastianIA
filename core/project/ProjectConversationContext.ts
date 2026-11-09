@@ -106,9 +106,9 @@ export class ProjectConversationContext {
     }
     if (!active) return isIdentity || /regras.*projeto/.test(query) ? { project: null, message: 'Nenhum projeto está ativo nesta conversa. Diga “Use o Neuro”, “Use o LSB” ou “Use o Sebastian”.' } : undefined;
     const project = this.registry.getById(active.id)!;
-    let policies: ReturnType<typeof loadProjectPolicies>;
+    let policies: ReturnType<typeof loadProjectPolicies> = [];
     try {
-      policies = loadProjectPolicies(project, this.environmentId, text);
+      if (project.workspace !== undefined) policies = loadProjectPolicies(project, this.environmentId, text);
     } catch (error) {
       await this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: project.id, policyStatus: 'unavailable', selectedAt: at });
       return { project: await this.active(conversationId), message: `Projeto: ${project.displayName}. ${error instanceof Error ? error.message : 'Regras indisponíveis.'} Nenhuma regra do projeto anterior foi reaproveitada e nenhuma ação foi executada.` };
@@ -140,7 +140,7 @@ export class ProjectConversationContext {
     const taskConnectionPending = newSelectionThisTurn ? hasRemainderThisTurn : !explicitSelection;
     return {
       project: loaded,
-      message: `Projeto: ${project.displayName}. Ambiente: ${active.environment}. Checkout: ${project.workspace!.root}. Regras-base carregadas: ${policies.map(policy => policy.path).join(', ')}.\n${explicitSelection ? 'Seleção associada somente a esta conversa.' : 'Identifiquei o projeto e suas regras.'}`,
+      message: `Projeto: ${project.displayName}. Ambiente: ${active.environment}. Checkout: ${project.workspace?.root ?? 'remoto via GitHub'}. Regras-base carregadas: ${policies.map(policy => policy.path).join(', ') || 'não aplicável'}.\n${explicitSelection ? 'Seleção associada somente a esta conversa.' : 'Identifiquei o projeto e suas regras.'}`,
       ...(taskConnectionPending ? { taskConnectionPending: true } : {}),
     };
   }

@@ -239,7 +239,7 @@ export class CognitiveOperationalOrchestrator {
 
   public async execute(
     objective: string,
-    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly signal?: AbortSignal },
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
   ): Promise<CognitiveOperationalResult> {
     const observations: CognitiveObservationRecord[] = [];
     let toolCalls = 0;
@@ -315,7 +315,9 @@ export class CognitiveOperationalOrchestrator {
         this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined }, toolCalls);
         return this.finish({ outcome: 'blocked', reason: 'cognitiveToolNotInMenu', toolCalls });
       }
-      const args = decision.toolArguments ?? {};
+      const args = decision.toolId.startsWith('github.') && context.activeProjectId !== undefined
+        ? { ...(decision.toolArguments ?? {}), projectId: context.activeProjectId }
+        : decision.toolArguments ?? {};
       if (!this.argumentsMatchPolicy(policy, args)) {
         this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined }, toolCalls);
         return this.finish({ outcome: 'blocked', reason: 'cognitiveInvalidToolArguments', toolCalls });

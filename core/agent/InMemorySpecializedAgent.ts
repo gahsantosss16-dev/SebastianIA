@@ -163,6 +163,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const conversationId = command.conversation?.conversationId ?? 'conversation-1';
     const abortSignal = this.extractAbortSignal(input);
     const projectReply = await this.projectContext?.handle(conversationId, text, input.executionId, input.requestedAt);
+    const activeProject = projectReply?.project ?? await this.projectContext?.active(conversationId);
     if (projectReply && this.projectTaskOrchestrator && projectReply.project) {
       // Identity/selection/rules handling above never changes because of this: it always
       // runs and its reply is only overridden below when the same message ALSO carries a
@@ -221,6 +222,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
       false,
       immediatePreviousExchange,
       cognitiveRelevantFacts,
+      activeProject?.id,
     );
     const conversationalDecision = await this.applyCognitiveConversationFallback(
       operationalDecision,
@@ -243,7 +245,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const effectiveDecision = replaceableByOperationalFallback && conversationalDecision === decision && operationalDecision === decision
       ? await this.applyCognitiveOperationalDecision(
           decision, text, input.requestedAt, input.executionId, input.responsibilityId, budgetedCognitiveRecentExchanges, abortSignal, true,
-          immediatePreviousExchange, cognitiveRelevantFacts,
+          immediatePreviousExchange, cognitiveRelevantFacts, activeProject?.id,
         )
       : conversationalDecision;
     const result = await this.resolveConversationDecision(input, effectiveDecision, rememberedFacts);
@@ -261,6 +263,7 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     forceFallback = false,
     immediatePreviousExchange?: RecentExchangeRecord,
     relevantFacts: readonly CognitiveRelevantFact[] = [],
+    activeProjectId?: string,
   ): Promise<ModelInterpretationDecision> {
     const eligible =
       forceFallback ||
@@ -284,10 +287,12 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
         ...recentExchanges.map((exchange) => ({
           content: `Usuário: ${exchange.requestText}\nSebastian: ${exchange.summary}`.slice(0, 2_000),
         })),
+        ...(activeProjectId === undefined ? [] : [{ content: `Projeto GitHub ativo desta conversa: ${activeProjectId}. Toda ferramenta github.* deve usar exatamente este projectId, salvo nova seleção explícita.` }]),
       ],
       ...(immediatePreviousExchange === undefined
         ? {}
         : { immediateContext: this.formatImmediateContext(immediatePreviousExchange) }),
+      ...(activeProjectId === undefined ? {} : { activeProjectId }),
       ...(signal === undefined ? {} : { signal }),
     });
     if (result.outcome === 'answered') {
