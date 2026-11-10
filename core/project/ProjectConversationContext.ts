@@ -100,7 +100,7 @@ export class ProjectConversationContext {
     // own, unconditionally.
     const newSelectionThisTurn = reference !== undefined || direct !== undefined;
     const hasRemainderThisTurn =
-      newSelectionThisTurn && (boundedFirstClause !== firstClause || query.length > firstClause.length);
+      newSelectionThisTurn && (namedTarget !== undefined || boundedFirstClause !== firstClause || query.length > firstClause.length);
     let active = await this.active(conversationId);
     if (reference !== undefined || direct) {
       const target = direct ?? this.registry.resolve(reference!);
