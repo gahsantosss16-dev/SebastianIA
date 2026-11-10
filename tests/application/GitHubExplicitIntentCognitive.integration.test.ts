@@ -942,3 +942,21 @@ test('production evidence: a bare "github?" mention never reaches a model that h
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('latest alteration question routes to real GitHub commit with limit one, not repository metadata', () => {
+  const project = {
+    id: 'lumarkis-financeiro',
+    displayName: 'LUMARKIS Gestão Financeira',
+    aliases: ['LUMARKIS'],
+    resourceKind: 'github-repository' as const,
+    remoteRepository: { owner: 'gahsantosss16-dev', repository: 'financeiro-lumarkis', defaultBranch: 'main' },
+    permissions: { access: 'read-only' as const },
+  };
+  const catalog = githubOperationalTools([project, { ...project, id: 'neuro-hub-pro', displayName: 'Neuro Hub Pro', aliases: ['Neuro'], remoteRepository: { ...project.remoteRepository, repository: 'neuro-hub-pro' } }]);
+  const objective = 'Sebastian, consulte o projeto LUMARKIS Gestão Financeira no GitHub e me diga qual foi a última alteração realizada.';
+  const matches = catalog.filter(entry => entry.deterministicIntent?.pattern.test(objective));
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.toolId, GITHUB_LIST_COMMITS_TOOL_ID);
+  assert.deepEqual(matches[0]!.deterministicIntent!.buildArguments(objective), { projectId: 'lumarkis-financeiro', limit: 1 });
+  assert.equal(matches[0]!.deterministicIntent!.requiresSynthesis?.(objective), false);
+});

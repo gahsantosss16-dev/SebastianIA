@@ -230,8 +230,10 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
   };
   const namedRoutes = projects.length > 1 ? projects.flatMap((project) => {
     const mention = projectMentionLookahead(project);
-    const namedProjectPattern = new RegExp(`${mention}(?=.*\\b(?:projet\\w*|repo(?:sitório)?|veja|ver|acess\\w*|github)\\b)(?!.*\\bcommits?\\b)`, 'iu');
-    const namedCommitPattern = new RegExp(`${mention}(?=.*\\bcommits?\\b)`, 'iu');
+    // Natural requests for the latest change require actual commit evidence.
+    const latestChangePattern = '(?:[uú]ltim[ao]s?\\s+(?:altera[cç][aã]o|altera[cç][oõ]es|mudan[cç]a|modifica[cç][aã]o|atualiza[cç][aã]o)|(?:altera[cç][aã]o|mudan[cç]a|modifica[cç][aã]o)\\s+mais\\s+recente)';
+    const namedProjectPattern = new RegExp(`${mention}(?=.*\\b(?:projet\\w*|repo(?:sitório)?|veja|ver|acess\\w*|github)\\b)(?!.*\\bcommits?\\b)(?!.*${latestChangePattern})`, 'iu');
+    const namedCommitPattern = new RegExp(`${mention}(?:(?=.*\\bcommits?\\b)|(?=.*\\bgithub\\b)(?=.*${latestChangePattern}))`, 'iu');
     const namedFilePattern = new RegExp(`${mention}(?=.*\\b(?:arquivo\\s+)?[A-Za-z0-9][A-Za-z0-9._/-]*\\.[A-Za-z0-9]{1,10}\\b)`, 'iu');
     return [
       {
@@ -280,11 +282,11 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
         deterministicIntent: {
           pattern: namedCommitPattern,
           buildArguments: (objective: string) => {
-            const quantity = extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN);
+            const quantity = new RegExp(latestChangePattern, 'iu').test(objective) ? 1 : extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN);
             return quantity === undefined ? { projectId: project.id } : { projectId: project.id, limit: quantity };
           },
           answerFromSuccessfulObservation: (observation: { readonly summary: string }) => `Commits recentes no GitHub:\n${observation.summary}`,
-          requiresSynthesis: (objective: string) => extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN) === undefined,
+          requiresSynthesis: (objective: string) => !new RegExp(latestChangePattern, 'iu').test(objective) && extractRequestedQuantity(objective, GITHUB_COMMIT_NOUN_PATTERN) === undefined,
         },
       },
     ] satisfies OperationalToolPolicyEntry[];
