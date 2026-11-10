@@ -1195,7 +1195,8 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
           const saved = await history.json();
           const turns = Array.isArray(saved.messages) ? saved.messages : [];
           const last = turns[turns.length - 1];
-          if (last && last.role !== 'user' && typeof last.content === 'string') {
+          const previous = turns[turns.length - 2];
+          if (previous && previous.role === 'user' && previous.content === message && last && last.role !== 'user' && typeof last.content === 'string') {
             showConversationMessages(turns);
             showProject(saved.project, saved.task);
             recovered = true;
