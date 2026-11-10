@@ -1181,9 +1181,35 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       appendMessage('sebastian', body.message);
       showProject(body.project, body.task);
       void refreshConversationList();
-    } catch {
+    } catch (error) {
       thinking.remove();
-      appendMessage('sebastian', 'A conexão caiu antes da resposta. Verifique sua conexão e tente novamente.', 'error');
+      // The server may have finished and persisted the answer after the browser
+      // lost its response. Recover the saved conversation before claiming failure.
+      let recovered = false;
+      try {
+        const history = await fetch('/api/web/conversations/' + encodeURIComponent(activeConversationId), {
+          credentials: 'same-origin',
+          cache: 'no-store'
+        });
+        if (history.ok) {
+          const saved = await history.json();
+          const turns = Array.isArray(saved.messages) ? saved.messages : [];
+          const last = turns[turns.length - 1];
+          if (last && last.role !== 'user' && typeof last.content === 'string') {
+            showConversationMessages(turns);
+            showProject(saved.project, saved.task);
+            recovered = true;
+          }
+        }
+      } catch {
+        // History recovery is best-effort; do not send the same message twice.
+      }
+      if (!recovered) {
+        input.value = message;
+        resizeInput();
+        appendMessage('sebastian', 'Não foi possível confirmar a entrega da resposta. Sua mensagem foi mantida para tentar novamente; confira o histórico antes de reenviar.', 'error');
+      }
+      console.warn('Conversation response interrupted; history recovery:', recovered ? 'restored' : 'unavailable', error instanceof Error ? error.name : 'unknown');
     } finally {
       pending = false;
       conversation.removeAttribute('aria-busy');
