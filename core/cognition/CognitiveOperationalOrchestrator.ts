@@ -13,6 +13,13 @@ import type {
 } from './CognitiveModelProviderContract.js';
 
 export const MAX_OPERATIONAL_DECISIONS = 4;
+
+/**
+ * Stored as a pending operation's `validationToolId` when its policy is
+ * `resultEvidence: 'toolOutcomeOnly'`: no local validation exists for the
+ * changed target, so none is ever invoked or claimed. Not a real Tool id.
+ */
+export const NO_LOCAL_VALIDATION_TOOL_ID = 'none.targetProjectNotValidated';
 /** Extra `decide` calls the loop may spend recovering from a provider timeout (see `execute`). */
 export const MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES = 1;
 const MAX_OBSERVATION_CHARS = 2_000;
@@ -32,6 +39,14 @@ export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
   /** Optional non-empty string arguments a route may supply (e.g. a text to locate). */
   readonly optionalStringArguments?: readonly string[];
   readonly validationToolId?: string;
+  /**
+   * `toolOutcomeOnly`: the Tool changes an external target (e.g. a remote
+   * GitHub project) that no local validation can test. The authorized run
+   * then reports only the Tool's own proven outcome, never invokes a local
+   * validation as if it covered that target, and never claims the change
+   * was tested or "corrigido". Must not be combined with `validationToolId`.
+   */
+  readonly resultEvidence?: 'toolOutcomeOnly';
   readonly risk?: string;
   /**
    * Optional deterministic capability routing: when the objective matches
@@ -333,7 +348,8 @@ export class CognitiveOperationalOrchestrator {
       }
       if (policy.requiresAuthorization) {
         const validationToolId = policy.validationToolId;
-        if (!validationToolId || !this.catalog.some((entry) => entry.toolId === validationToolId && !entry.requiresAuthorization)) {
+        const outcomeOnly = policy.resultEvidence === 'toolOutcomeOnly';
+        if (outcomeOnly ? validationToolId !== undefined : (!validationToolId || !this.catalog.some((entry) => entry.toolId === validationToolId && !entry.requiresAuthorization))) {
           this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined }, toolCalls);
           return this.finish({ outcome: 'blocked', reason: 'validationUnavailable', toolCalls });
         }
@@ -343,10 +359,14 @@ export class CognitiveOperationalOrchestrator {
           outcome: 'proposed',
           operation,
           toolCalls,
-          answer:
-            `Encontrei uma correção possível. Proponho ${operation.proposedAction}. ` +
-            `Escopo: ${operation.toolId} ${JSON.stringify(operation.toolArguments)}. ` +
-            `Risco: ${operation.risk}. Posso executar e validar essa alteração?`,
+          answer: outcomeOnly
+            ? `Proponho ${operation.proposedAction}. ` +
+              `Escopo: ${operation.toolId} ${JSON.stringify(operation.toolArguments)}. ` +
+              `Risco: ${operation.risk}. Esta operação não executa testes do projeto alterado; ` +
+              'informarei somente o resultado confirmado pela ferramenta. Posso executar essa operação?'
+            : `Encontrei uma correção possível. Proponho ${operation.proposedAction}. ` +
+              `Escopo: ${operation.toolId} ${JSON.stringify(operation.toolArguments)}. ` +
+              `Risco: ${operation.risk}. Posso executar e validar essa alteração?`,
         });
       }
       const invocation = await this.tool.invoke({
@@ -510,7 +530,11 @@ export class CognitiveOperationalOrchestrator {
       return { answer: 'A proposta expirou e não foi executada.', operation: this.transition(operation, 'expired', context.requestedAt) };
     }
     const policy = this.catalog.find((entry) => entry.toolId === operation.toolId);
-    if (!policy || !policy.requiresAuthorization || policy.validationToolId !== operation.validationToolId) {
+    const outcomeOnly = policy?.resultEvidence === 'toolOutcomeOnly';
+    const expectedValidationToolId = outcomeOnly
+      ? (policy?.validationToolId === undefined ? NO_LOCAL_VALIDATION_TOOL_ID : undefined)
+      : policy?.validationToolId;
+    if (!policy || !policy.requiresAuthorization || expectedValidationToolId === undefined || expectedValidationToolId !== operation.validationToolId) {
       return { answer: 'A proposta não corresponde mais ao catálogo autorizado e não foi executada.', operation: this.transition(operation, 'failed', context.requestedAt) };
     }
     if (!this.argumentsMatchPolicy(policy, operation.toolArguments)) {
@@ -524,6 +548,9 @@ export class CognitiveOperationalOrchestrator {
         requestedAt: context.requestedAt,
         payload: operation.toolArguments,
       });
+    if (outcomeOnly) {
+      return this.outcomeOnlyResult(operation, action, context.requestedAt);
+    }
     if (action.status !== 'completed' || action.output.outcome !== 'ok') {
       return { answer: 'A alteração autorizada falhou e não foi considerada resolvida.', operation: this.transition(operation, 'failed', context.requestedAt) };
     }
@@ -584,7 +611,7 @@ export class CognitiveOperationalOrchestrator {
       proposedAction: policy.description,
       toolId: policy.toolId,
       toolArguments: structuredClone(toolArguments) as Readonly<Record<string, unknown>>,
-      validationToolId: policy.validationToolId!,
+      validationToolId: policy.resultEvidence === 'toolOutcomeOnly' ? NO_LOCAL_VALIDATION_TOOL_ID : policy.validationToolId!,
       risk: policy.risk ?? 'alteração reversível de baixo risco',
       authorizationRequirement: 'explicitUserAuthorization',
       status: 'proposed',
@@ -592,6 +619,37 @@ export class CognitiveOperationalOrchestrator {
       expiresAt: new Date(Date.parse(createdAt) + PENDING_OPERATION_TTL_MS).toISOString(),
       updatedAt: createdAt,
     });
+  }
+
+  /**
+   * Reports exactly what the Tool itself confirmed for an external target -
+   * never a local validation, never "corrigido"/"testado". On failure, it
+   * states that nothing from this step is considered done and that actions
+   * confirmed in earlier steps were preserved (never rolled back).
+   */
+  private outcomeOnlyResult(
+    operation: PendingOperationRecord,
+    action: Awaited<ReturnType<SpecializedTool['invoke']>>,
+    requestedAt: string,
+  ): { readonly answer: string; readonly operation: PendingOperationRecord } {
+    const notTested = 'Nenhum teste ou validação do projeto alterado foi executado; a alteração não foi testada.';
+    const toolMessage = action.status === 'completed' && typeof action.output.message === 'string' && action.output.message.trim() !== ''
+      ? action.output.message.trim()
+      : undefined;
+    if (action.status === 'completed' && action.output.outcome === 'ok') {
+      return {
+        answer: `${toolMessage ?? 'A ferramenta confirmou a operação.'} ${notTested}`,
+        operation: this.transition(operation, 'completed', requestedAt),
+      };
+    }
+    return {
+      answer:
+        `A operação não foi concluída: ${toolMessage ?? 'a ferramenta não confirmou o resultado.'} ` +
+        'Nada desta etapa foi considerado concluído. Ações já confirmadas em etapas anteriores ' +
+        '(por exemplo, branch criada ou commit registrado) foram preservadas e não foram revertidas. ' +
+        notTested,
+      operation: this.transition(operation, 'failed', requestedAt),
+    };
   }
 
   private transition(operation: PendingOperationRecord, status: PendingOperationRecord['status'], updatedAt: string): PendingOperationRecord {

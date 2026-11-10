@@ -13,6 +13,10 @@ const WRITE_OWNER = 'gahsantosss16-dev';
 const WRITE_REPOSITORY = 'financeiro-lumarkis';
 const WRITE_PROJECT_ID = 'lumarkis-financeiro';
 
+function statusSuffix(status: number | undefined): string {
+  return status === undefined ? '' : ` (HTTP ${status})`;
+}
+
 /**
  * Narrow GitHub write boundary. It can only create a task branch, create or
  * replace one non-sensitive text file on that branch (GitHub records a real
@@ -39,9 +43,11 @@ export class GitHubControlledWriteTool implements SpecializedTool {
     if (typeof branch !== 'string' || !BRANCH.test(branch) || branch === project.remoteRepository.defaultBranch) return this.result('invalidToolArguments');
     const head = await this.request(project, `/git/ref/heads/${encodeURIComponent(project.remoteRepository.defaultBranch)}`, 'GET');
     const sha = head.ok && typeof (head.body as Record<string, unknown>).object === 'object' ? ((head.body as { object: { sha?: unknown } }).object.sha) : undefined;
-    if (typeof sha !== 'string') return this.result('githubRequestFailed');
+    if (typeof sha !== 'string') return this.result('githubRequestFailed', `O GitHub não informou o commit atual de "${project.remoteRepository.defaultBranch}"; a branch "${branch}" não foi criada.`);
     const created = await this.request(project, '/git/refs', 'POST', { ref: `refs/heads/${branch}`, sha });
-    return created.ok ? this.result('ok', `Branch de tarefa "${branch}" criada a partir de "${project.remoteRepository.defaultBranch}".`, { projectId: project.id, branch }) : this.result('githubRequestFailed');
+    return created.ok
+      ? this.result('ok', `Branch "${branch}" criada no GitHub a partir de "${project.remoteRepository.defaultBranch}" (commit base ${sha.slice(0, 7)}).`, { projectId: project.id, branch })
+      : this.result('githubRequestFailed', `O GitHub não confirmou a criação da branch "${branch}"${statusSuffix(created.status)}.`);
   }
 
   private async upsertFile(project: ProjectDescriptor, payload: Readonly<Record<string, unknown>>): Promise<SpecializedToolInvocationResult> {
@@ -52,20 +58,31 @@ export class GitHubControlledWriteTool implements SpecializedTool {
     const body: Record<string, unknown> = { message: message.slice(0, 200), content: Buffer.from(content, 'utf8').toString('base64'), branch };
     if (sha) body.sha = sha;
     const written = await this.request(project, `/contents/${path.split('/').map(encodeURIComponent).join('/')}`, 'PUT', body);
-    return written.ok ? this.result('ok', `Arquivo "${path}" gravado na branch "${branch}"; commit registrado no GitHub.`, { projectId: project.id, branch, path }) : this.result('githubRequestFailed');
+    if (!written.ok) return this.result('githubRequestFailed', `O GitHub não confirmou a gravação de "${path}" na branch "${branch}"${statusSuffix(written.status)}; nenhum commit desta etapa foi confirmado.`);
+    const commit = (written.body as { commit?: { sha?: unknown } }).commit;
+    const commitSha = typeof commit === 'object' && commit !== null && typeof commit.sha === 'string' ? commit.sha : undefined;
+    const verb = sha ? 'alterado' : 'criado';
+    return commitSha
+      ? this.result('ok', `Arquivo "${path}" ${verb} na branch "${branch}"; commit ${commitSha.slice(0, 7)} registrado no GitHub.`, { projectId: project.id, branch, path, commitSha })
+      : this.result('ok', `O GitHub aceitou a gravação de "${path}" na branch "${branch}", mas não retornou o identificador do commit.`, { projectId: project.id, branch, path });
   }
 
   private async openPullRequest(project: ProjectDescriptor, payload: Readonly<Record<string, unknown>>): Promise<SpecializedToolInvocationResult> {
     const branch = payload.branch; const title = payload.title; const body = payload.body;
     if (typeof branch !== 'string' || !BRANCH.test(branch) || typeof title !== 'string' || title.trim() === '' || (body !== undefined && typeof body !== 'string')) return this.result('invalidToolArguments');
     const opened = await this.request(project, '/pulls', 'POST', { title: title.slice(0, 200), head: branch, base: project.remoteRepository.defaultBranch, ...(typeof body === 'string' ? { body: body.slice(0, 10_000) } : {}) });
-    return opened.ok ? this.result('ok', `Pull request aberto para revisão da branch "${branch}"; a branch principal não foi modificada.`, { projectId: project.id, branch }) : this.result('githubRequestFailed');
+    if (!opened.ok) return this.result('githubRequestFailed', `O GitHub não confirmou a abertura do pull request da branch "${branch}"${statusSuffix(opened.status)}.`);
+    const pr = opened.body as { number?: unknown; html_url?: unknown };
+    const number = typeof pr.number === 'number' ? pr.number : undefined;
+    const url = typeof pr.html_url === 'string' ? pr.html_url : undefined;
+    const label = number === undefined ? 'Pull request' : `Pull request #${number}`;
+    return this.result('ok', `${label} aberto da branch "${branch}" para "${project.remoteRepository.defaultBranch}"${url ? ` (${url})` : ''}; sem merge, a branch principal não foi modificada.`, { projectId: project.id, branch, ...(number === undefined ? {} : { pullRequestNumber: number }), ...(url ? { pullRequestUrl: url } : {}) });
   }
 
-  private async request(project: ProjectDescriptor, path: string, method: string, body?: Record<string, unknown>, query?: Record<string, string>): Promise<{ ok: boolean; body: unknown }> {
+  private async request(project: ProjectDescriptor, path: string, method: string, body?: Record<string, unknown>, query?: Record<string, string>): Promise<{ ok: boolean; status?: number; body: unknown }> {
     const url = new URL(`${API}/repos/${encodeURIComponent(project.remoteRepository.owner)}/${encodeURIComponent(project.remoteRepository.repository)}${path}`);
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
-    try { const response = await this.fetchImpl(url.toString(), { method, headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${this.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); const text = await response.text(); return { ok: response.ok, body: text === '' ? {} : JSON.parse(text) }; } catch { return { ok: false, body: {} }; }
+    try { const response = await this.fetchImpl(url.toString(), { method, headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${this.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); const text = await response.text(); return { ok: response.ok, status: response.status, body: text === '' ? {} : JSON.parse(text) }; } catch { return { ok: false, body: {} }; }
   }
 
   private result(outcome: string, message = 'A operação de escrita não pôde ser concluída com segurança.', extra: Record<string, unknown> = {}): SpecializedToolInvocationResult { return { status: 'completed', output: Object.freeze({ outcome: outcome === 'ok' ? 'ok' : 'rejected', ...(outcome === 'ok' ? {} : { reasonCode: outcome }), message, ...extra }) }; }

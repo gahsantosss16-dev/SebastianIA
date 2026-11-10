@@ -44,3 +44,36 @@ test('controlled writes reject every project other than LUMARKIS before network 
   assert.equal(result?.reasonCode, 'writeNotEnabled');
   assert.equal(calls, 0);
 });
+
+test('controlled GitHub writes report only the evidence GitHub returned: branch, commit and PR number', async () => {
+  const tool = new GitHubControlledWriteTool('secret', registry, async (url, init) => {
+    const method = String(init.method);
+    if (url.includes('/git/ref/heads/')) return { ok: true, status: 200, text: async () => JSON.stringify({ object: { sha: 'base1234567' } }) };
+    if (url.includes('/git/refs')) return { ok: true, status: 201, text: async () => '{}' };
+    if (url.includes('/contents/') && method === 'GET') return { ok: true, status: 200, text: async () => JSON.stringify({ sha: 'old-blob' }) };
+    if (url.includes('/contents/')) return { ok: true, status: 200, text: async () => JSON.stringify({ commit: { sha: 'c0ffee12345' } }) };
+    return { ok: true, status: 201, text: async () => JSON.stringify({ number: 7, html_url: 'https://github.com/gahsantosss16-dev/financeiro-lumarkis/pull/7' }) };
+  });
+  const branch = await outcome(tool, GITHUB_CREATE_BRANCH_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/fix' });
+  assert.match(String(branch?.message), /Branch "sebastian\/fix" criada no GitHub a partir de "main" \(commit base base123\)/);
+  const file = await outcome(tool, GITHUB_UPSERT_FILE_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/fix', path: 'README.md', content: 'x', message: 'docs' });
+  assert.match(String(file?.message), /Arquivo "README\.md" alterado na branch "sebastian\/fix"; commit c0ffee1 registrado no GitHub\./);
+  assert.equal(file?.commitSha, 'c0ffee12345');
+  const pr = await outcome(tool, GITHUB_OPEN_PULL_REQUEST_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/fix', title: 'Fix' });
+  assert.match(String(pr?.message), /Pull request #7 aberto da branch "sebastian\/fix" para "main"/);
+  assert.equal(pr?.pullRequestNumber, 7);
+  for (const message of [branch?.message, file?.message, pr?.message]) assert.doesNotMatch(String(message), /test|valida|Corrigido/i);
+});
+
+test('controlled GitHub writes never claim a commit GitHub did not confirm', async () => {
+  const noCommit = new GitHubControlledWriteTool('secret', registry, async (_url, init) => ({ ok: String(init.method) !== 'GET', status: String(init.method) === 'GET' ? 404 : 201, text: async () => '{}' }));
+  const accepted = await outcome(noCommit, GITHUB_UPSERT_FILE_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/fix', path: 'novo.md', content: 'x', message: 'docs' });
+  assert.equal(accepted?.outcome, 'ok');
+  assert.match(String(accepted?.message), /não retornou o identificador do commit/);
+  assert.doesNotMatch(String(accepted?.message), /commit \w+ registrado/);
+
+  const rejected = new GitHubControlledWriteTool('secret', registry, async () => ({ ok: false, status: 422, text: async () => '{}' }));
+  const pr = await outcome(rejected, GITHUB_OPEN_PULL_REQUEST_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/fix', title: 'Fix' });
+  assert.equal(pr?.outcome, 'rejected');
+  assert.match(String(pr?.message), /não confirmou a abertura do pull request da branch "sebastian\/fix" \(HTTP 422\)/);
+});
