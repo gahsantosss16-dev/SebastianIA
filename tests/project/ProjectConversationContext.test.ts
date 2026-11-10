@@ -134,3 +134,5 @@ test('a real audit persistence failure rejects project handling instead of becom
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// CI baseline comparison only: no behavior changes.
