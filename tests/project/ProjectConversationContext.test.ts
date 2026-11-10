@@ -137,8 +137,8 @@ test('a real audit persistence failure rejects project handling instead of becom
 
 test('natural GitHub requests resolve registered project names and preserve the task', async () => {
   const {context,registry} = fixture();
-  const target = registry.listDescriptors().find(item => item.id === 'lumarkis-financeiro');
-  assert.ok(target, 'LUMARKIS must be registered in fixture');
+  const target = registry.listDescriptors().find(item => item.id === 'neuro-hub-pro');
+  assert.ok(target, 'Neuro must be registered in fixture');
   for (const name of [target.displayName, ...(target.aliases ?? [])]) {
     const reply = (await context.handle('github-' + name, `Sebastian, consulte o projeto ${name} no GitHub e me diga qual foi a última alteração realizada. Não invente informações.`, 'e', '2026-11-10'))!;
     assert.equal(reply.project?.id, target.id);
