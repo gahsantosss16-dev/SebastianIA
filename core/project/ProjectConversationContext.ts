@@ -86,7 +86,12 @@ export class ProjectConversationContext {
         : null;
     const isIdentity = /qual projeto.*ativ|em qual projeto|onde (?:estamos|estou)/.test(query);
     const reference = select?.[1] ?? (!isIdentity && inProject && !/^(?:projeto|conversa|momento|sistema|codigo)$/.test(inProject[1] ?? '') ? inProject[1] : undefined);
-    const direct = this.registry.resolve(query);
+    // Resolve an explicitly named registered project inside a natural-language
+    // GitHub request without treating the rest of the instruction as its name.
+    // Only exact registered names/aliases are accepted; no fuzzy guessing.
+    const namedProject = /\bprojeto\s+(.+?)(?=\s+(?:no|na)\s+github\b|\s+e\s+|$)/.exec(query);
+    const namedTarget = namedProject ? this.registry.resolve(namedProject[1] ?? '') : undefined;
+    const direct = namedTarget ?? this.registry.resolve(query);
     // Whether this turn's selection clause left something behind - either the
     // "e" bound cut off a trailing request, or the first clause itself wasn't
     // the whole message (more sentences/lines follow). Only meaningful when a
@@ -95,7 +100,7 @@ export class ProjectConversationContext {
     // own, unconditionally.
     const newSelectionThisTurn = reference !== undefined || direct !== undefined;
     const hasRemainderThisTurn =
-      newSelectionThisTurn && (boundedFirstClause !== firstClause || query.length > firstClause.length);
+      newSelectionThisTurn && (namedTarget !== undefined || boundedFirstClause !== firstClause || query.length > firstClause.length);
     let active = await this.active(conversationId);
     if (reference !== undefined || direct) {
       const target = direct ?? this.registry.resolve(reference!);
