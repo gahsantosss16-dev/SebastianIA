@@ -5,9 +5,16 @@ import { ProjectRegistry } from '../core/project/index.js';
 import type { ProjectDescriptor } from '../core/project/index.js';
 
 export const SEBASTIAN_GITHUB_TOKEN_ENV_VAR = 'SEBASTIAN_GITHUB_TOKEN';
+/** Dedicated credential for the only repository allowed to receive controlled writes. */
+export const SEBASTIAN_GITHUB_WRITE_TOKEN_ENV_VAR = 'SEBASTIAN_GITHUB_WRITE_TOKEN';
 /** JSON array of closed, read-only project descriptors for multi-project deployments. */
 export const SEBASTIAN_GITHUB_PROJECTS_ENV_VAR = 'SEBASTIAN_GITHUB_PROJECTS';
 export const SEBASTIAN_GITHUB_WRITE_ENABLED_ENV_VAR = 'SEBASTIAN_GITHUB_WRITE_ENABLED';
+const CONTROLLED_WRITE_PROJECT_ID = 'lumarkis-financeiro';
+
+function accessForProject(id: string, writeEnabled: boolean): 'read-only' | 'controlled-write' {
+  return writeEnabled && id === CONTROLLED_WRITE_PROJECT_ID ? 'controlled-write' : 'read-only';
+}
 
 /**
  * Simple, flat env vars describing exactly one authorized GitHub project -
@@ -71,7 +78,7 @@ function parseMultiProjectConfiguration(raw: string | undefined, writeEnabled: b
         aliases: value.aliases as string[],
         resourceKind: 'github-repository',
         remoteRepository: { owner: repository.owner, repository: repositoryName, defaultBranch },
-        permissions: { access: writeEnabled ? 'controlled-write' : 'read-only' },
+        permissions: { access: accessForProject(id, writeEnabled) },
       };
     });
   } catch {
@@ -135,7 +142,7 @@ export function createGitHubProjectRegistry(env: NodeJS.ProcessEnv = process.env
           repository: repository.trim(),
           defaultBranch: defaultBranch.trim(),
         },
-        permissions: { access: writeEnabled ? 'controlled-write' : 'read-only' },
+        permissions: { access: accessForProject(id.trim(), writeEnabled) },
       },
     ],
   });
@@ -165,7 +172,7 @@ export function createGitHubReadOnlyTool(
   return new GitHubReadOnlyTool({ token, registry, ...(logger === undefined ? {} : { logger }) });
 }
 
-/** Write capability is absent unless the operator explicitly enables it; the same token is never logged. */
+/** Write capability is absent unless the operator explicitly enables it and supplies its separate token. */
 export function createGitHubControlledWriteTool(
   env: NodeJS.ProcessEnv = process.env,
   registry: ProjectRegistry,
@@ -175,8 +182,10 @@ export function createGitHubControlledWriteTool(
     logger?.info('GitHub controlled-write tool resolved.', { outcome: 'notEnabled' });
     return undefined;
   }
-  const token = env[SEBASTIAN_GITHUB_TOKEN_ENV_VAR];
-  if (!isNonEmptyString(token) || !registry.listDescriptors().some((project) => project.permissions.access === 'controlled-write')) {
+  const token = env[SEBASTIAN_GITHUB_WRITE_TOKEN_ENV_VAR];
+  const writeProject = registry.getById(CONTROLLED_WRITE_PROJECT_ID);
+  if (!isNonEmptyString(token) || writeProject?.permissions.access !== 'controlled-write' ||
+    writeProject.remoteRepository.owner !== 'gahsantosss16-dev' || writeProject.remoteRepository.repository !== 'financeiro-lumarkis') {
     logger?.warn('GitHub controlled-write tool unavailable.', { outcome: 'notConfigured' });
     return undefined;
   }

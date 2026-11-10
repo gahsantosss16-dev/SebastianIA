@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createGitHubProjectRegistry,
   createGitHubReadOnlyTool,
+  createGitHubControlledWriteTool,
   SEBASTIAN_GITHUB_DEFAULT_BRANCH_ENV_VAR,
   SEBASTIAN_GITHUB_OWNER_ENV_VAR,
   SEBASTIAN_GITHUB_PROJECT_ALIASES_ENV_VAR,
@@ -11,6 +12,8 @@ import {
   SEBASTIAN_GITHUB_PROJECTS_ENV_VAR,
   SEBASTIAN_GITHUB_REPOSITORY_ENV_VAR,
   SEBASTIAN_GITHUB_TOKEN_ENV_VAR,
+  SEBASTIAN_GITHUB_WRITE_TOKEN_ENV_VAR,
+  SEBASTIAN_GITHUB_WRITE_ENABLED_ENV_VAR,
 } from '../../application/GitHubProjectRegistryConfiguration.js';
 import { GitHubReadOnlyTool } from '../../core/tool/GitHubReadOnlyTool.js';
 import { ProjectRegistry } from '../../core/project/index.js';
@@ -95,6 +98,24 @@ test('SEBASTIAN_GITHUB_PROJECTS registers a closed, read-only multi-project regi
   assert.equal(registry.resolve('LUMARKIS')?.id, 'lumarkis-financeiro');
   assert.equal(registry.resolve('Sebastian')?.id, 'sebastiania');
   assert.equal(registry.resolve('Neuro')?.permissions.access, 'read-only');
+});
+
+test('a separate write token enables controlled-write only for LUMARKIS and never changes read access tokens', () => {
+  const projects = [
+    { id: 'sebastiania', displayName: 'SebastianIA', aliases: [], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'SebastianIA', defaultBranch: 'main' } },
+    { id: 'lumarkis-financeiro', displayName: 'LUMARKIS', aliases: [], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'financeiro-lumarkis', defaultBranch: 'main' } },
+    { id: 'lsb-service', displayName: 'LSB', aliases: [], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'manuten-o-inteligente', defaultBranch: 'main' } },
+    { id: 'neuro-hub-pro', displayName: 'Neuro', aliases: [], remoteRepository: { owner: 'gahsantosss16-dev', repository: 'neuro-hub-pro', defaultBranch: 'main' } },
+  ];
+  const env = { [SEBASTIAN_GITHUB_PROJECTS_ENV_VAR]: JSON.stringify(projects), [SEBASTIAN_GITHUB_WRITE_ENABLED_ENV_VAR]: 'true', [SEBASTIAN_GITHUB_TOKEN_ENV_VAR]: 'read-token', [SEBASTIAN_GITHUB_WRITE_TOKEN_ENV_VAR]: 'write-token' };
+  const registry = createGitHubProjectRegistry(env);
+  assert.equal(registry.getById('lumarkis-financeiro')?.permissions.access, 'controlled-write');
+  assert.equal(registry.getById('sebastiania')?.permissions.access, 'read-only');
+  assert.equal(registry.getById('lsb-service')?.permissions.access, 'read-only');
+  assert.equal(registry.getById('neuro-hub-pro')?.permissions.access, 'read-only');
+  assert.ok(createGitHubReadOnlyTool(env, registry));
+  assert.ok(createGitHubControlledWriteTool(env, registry));
+  assert.equal(createGitHubControlledWriteTool({ ...env, [SEBASTIAN_GITHUB_WRITE_TOKEN_ENV_VAR]: '' }, registry), undefined);
 });
 
 test('an invalid multi-project value safely preserves the complete legacy registration', () => {

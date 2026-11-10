@@ -9,6 +9,9 @@ type FetchLike = (input: string, init: Readonly<Record<string, unknown>>) => Pro
 const API = 'https://api.github.com';
 const BRANCH = /^sebastian\/[a-z0-9][a-z0-9._/-]{2,120}$/;
 const PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._/-]{1,400}$/;
+const WRITE_OWNER = 'gahsantosss16-dev';
+const WRITE_REPOSITORY = 'financeiro-lumarkis';
+const WRITE_PROJECT_ID = 'lumarkis-financeiro';
 
 /**
  * Narrow GitHub write boundary. It can only create a task branch, create or
@@ -23,7 +26,8 @@ export class GitHubControlledWriteTool implements SpecializedTool {
     const projectId = input.payload.projectId;
     if (typeof projectId !== 'string') return this.result('invalidToolArguments');
     const project = this.registry.resolve(projectId);
-    if (!project || project.permissions.access !== 'controlled-write') return this.result('writeNotEnabled');
+    if (!project || project.permissions.access !== 'controlled-write' || project.id !== WRITE_PROJECT_ID ||
+      project.remoteRepository.owner !== WRITE_OWNER || project.remoteRepository.repository !== WRITE_REPOSITORY) return this.result('writeNotEnabled');
     if (input.toolId === GITHUB_CREATE_BRANCH_TOOL_ID) return this.createBranch(project, input.payload);
     if (input.toolId === GITHUB_UPSERT_FILE_TOOL_ID) return this.upsertFile(project, input.payload);
     if (input.toolId === GITHUB_OPEN_PULL_REQUEST_TOOL_ID) return this.openPullRequest(project, input.payload);
