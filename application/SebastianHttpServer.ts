@@ -562,8 +562,8 @@ export class SebastianHttpServer {
       return;
     }
     const messages = turns.flatMap((turn) => [
-      { role: 'user', content: turn.requestText },
-      { role: 'sebastian', content: turn.summary },
+      { role: 'user', content: turn.requestText, sentAt: turn.recordedAt },
+      { role: 'sebastian', content: turn.summary, sentAt: turn.recordedAt },
     ]);
     this.writeJson(response, 200, {
       conversation: this.publicConversationSummary(conversation),
