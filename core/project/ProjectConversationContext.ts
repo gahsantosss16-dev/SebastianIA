@@ -89,7 +89,7 @@ export class ProjectConversationContext {
     // Resolve an explicitly named registered project inside a natural-language
     // GitHub request without treating the rest of the instruction as its name.
     // Only exact registered names/aliases are accepted; no fuzzy guessing.
-    const namedProject = /\\bprojeto\\s+(.+?)(?=\\s+(?:no|na)\\s+github\\b|\\s+e\\s+|$)/.exec(query);
+    const namedProject = /\bprojeto\s+(.+?)(?=\s+(?:no|na)\s+github\b|\s+e\s+|$)/.exec(query);
     const namedTarget = namedProject ? this.registry.resolve(namedProject[1] ?? '') : undefined;
     const direct = namedTarget ?? this.registry.resolve(query);
     // Whether this turn's selection clause left something behind - either the
