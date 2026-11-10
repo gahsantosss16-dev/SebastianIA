@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { SEBASTIAN_WEB_SCRIPT } from '../../application/SebastianWebInterface.js';
+import { SEBASTIAN_WEB_SCRIPT, SEBASTIAN_WEB_STYLES } from '../../application/SebastianWebInterface.js';
 
 class Element {
   value='';disabled=false;checked=true;textContent='';className='';id='';innerHTML='';scrollTop=0;scrollHeight=0;
@@ -55,4 +55,13 @@ test('reopen failure does not create replacement conversation or permit sending 
   const h=harness('http://localhost/?c=conversation-missing');h.failOpen();await settle();
   assert.equal(h.calls.filter(c=>c.method==='POST').length,0);
   assert.equal(h.get('#message-input').disabled,true);
+});
+
+test('message actions use a copy icon below each message and render HH:mm timestamps',()=>{
+  assert.match(SEBASTIAN_WEB_SCRIPT, /minute: '2-digit'/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /copy\.textContent = '⧉'/);
+  assert.match(SEBASTIAN_WEB_SCRIPT, /article\.append\(header, bubble, actions\)/);
+  assert.doesNotMatch(SEBASTIAN_WEB_SCRIPT, /copy\.textContent = 'Copiar'/);
+  assert.match(SEBASTIAN_WEB_STYLES, /\.message-actions/);
+  assert.match(SEBASTIAN_WEB_STYLES, /\.message\.sebastian \.message-actions \{ grid-column: 2;/);
 });

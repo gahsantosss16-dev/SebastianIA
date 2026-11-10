@@ -353,19 +353,19 @@ kbd {
 /* ---------- Messages ---------- */
 .message { width: 100%; max-width: 760px; margin: 0 auto 26px; display: grid; gap: 6px; }
 .message.is-new { animation: rise .32s var(--ease) both; }
-.message-header { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.message-header { display: flex; align-items: center; min-width: 0; }
 .message-label { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; }
-.message-meta { display: inline-flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; line-height: 1; }
+.message-actions { display: inline-flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; line-height: 1; min-height: 20px; }
 .message-time { font-variant-numeric: tabular-nums; }
 .copy-message {
-  border: 0; padding: 3px 5px; border-radius: 5px; background: transparent; color: var(--faint);
-  font-size: 11px; line-height: 1; opacity: .72; transition: color .16s, background .16s, opacity .16s;
+  display: grid; place-items: center; width: 22px; height: 22px; border: 0; padding: 0; border-radius: 5px; background: transparent; color: var(--faint);
+  font-size: 15px; line-height: 1; opacity: .72; transition: color .16s, background .16s, opacity .16s;
 }
 .copy-message:hover, .copy-message:focus-visible { color: var(--accent-strong); background: var(--accent-soft); opacity: 1; outline: 0; }
 .copy-message.copied { color: var(--online); opacity: 1; }
 
 .message.user { justify-items: end; }
-.message.user .message-header { justify-content: flex-end; padding-right: 4px; }
+.message.user .message-header, .message.user .message-actions { justify-content: flex-end; padding-right: 4px; }
 .message.user .bubble {
   max-width: min(84%, 600px);
   padding: 11px 16px;
@@ -394,6 +394,7 @@ kbd {
 }
 .message.sebastian .message-label { padding-top: 7px; color: var(--accent); letter-spacing: 0.08em; text-transform: uppercase; font-size: 10.5px; font-weight: 700; }
 .message.sebastian .message-header { padding-top: 5px; }
+.message.sebastian .message-actions { grid-column: 2; }
 .message.sebastian.error::before { border-color: var(--danger-line); background: rgba(227, 134, 146, 0.06); color: var(--danger); }
 .message.sebastian.error .message-label { color: var(--danger); }
 
@@ -561,8 +562,8 @@ textarea:disabled { cursor: not-allowed; }
   .message.sebastian { grid-template-columns: 28px minmax(0, 1fr); column-gap: 11px; }
   .message.sebastian::before { width: 28px; height: 28px; font-size: 13px; }
   .message.sebastian .message-label { padding-top: 5px; }
-  .message-meta { gap: 5px; }
-  .copy-message { padding: 5px; }
+  .message-actions { gap: 5px; }
+  .copy-message { width: 26px; height: 26px; }
   .bubble { font-size: 15px; line-height: 1.68; }
   .empty-state { padding: 12px 4px; }
   .welcome-copy { font-size: 14.5px; }
@@ -717,7 +718,7 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
 
   const formatMessageHour = (sentAt) => {
     try {
-      return new Date(sentAt || Date.now()).toLocaleTimeString('pt-BR', { hour: '2-digit', hourCycle: 'h23' });
+      return new Date(sentAt || Date.now()).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
     } catch { return ''; }
   };
 
@@ -738,10 +739,10 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
       }
       button.textContent = 'Copiado!';
       button.classList.add('copied');
-      setTimeout(() => { button.textContent = 'Copiar'; button.classList.remove('copied'); }, 1600);
+      setTimeout(() => { button.textContent = '⧉'; button.classList.remove('copied'); }, 1600);
     } catch {
       button.textContent = 'Não copiou';
-      setTimeout(() => { button.textContent = 'Copiar'; }, 1600);
+      setTimeout(() => { button.textContent = '⧉'; }, 1600);
     }
   };
 
@@ -754,26 +755,26 @@ export const SEBASTIAN_WEB_SCRIPT = String.raw`
     label.textContent = extraClass === 'error' ? 'Não foi possível concluir' : role === 'user' ? 'Você' : 'Sebastian';
     const header = document.createElement('div');
     header.className = 'message-header';
-    const meta = document.createElement('div');
-    meta.className = 'message-meta';
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
     const time = document.createElement('time');
     time.className = 'message-time';
     time.textContent = formatMessageHour(sentAt);
-    meta.append(time);
+    actions.append(time);
     if (extraClass !== 'thinking') {
       const copy = document.createElement('button');
       copy.type = 'button';
       copy.className = 'copy-message';
-      copy.textContent = 'Copiar';
+      copy.textContent = '⧉';
       copy.setAttribute('aria-label', 'Copiar mensagem completa');
       copy.addEventListener('click', () => { void copyMessageText(text, copy); });
-      meta.append(copy);
+      actions.append(copy);
     }
-    header.append(label, meta);
+    header.append(label);
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
-    article.append(header, bubble);
+    article.append(header, bubble, actions);
     if (extraClass === 'thinking') {
       const dots = document.createElement('span');
       dots.className = 'dots';
