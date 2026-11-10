@@ -355,11 +355,11 @@ kbd {
 .message.is-new { animation: rise .32s var(--ease) both; }
 .message-header { display: flex; align-items: center; min-width: 0; }
 .message-label { color: var(--faint); font-size: 11px; font-weight: 600; letter-spacing: 0.06em; }
-.message-actions { display: inline-flex; align-items: center; gap: 7px; color: var(--faint); font-size: 11px; line-height: 1; min-height: 20px; }
+.message-actions { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; line-height: 1; min-height: 20px; }
 .message-time { font-variant-numeric: tabular-nums; }
 .copy-message {
-  display: grid; place-items: center; width: 22px; height: 22px; border: 0; padding: 0; border-radius: 5px; background: transparent; color: var(--faint);
-  font-size: 15px; line-height: 1; opacity: .72; transition: color .16s, background .16s, opacity .16s;
+  display: grid; place-items: center; width: 22px; height: 22px; border: 0; padding: 0; border-radius: 5px; background: transparent; color: var(--muted);
+  font-size: 15px; line-height: 1; opacity: 1; transition: color .16s, background .16s, opacity .16s;
 }
 .copy-message:hover, .copy-message:focus-visible { color: var(--accent-strong); background: var(--accent-soft); opacity: 1; outline: 0; }
 .copy-message.copied { color: var(--online); opacity: 1; }
