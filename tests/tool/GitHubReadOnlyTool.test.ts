@@ -340,3 +340,17 @@ test('github.readFile rejects a non-string or oversized query without calling th
   }
   assert.equal(fetchCalls, 0);
 });
+
+test('github.readFile still reads a project whose access is controlled-write (write enabled in production)', async () => {
+  const writeRegistry = new ProjectRegistry({ readOnly: true, entries: [{ id: 'lumarkis', displayName: 'LUMARKIS', aliases: [], resourceKind: 'github-repository', remoteRepository: { owner: 'o', repository: 'r', defaultBranch: 'main' }, permissions: { access: 'controlled-write' } }] });
+  const tool = new GitHubReadOnlyTool({
+    token: SECRET_TOKEN,
+    registry: writeRegistry,
+    fetchImpl: async () => jsonResponse(200, { type: 'file', encoding: 'base64', content: Buffer.from('ok\n', 'utf8').toString('base64'), path: 'a.ts' }),
+  });
+
+  const output = await outcomeOf(await tool.invoke(invocation(GITHUB_READ_FILE_TOOL_ID, { projectId: 'lumarkis', path: 'a.ts' })));
+
+  assert.equal(output.outcome, 'ok');
+  assert.equal(output.content, 'ok\n');
+});

@@ -360,7 +360,9 @@ export class GitHubReadOnlyTool implements SpecializedTool {
     if (!project) {
       return { rejected: this.rejected(undefined, 'projectNotFound', `Nenhum projeto autorizado corresponde a "${projectId}".`) };
     }
-    if (project.permissions.access !== 'read-only') {
+    // `controlled-write` is a superset of read access: enabling the separate,
+    // gated write workflow must never disable read-only investigation.
+    if (project.permissions.access !== 'read-only' && project.permissions.access !== 'controlled-write') {
       return { rejected: this.rejected(undefined, 'accessNotPermitted', `O projeto "${project.displayName}" não permite esta operação.`) };
     }
     return { value: project };

@@ -44,7 +44,7 @@ async function run(status: 200 | 404, synthesize?: CognitiveModelProvider['synth
     ...(synthesize === undefined ? {} : { synthesize }),
   };
   try {
-    const env = { SEBASTIAN_GITHUB_TOKEN: 'test-token', SEBASTIAN_GITHUB_PROJECTS: JSON.stringify(PROJECTS), SEBASTIAN_STORE_DRIVER: 'file' };
+    const env = { SEBASTIAN_GITHUB_TOKEN: 'test-token', SEBASTIAN_GITHUB_PROJECTS: JSON.stringify(PROJECTS), SEBASTIAN_STORE_DRIVER: 'file', SEBASTIAN_GITHUB_WRITE_ENABLED: 'true' };
     const app = createOnlineSebastianApplication(undefined, provider, dataDir, env);
     const result = await app.executeCommand({ type: 'converse', input: { text: REQUEST }, generatedAt: '2026-11-09T23:50:00.000Z' });
     return { answer: String(result.output.message), urls, decideCalls };
