@@ -218,15 +218,18 @@ export class CognitiveOperationalOrchestrator {
     const candidates: OperationalToolPolicyEntry[] = [];
     for (const entry of this.catalog) {
       if (entry.requiresAuthorization) continue;
-      // SPEC-053: never auto-run a command (validation.*) from a keyword
-      // match - production ran the test suite because a requested file was
-      // named "teste-main.md". Commands run only when the model chooses them.
-      if (entry.toolId.startsWith('validation.')) continue;
       const shape = entry.requiredStringArguments;
       const invokableWithoutGuessing = shape.length === 0 || (shape.length === 1 && shape[0] === 'query');
       if (invokableWithoutGuessing && await this.isBroadlyApplicable(entry, objective, immediateContext)) candidates.push(entry);
     }
-    return candidates.length === 1 ? candidates[0] : undefined;
+    // Ambiguity is judged over every applicable capability (as before); the
+    // single remaining one is then auto-invoked only if it is a remote or
+    // knowledge source - never a command (validation.*: production ran the
+    // test suite for a file named "teste-main.md") and never the online
+    // profile's local git/fs Tools, which inspect the server's own checkout
+    // (production answered a write request with the server's "git status").
+    const unique = candidates.length === 1 ? candidates[0] : undefined;
+    return unique !== undefined && (unique.toolId.startsWith('github.') || unique.toolId.startsWith('knowledge.')) ? unique : undefined;
   }
 
   private async attemptRecoveryObservation(

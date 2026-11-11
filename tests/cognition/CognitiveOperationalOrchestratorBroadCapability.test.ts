@@ -158,3 +158,14 @@ test('SPEC-053: an evidence-less conclusion never auto-runs a command Tool picke
   assert.deepEqual(tool.invoked, []);
   assert.equal(result.outcome, 'answered');
 });
+
+test('SPEC-053: the recovery path never inspects the local checkout by keyword (git.status matched "branch")', async () => {
+  const catalog: readonly OperationalToolPolicyEntry[] = [{
+    toolId: 'git.status', description: 'Consulta branch e alterações pendentes do repositório atual.',
+    requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['git', 'status', 'branch', 'repositório'],
+  }];
+  const tool = fakeTool({ 'git.status': () => ({ status: 'completed', output: { outcome: 'ok', message: 'Branch "HEAD (no branch)"' } }) as unknown as SpecializedToolInvocationResult });
+  const orchestrator = new CognitiveOperationalOrchestrator(tool, { decide: async () => ({ outcome: 'decided', decision: decision({ finalAnswer: 'Vou propor a branch.' }) }) }, catalog);
+  await orchestrator.execute('No LUMARKIS, cria uma branch de teste isolada.', { executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.deepEqual(tool.invoked, []);
+});
