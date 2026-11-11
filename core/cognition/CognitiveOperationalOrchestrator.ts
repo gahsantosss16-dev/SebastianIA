@@ -13,7 +13,12 @@ import type {
   CognitiveToolDescriptor,
 } from './CognitiveModelProviderContract.js';
 
-export const MAX_OPERATIONAL_DECISIONS = 4;
+/**
+ * SPEC-054: 6 (was 4). A question such as "when does the deploy run?" needs
+ * the folder listing plus 3-4 workflow files; with 4 decisions the model had
+ * to conclude from file names. The 20 s request budget still bounds time.
+ */
+export const MAX_OPERATIONAL_DECISIONS = 6;
 
 /**
  * Stored as a pending operation's `validationToolId` when its policy is

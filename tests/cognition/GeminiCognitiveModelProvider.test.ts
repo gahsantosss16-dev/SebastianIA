@@ -629,3 +629,44 @@ test('SPEC-053: token usage reported by Gemini is logged as numbers only', async
   assert.equal(completed?.metadata?.outputTokens, 8);
   assert.equal(completed?.metadata?.totalTokens, 128);
 });
+
+function hanging(init: Readonly<Record<string, unknown>>): Promise<FakeResponse> {
+  const signal = init.signal as AbortSignal | undefined;
+  return new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+  });
+}
+
+test('SPEC-054: a stalled call is rescued by one hedged duplicate; the first generated result wins', async () => {
+  let calls = 0;
+  const gemini = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY, model: MODEL, respondTimeoutMs: 3_000, hedgeDelayMs: 50,
+    fetchImpl: async (_url, init) => { calls += 1; return calls === 1 ? hanging(init) : response(200, geminiEnvelope({ answer: 'Resposta do reforço.' })); },
+  });
+  const started = Date.now();
+  const result = await gemini.respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.deepEqual(result, { outcome: 'responded', answer: 'Resposta do reforço.' });
+  assert.equal(calls, 2);
+  assert.ok(Date.now() - started < 2_000, 'answered well before the timeout');
+});
+
+test('SPEC-054: a fast call never sends a duplicate', async () => {
+  let calls = 0;
+  const gemini = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY, model: MODEL, respondTimeoutMs: 3_000, hedgeDelayMs: 500,
+    fetchImpl: async () => { calls += 1; return response(200, geminiEnvelope({ answer: 'Rápida.' })); },
+  });
+  await gemini.respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.equal(calls, 1);
+});
+
+test('SPEC-054: when both calls stall the timeout is reported honestly, never masked', async () => {
+  let calls = 0;
+  const gemini = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY, model: MODEL, respondTimeoutMs: 3_000, hedgeDelayMs: 50,
+    fetchImpl: async (_url, init) => { calls += 1; return hanging(init); },
+  });
+  const result = await gemini.respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.equal(result.outcome, 'timeout');
+  assert.equal(calls, 2);
+});

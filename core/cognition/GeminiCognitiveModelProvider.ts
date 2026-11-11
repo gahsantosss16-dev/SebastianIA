@@ -39,6 +39,10 @@ export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 12_000;
  * own generous default for the same reason `respond` already has one.
  */
 export const DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS = 10_000;
+/** SPEC-054: hedge after ~p75-p90 of answered calls (2.2 s p50 / 5.4 s p90 in production). */
+export const DEFAULT_GEMINI_HEDGE_DELAY_MS = 4_000;
+/** The duplicate call needs at least this much of the timeout left to be worth sending. */
+const MIN_GEMINI_HEDGE_WINDOW_MS = 2_500;
 /**
  * `classify` (Etapa 4) is a single, small routing decision - closer in shape
  * and latency to `decide` than to `respond`/`synthesize`, so it shares
@@ -68,6 +72,8 @@ export interface GeminiCognitiveModelProviderOptions {
   readonly synthesizeTimeoutMs?: number;
   /** Timeout for `classify` only; independent of the other three. */
   readonly classifyTimeoutMs?: number;
+  /** SPEC-054: start one duplicate call after this delay (ms); 0 disables hedging. */
+  readonly hedgeDelayMs?: number;
   readonly fetchImpl?: FetchLike;
   readonly logger?: Logger;
 }
@@ -246,6 +252,7 @@ const DECISION_SYSTEM_INSTRUCTION =
   'Se recentObservations trouxer uma recusa de argumentos ou de ferramenta, corrija a decisão em vez de desistir. ' +
   'Ao concluir depois de observar evidências, responda em finalAnswer de forma direta e completa ao que foi pedido (resuma e explique, não copie a observação inteira) e preencha evidence com 1 a 4 trechos curtos copiados LITERALMENTE de recentObservations que sustentem a resposta; nunca escreva em evidence algo que não esteja nas observações. Não afirme nada que as observações não sustentem. ' +
   'Assim que as observações bastarem para responder, conclua (concludeCompleted) em vez de continuar explorando. ' +
+  'Mas não conclua pelo nome de um arquivo: se a resposta depende do conteúdo (por exemplo, o que um workflow executa ou quando faz deploy), leia o arquivo. Quando uma listagem mostrar vários arquivos candidatos para a pergunta (por exemplo, vários workflows), leia cada um que possa ser relevante antes de concluir, um por decisão; consulte stepsRemaining e, se não couberem todos, diga quais foram lidos. ' +
   'Nunca afirme que algo não existe, não há ou nunca acontece com base em uma verificação parcial: só faça uma afirmação de ausência se as observações cobrirem todos os itens relevantes (por exemplo, todos os workflows listados); caso contrário, diga exatamente o que foi verificado e o que não foi. ' +
   'Você não grava memória permanente; nunca afirme ter registrado, anotado, salvo, guardado ou memorizado uma informação. ' +
   'Se availableTools incluir ferramentas com prefixo "github.", você TEM acesso real ao repositório configurado através delas - nunca alegue não ter acesso ao GitHub ou à internet nesse caso; invoque a ferramenta adequada ao pedido (por exemplo, github.listCommits para commits recentes, github.readFile para ler um arquivo, github.getProject para identificar o projeto) e responda com base na observação retornada, nunca com uma recusa genérica. ' +
@@ -297,6 +304,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
   private readonly respondTimeoutMs: number;
   private readonly synthesizeTimeoutMs: number;
   private readonly classifyTimeoutMs: number;
+  private readonly hedgeDelayMs: number;
   private readonly fetchImpl: FetchLike;
   private readonly logger: Logger | undefined;
 
@@ -343,6 +351,11 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     this.timeoutMs = timeoutMs;
     this.respondTimeoutMs = respondTimeoutMs;
     this.synthesizeTimeoutMs = synthesizeTimeoutMs;
+    const hedgeDelayMs = options.hedgeDelayMs ?? DEFAULT_GEMINI_HEDGE_DELAY_MS;
+    if (!Number.isInteger(hedgeDelayMs) || hedgeDelayMs < 0) {
+      throw new InvalidCognitiveModelProviderInputError('Gemini cognitive provider hedge delay must be a non-negative integer.');
+    }
+    this.hedgeDelayMs = hedgeDelayMs;
     this.classifyTimeoutMs = classifyTimeoutMs;
     this.fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
     this.logger = options.logger;
@@ -580,7 +593,63 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     return { outcome: 'classified', category: safeCategory, reasoningSummary: reasoningSummary.trim().slice(0, 300), confidence };
   }
 
+  /**
+   * SPEC-054: hedged call. Production logs showed a bimodal latency: answered
+   * calls p50 2.2 s / p90 5.4 s, while ~29% of identical calls stalled past
+   * the 8 s timeout (mostly the first decision of a request). If the primary
+   * call has not returned after `hedgeDelayMs`, one duplicate is started;
+   * the first `generated` result wins and the other is cancelled. Errors are
+   * never masked: if neither generates, the primary's own outcome is
+   * returned. Extra tokens are spent only on slow calls.
+   */
   private async generateStructured(
+    systemInstruction: string,
+    userContent: string,
+    responseJsonSchema: Readonly<Record<string, unknown>>,
+    timeoutMs: number,
+    externalSignal?: AbortSignal,
+  ): Promise<GeminiStructuredResult> {
+    const hedgeDelayMs = this.hedgeDelayMs;
+    if (hedgeDelayMs <= 0 || timeoutMs - hedgeDelayMs < MIN_GEMINI_HEDGE_WINDOW_MS || externalSignal?.aborted === true) {
+      return this.generateStructuredOnce(systemInstruction, userContent, responseJsonSchema, timeoutMs, externalSignal);
+    }
+    const primaryAbort = new AbortController();
+    const hedgeAbort = new AbortController();
+    const forward = (): void => { primaryAbort.abort(); hedgeAbort.abort(); };
+    externalSignal?.addEventListener('abort', forward, { once: true });
+    let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const primary = this.generateStructuredOnce(systemInstruction, userContent, responseJsonSchema, timeoutMs, primaryAbort.signal);
+      const hedgeDue = new Promise<'hedge'>((resolve) => { hedgeTimer = setTimeout(() => resolve('hedge'), hedgeDelayMs); });
+      const first = await Promise.race([primary, hedgeDue]);
+      if (first !== 'hedge') return first;
+      // Re-read the signal after the await (it may have been cancelled meanwhile).
+      if (primaryAbort.signal.aborted) return await primary;
+      this.logger?.info('Gemini hedged request started.', { provider: 'gemini', model: this.model, afterMs: hedgeDelayMs });
+      const hedge = this.generateStructuredOnce(systemInstruction, userContent, responseJsonSchema, timeoutMs - hedgeDelayMs, hedgeAbort.signal);
+      const winner = await new Promise<{ readonly result: GeminiStructuredResult; readonly source: 'primary' | 'hedge' }>((resolve) => {
+        let pending = 2;
+        let primaryResult: GeminiStructuredResult | undefined;
+        const settle = (source: 'primary' | 'hedge', result: GeminiStructuredResult): void => {
+          if (source === 'primary') primaryResult = result;
+          pending -= 1;
+          if (result.outcome === 'generated') { resolve({ result, source }); return; }
+          if (pending === 0) resolve({ result: primaryResult ?? result, source: 'primary' });
+        };
+        void primary.then((result) => settle('primary', result));
+        void hedge.then((result) => settle('hedge', result));
+      });
+      this.logger?.info('Gemini hedged request resolved.', { provider: 'gemini', model: this.model, winner: winner.source, outcome: winner.result.outcome });
+      return winner.result;
+    } finally {
+      if (hedgeTimer !== undefined) clearTimeout(hedgeTimer);
+      externalSignal?.removeEventListener('abort', forward);
+      primaryAbort.abort();
+      hedgeAbort.abort();
+    }
+  }
+
+  private async generateStructuredOnce(
     systemInstruction: string,
     userContent: string,
     responseJsonSchema: Readonly<Record<string, unknown>>,
