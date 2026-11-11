@@ -165,6 +165,8 @@ test('SPEC-053: unique registry mention selects; quoted text and two mentions ne
     assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro');
     await context.handle('c', "Adiciona no LUMARKIS o texto 'Teste do Sebastian' num arquivo.", 'e3', '2026-11-11T00:00:02.000Z');
     assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro', 'quoted "Sebastian" is content, not a project');
+    await context.handle('c', "Agora grava o arquivo docs/teste-sebastian.md nessa branch sebastian/teste-053 com o texto 'oi'.", 'e3b', '2026-11-11T00:00:02.500Z');
+    assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro', 'paths, file and branch names are content, not projects');
     await context.handle('c', 'Compara o fluxo do Neuro com o que existe no SebastianIA hoje mesmo, por favor.', 'e4', '2026-11-11T00:00:03.000Z');
     assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro', 'two mentions select nothing');
   } finally { rmSync(dir, { recursive: true, force: true }); }

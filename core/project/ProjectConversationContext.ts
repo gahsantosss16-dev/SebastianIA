@@ -73,7 +73,12 @@ export class ProjectConversationContext {
    * nothing.
    */
   private uniqueRegisteredMention(query: string): ReturnType<ProjectRegistry['resolve']> {
-    const unquoted = query.replace(/'[^']*'|"[^"]*"|\u201c[^\u201d]*\u201d/g, ' ');
+    // Quoted text, paths/branches ("docs/teste-sebastian.md",
+    // "sebastian/teste-053") and file names are content, never project names.
+    const unquoted = query
+      .replace(/'[^']*'|"[^"]*"|\u201c[^\u201d]*\u201d/g, ' ')
+      .replace(/\S*[\\/]\S*/g, ' ')
+      .replace(/\S+\.[a-z0-9]{1,8}(?=$|[\s,;:!?)])/g, ' ');
     const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const mentioned = this.registry.listDescriptors().filter((descriptor) =>
       [descriptor.id, descriptor.displayName, ...descriptor.aliases]
