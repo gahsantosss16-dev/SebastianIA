@@ -508,3 +508,10 @@ test('SPEC-053: a write request for a project without controlled-write access is
     assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
   } finally { close(); }
 });
+
+test('SPEC-053: grounding ignores punctuation but still requires the observed words in order', () => {
+  const observed = '| main antes da recuperação | c875ead82e | protótipo Recebe Fácil |';
+  assert.equal(normalizedIncludes(observed, 'main antes da recuperação: c875ead82e — protótipo Recebe Fácil'), true);
+  assert.equal(normalizedIncludes(observed, 'antes da recuperação a main era protótipo'), false);
+  assert.equal(normalizedIncludes(observed, 'Recebe Fácil protótipo'), false, 'word order still matters');
+});

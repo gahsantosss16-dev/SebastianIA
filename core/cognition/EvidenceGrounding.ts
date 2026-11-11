@@ -2,9 +2,8 @@
  * Evidence grounding shared by every path that turns Tool observations into
  * a user-facing answer (SPEC-051/052/053). An answer is grounded only when it
  * cites at least one excerpt and EVERY excerpt is the observed words, in
- * order. Only formatting is ignored: case, whitespace, Markdown markers
- * (* _ ` # | >) and typographic quotes. Excerpts under 3 characters never
- * ground anything.
+ * order. Only formatting is ignored: case, whitespace, punctuation and
+ * Markdown markers. Excerpts under 3 characters never ground anything.
  */
 export const MAX_EVIDENCE_EXCERPTS = 8;
 export const MAX_EVIDENCE_EXCERPT_CHARS = 600;
@@ -15,7 +14,9 @@ function collapse(value: string): string {
     .toLowerCase()
     .replace(/[“”„«»]/g, '"')
     .replace(/[‘’]/g, "'")
-    .replace(/[*_`#|>]/g, ' ')
+    // Punctuation and Markdown markers are formatting; words (letters and
+    // digits) must still be the observed ones, contiguous and in order.
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
