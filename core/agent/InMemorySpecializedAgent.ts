@@ -188,7 +188,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     // normal conversational pipeline below with the full original text - the
     // project selection itself was already persisted as a side effect of
     // `projectContext.handle` above, independent of what happens next.
-    if (projectReply && !projectReply.taskConnectionPending) {
+    // SPEC-051: a reply that only guessed the project from a loose mention
+    // (`deferrable`) is never the final answer when a cognitive interpreter
+    // is configured - the model reads the full message instead. Explicit
+    // selection commands, identity and rules queries keep their replies, and
+    // without a model the deterministic reply is kept exactly as before.
+    const interpreterAvailable = this.cognitiveOperationalOrchestrator !== undefined || typeof this.cognitiveModelProvider?.respond === 'function';
+    if (projectReply && !projectReply.taskConnectionPending && !(projectReply.deferrable === true && interpreterAvailable)) {
       return { status: 'completed', output: { finalResult: projectReply, memoryExtras: { conversationTurn: { requestText: text, summary: projectReply.message, kind: 'projectContext' } } } };
     }
     const rememberedFacts = this.extractRememberedFacts(input);

@@ -11,6 +11,7 @@ import type {
   CognitiveModelProvider,
   CognitiveSynthesisRequest,
   CognitiveSynthesisResult,
+  CognitiveToolDescriptor,
 } from './CognitiveModelProviderContract.js';
 import type { Logger } from '../logger.js';
 
@@ -147,6 +148,32 @@ const DECISION_SCHEMA = Object.freeze({
   ],
 });
 
+/**
+ * SPEC-051: an object schema without `properties` lets structured output
+ * return `{}` for `toolArguments`, so a correctly chosen Tool was then
+ * rejected for missing arguments. The decision schema therefore declares the
+ * union of the argument names the offered Tools actually accept (all
+ * optional at schema level; the orchestrator's policy remains the guard).
+ */
+export function decisionSchemaFor(availableTools: readonly CognitiveToolDescriptor[] | undefined): Readonly<Record<string, unknown>> {
+  const properties: Record<string, { type: string }> = {};
+  for (const tool of availableTools ?? []) {
+    for (const name of [...(tool.requiredArguments ?? []), ...(tool.optionalArguments ?? [])]) properties[name] = { type: 'string' };
+    for (const name of tool.optionalNumberArguments ?? []) properties[name] = { type: 'integer' };
+  }
+  if (Object.keys(properties).length === 0) return DECISION_SCHEMA;
+  return Object.freeze({
+    ...DECISION_SCHEMA,
+    properties: { ...DECISION_SCHEMA.properties, toolArguments: { type: 'object', properties } },
+  });
+}
+
+/** Whitespace-insensitive containment, so a faithful excerpt is not rejected for reflowed spaces or line breaks. */
+function normalizedIncludes(haystack: string, needle: string): boolean {
+  const collapse = (value: string): string => value.replace(/\s+/g, ' ').trim();
+  return collapse(haystack).includes(collapse(needle));
+}
+
 const CONVERSATION_SYSTEM_INSTRUCTION =
   'Você é Sebastian, um assistente pessoal generalista com personalidade estável: direto, atento, natural, bem-humorado quando cabe e preciso quando importa. Use conhecimento geral e raciocínio para responder, explicar, comparar, resumir, escrever, revisar e planejar de forma útil e segura. ' +
   'Adapte a forma, não a identidade. Infira dinamicamente o registro desta interação pela mensagem atual e pelo contexto recente: formalidade, tamanho, objetividade, humor, gírias, emojis, abreviações e profundidade técnica. Acompanhe esse registro sem copiar erros de escrita, sem imitar mecanicamente e sem caricaturar o usuário. Uma mensagem técnica pede precisão e pode exigir detalhe; uma mensagem casual pode receber poucas palavras. ' +
@@ -167,6 +194,8 @@ const DECISION_SYSTEM_INSTRUCTION =
   'A mensagem atual define a intenção. Use relevantMemory apenas quando semanticamente relacionada ou necessária para resolver uma referência ou continuação; nunca substitua o assunto atual por memória anterior. ' +
   'Proponha exatamente uma decisão estruturada por vez. ' +
   'Use somente toolIds presentes em availableTools. Nunca conceda autorização, invente Tool ou alegue ter executado uma ação. ' +
+  'Em toolArguments, preencha exatamente os nomes de requiredArguments da ferramenta escolhida (e, se útil, optionalArguments/optionalNumberArguments); nunca invente outros nomes. Para listar a raiz de um repositório, use path "". ' +
+  'Se recentObservations trouxer uma recusa de argumentos ou de ferramenta, corrija a decisão em vez de desistir. ' +
   'Você não grava memória permanente; nunca afirme ter registrado, anotado, salvo, guardado ou memorizado uma informação. ' +
   'Se availableTools incluir ferramentas com prefixo "github.", você TEM acesso real ao repositório configurado através delas - nunca alegue não ter acesso ao GitHub ou à internet nesse caso; invoque a ferramenta adequada ao pedido (por exemplo, github.listCommits para commits recentes, github.readFile para ler um arquivo, github.getProject para identificar o projeto) e responda com base na observação retornada, nunca com uma recusa genérica. ' +
   'Para conversar ou responder diretamente sem ação, use concludeCompleted e forneça uma finalAnswer natural, útil e adequada ao contexto. Para finalizar após observar evidência, faça o mesmo apoiado na evidência. ' +
@@ -342,7 +371,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     const result = await this.generateStructured(
       DECISION_SYSTEM_INSTRUCTION,
       JSON.stringify(safeRequest),
-      DECISION_SCHEMA,
+      decisionSchemaFor(request.availableTools),
       this.timeoutMs,
       request.signal,
     );
@@ -405,7 +434,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     if (
       typeof answer !== 'string' || answer.trim() === '' || answer.length > MAX_GEMINI_CONVERSATION_ANSWER_CHARS ||
       !Array.isArray(evidence) || evidence.length === 0 ||
-      evidence.some((excerpt) => typeof excerpt !== 'string' || excerpt.trim() === '' || !summaries.some((summary) => summary.includes(excerpt))) ||
+      evidence.some((excerpt) => typeof excerpt !== 'string' || excerpt.trim() === '' || !summaries.some((summary) => normalizedIncludes(summary, excerpt))) ||
       !parsed || typeof parsed !== 'object' || Object.keys(parsed).some((key) => key !== 'answer' && key !== 'evidence')
     ) {
       this.logOutcome('synthesize', 'invalidResponse', result, 'ungroundedSynthesis');

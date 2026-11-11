@@ -15,6 +15,15 @@ export interface CognitiveToolDescriptor {
   readonly toolId: string;
   readonly description: string;
   readonly requiresAuthorization: boolean;
+  /**
+   * SPEC-051: the exact argument names the orchestrator's policy will accept
+   * (projected from `OperationalToolPolicyEntry`). Without them the model can
+   * pick the right Tool and still be rejected for guessing argument names.
+   */
+  readonly requiredArguments?: readonly string[];
+  readonly optionalArguments?: readonly string[];
+  /** Optional integer arguments (e.g. `limit`); every other argument is a string. */
+  readonly optionalNumberArguments?: readonly string[];
 }
 
 /** A previously executed step, already summarized by the orchestrator - never a raw stdout/stderr dump. */

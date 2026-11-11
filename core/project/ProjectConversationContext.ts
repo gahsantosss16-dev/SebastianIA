@@ -22,6 +22,17 @@ export interface ProjectReply {
    * (ANALISA/FAZ/FECHA) has already had its chance and found none.
    */
   readonly taskConnectionPending?: boolean;
+  /**
+   * SPEC-051: true when this reply is only a deterministic guess about the
+   * project, derived from a loose mention ("...do LUMARKIS mudou hoje",
+   * "...do GitHub você consegue acessar?") rather than an explicit selection
+   * command ("use o X"), an identity query or a rules query. A caller with a
+   * cognitive interpreter must let the full message keep flowing to it
+   * instead of answering with this boilerplate or refusing the message as
+   * an unknown project. Explicit commands are never deferrable: an unknown
+   * name in "use o X" is still refused as before.
+   */
+  readonly deferrable?: boolean;
 }
 
 /** Conversation binding and policy provenance, using the existing registry and memory store. No executor. */
@@ -104,7 +115,7 @@ export class ProjectConversationContext {
     let active = await this.active(conversationId);
     if (reference !== undefined || direct) {
       const target = direct ?? this.registry.resolve(reference!);
-      if (!target) return { project: active, message: 'Projeto desconhecido ou ambíguo. Indique um único nome cadastrado: ' + this.registry.listDescriptors().map(item => item.displayName).join(', ') + '. A seleção anterior não foi alterada.' };
+      if (!target) return { project: active, message: 'Projeto desconhecido ou ambíguo. Indique um único nome cadastrado: ' + this.registry.listDescriptors().map(item => item.displayName).join(', ') + '. A seleção anterior não foi alterada.', ...(select ? {} : { deferrable: true }) };
       // Persist identity before policy loading: failure must never leave the previous project's rules active.
       await this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: target.id, policyStatus: 'unavailable', selectedAt: at });
       active = (await this.active(conversationId));
@@ -147,6 +158,9 @@ export class ProjectConversationContext {
       project: loaded,
       message: `Projeto: ${project.displayName}. Ambiente: ${active.environment}. Checkout: ${project.workspace?.root ?? 'remoto via GitHub'}. Regras-base carregadas: ${policies.map(policy => policy.path).join(', ') || 'não aplicável'}.\n${explicitSelection ? 'Seleção associada somente a esta conversa.' : 'Identifiquei o projeto e suas regras.'}`,
       ...(taskConnectionPending ? { taskConnectionPending: true } : {}),
+      // A message that is nothing but a registered name ("LUMARKIS") is a
+      // bare selection and keeps its identification reply.
+      ...(select || isIdentity || (namedTarget === undefined && this.registry.resolve(query) !== undefined) ? {} : { deferrable: true }),
     };
   }
 }

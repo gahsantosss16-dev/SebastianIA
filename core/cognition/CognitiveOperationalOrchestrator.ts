@@ -266,13 +266,63 @@ export class CognitiveOperationalOrchestrator {
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
   ): Promise<CognitiveOperationalResult> {
     const observations: CognitiveObservationRecord[] = [];
-    let toolCalls = 0;
 
-    const deterministic = await this.applyDeterministicIntentRoute(objective, context, observations);
-    toolCalls += deterministic.toolCalls;
+    // SPEC-051 - model-first interpretation. The model reads the request and
+    // chooses the Tool; the per-phrase `deterministicIntent` routes are no
+    // longer allowed to decide first (they misrouted natural requests, e.g. a
+    // branch question answered with the default branch's commit list). They
+    // remain only as a fail-soft fallback when the model itself is
+    // unreachable or unparseable before any Tool ran. Every guard below
+    // (closed catalog, argument policy, active-project binding, explicit
+    // authorization for writes) still applies to the model's decision.
+    const loop = await this.decisionLoop(objective, context, observations);
+    const modelResult = loop.result;
+    // The model's interpretation is unusable when it produced no evidence at
+    // all: unreachable/unparseable, blocked by a guard before any Tool ran,
+    // or a conclusion with zero observations (the production failure mode
+    // where the model claimed "no GitHub/internet access" while a real Tool
+    // applied). Only then may a deterministic route supply evidence.
+    const modelUnusable = modelResult.toolCalls === 0 && (
+      modelResult.outcome === 'unavailable' ||
+      modelResult.outcome === 'blocked' ||
+      (modelResult.outcome === 'answered' && loop.concludedWithoutEvidence));
+    if (!modelUnusable) return modelResult;
+
+    const fallbackObservations: CognitiveObservationRecord[] = [];
+    const deterministic = await this.applyDeterministicIntentRoute(objective, context, fallbackObservations);
+    this.logger?.info('Cognitive operational deterministic fallback resolved.', {
+      modelOutcome: modelResult.outcome,
+      routed: deterministic.toolCalls > 0,
+      answered: deterministic.answer !== undefined,
+    });
     if (deterministic.answer !== undefined) {
-      return this.finish({ outcome: 'answered', answer: deterministic.answer, toolCalls });
+      return this.finish({ outcome: 'answered', answer: deterministic.answer, toolCalls: deterministic.toolCalls });
     }
+    return deterministic.toolCalls === 0 ? modelResult : this.finish({ outcome: 'unavailable', toolCalls: deterministic.toolCalls });
+  }
+
+  private async decisionLoop(
+    objective: string,
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
+    observations: CognitiveObservationRecord[],
+  ): Promise<{ readonly result: CognitiveOperationalResult; readonly concludedWithoutEvidence: boolean }> {
+    const state = { concludedWithoutEvidence: false };
+    const result = await this.runDecisions(objective, context, observations, state);
+    return { result, concludedWithoutEvidence: state.concludedWithoutEvidence };
+  }
+
+  private async runDecisions(
+    objective: string,
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
+    observations: CognitiveObservationRecord[],
+    state: { concludedWithoutEvidence: boolean },
+  ): Promise<CognitiveOperationalResult> {
+    let toolCalls = 0;
+    // Corrective feedback for a structurally invalid Tool choice (unknown
+    // toolId or arguments outside the policy). Shown to the model on the next
+    // `decide` only - never mixed into `observations`, so synthesis grounding
+    // and the "all observations ok" rule are unaffected.
+    const corrections: CognitiveObservationRecord[] = [];
 
     // At most one extra `decide` per execution, and only after a genuine
     // provider timeout (never after caller cancellation, never after
@@ -282,7 +332,7 @@ export class CognitiveOperationalOrchestrator {
     for (let attempt = 0; attempt < this.maxDecisions; attempt += 1) {
       let result;
       try {
-        const decisionRequest = this.request(objective, context.requestedAt, observations, context.relevantMemory ?? [], context.signal);
+        const decisionRequest = this.request(objective, context.requestedAt, [...observations, ...corrections], context.relevantMemory ?? [], context.signal);
         result = await this.provider.decide(decisionRequest);
         if (result.outcome === 'timeout' && timeoutRetryAvailable && context.signal?.aborted !== true) {
           timeoutRetryAvailable = false;
@@ -323,6 +373,7 @@ export class CognitiveOperationalOrchestrator {
           toolCalls += 1;
           continue;
         }
+        state.concludedWithoutEvidence = observations.length === 0 && await this.hasDeterministicRoute(objective, context.immediateContext);
         return this.finish(
           decision.finalAnswer
             ? { outcome: 'answered', answer: decision.finalAnswer, toolCalls }
@@ -336,14 +387,33 @@ export class CognitiveOperationalOrchestrator {
 
       const policy = this.catalog.find((entry) => entry.toolId === decision.toolId);
       if (!policy) {
-        this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined }, toolCalls);
+        this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined, rejectedReason: 'cognitiveToolNotInMenu' }, toolCalls);
+        if (attempt < this.maxDecisions - 1) {
+          corrections.push({ stepId: `operational:correction:${attempt}`, toolId: decision.toolId, outcome: 'rejected', summary: `A ferramenta "${decision.toolId}" não existe. Use somente um toolId de availableTools.` });
+          continue;
+        }
         return this.finish({ outcome: 'blocked', reason: 'cognitiveToolNotInMenu', toolCalls });
       }
-      const args = decision.toolId.startsWith('github.') && context.activeProjectId !== undefined
+      // Active-project binding (guard): only for Tools whose policy accepts a
+      // projectId - `github.listProjects` takes no argument at all and was
+      // otherwise always rejected while a project was active.
+      const acceptsProjectId = policy.requiredStringArguments.includes('projectId') || (policy.optionalStringArguments ?? []).includes('projectId');
+      const args = decision.toolId.startsWith('github.') && context.activeProjectId !== undefined && acceptsProjectId
         ? { ...(decision.toolArguments ?? {}), projectId: context.activeProjectId }
         : decision.toolArguments ?? {};
       if (!this.argumentsMatchPolicy(policy, args)) {
-        this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined }, toolCalls);
+        this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined, rejectedReason: 'cognitiveInvalidToolArguments' }, toolCalls);
+        if (attempt < this.maxDecisions - 1) {
+          const optional = [...(policy.optionalStringArguments ?? []), ...(policy.optionalNumberArguments ?? [])];
+          corrections.push({
+            stepId: `operational:correction:${attempt}`,
+            toolId: policy.toolId,
+            outcome: 'rejected',
+            summary: `Argumentos recusados para "${policy.toolId}". Obrigatórios (texto): ${policy.requiredStringArguments.join(', ') || 'nenhum'}. ` +
+              `Opcionais: ${optional.join(', ') || 'nenhum'}. Nenhum outro argumento é aceito.`,
+          });
+          continue;
+        }
         return this.finish({ outcome: 'blocked', reason: 'cognitiveInvalidToolArguments', toolCalls });
       }
       if (policy.requiresAuthorization) {
@@ -402,6 +472,19 @@ export class CognitiveOperationalOrchestrator {
    * anything. Returns how many Tool calls it made (0 or 1) so the caller can
    * fold that into its own running `toolCalls` count.
    */
+  /** Whether a deterministic route would apply - used only to judge a model conclusion that gathered no evidence. */
+  private async hasDeterministicRoute(objective: string, immediateContext?: string): Promise<boolean> {
+    const matched = this.catalog.some((entry) => {
+      const deterministic = entry.deterministicIntent;
+      if (!deterministic) return false;
+      if (deterministic.pattern.test(objective)) return true;
+      return immediateContext !== undefined &&
+        deterministic.immediateContext?.objectivePattern.test(objective) === true &&
+        deterministic.immediateContext.contextPattern.test(immediateContext) === true;
+    });
+    return matched || this.findUniqueCapabilityMatchRoute(objective) !== undefined;
+  }
+
   private async applyDeterministicIntentRoute(
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string },
@@ -588,7 +671,14 @@ export class CognitiveOperationalOrchestrator {
       relevantMemory,
       recentObservations,
       filesRead: [],
-      availableTools: this.catalog.map(({ toolId, description, requiresAuthorization }) => ({ toolId, description, requiresAuthorization })),
+      availableTools: this.catalog.map(({ toolId, description, requiresAuthorization, requiredStringArguments, optionalStringArguments, optionalNumberArguments }) => ({
+        toolId,
+        description,
+        requiresAuthorization,
+        requiredArguments: requiredStringArguments,
+        optionalArguments: optionalStringArguments ?? [],
+        optionalNumberArguments: optionalNumberArguments ?? [],
+      })),
       stepsTaken: recentObservations.length,
       stepsRemaining: Math.max(0, this.maxDecisions - recentObservations.length),
       requestedAt,
@@ -677,6 +767,7 @@ export class CognitiveOperationalOrchestrator {
       readonly toolId: string | undefined;
       readonly toolInvoked: boolean;
       readonly toolOutcome: 'ok' | 'rejected' | 'failed' | undefined;
+      readonly rejectedReason?: string;
     },
     toolCallsSoFar: number,
   ): void {
@@ -684,6 +775,7 @@ export class CognitiveOperationalOrchestrator {
       attempt,
       nextAction: step.nextAction,
       ...(step.toolId === undefined ? {} : { toolId: step.toolId }),
+      ...(step.rejectedReason === undefined ? {} : { rejectedReason: step.rejectedReason }),
       toolInvoked: step.toolInvoked,
       ...(step.toolOutcome === undefined ? {} : { toolOutcome: step.toolOutcome }),
       toolCallsSoFar,

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { MAX_OPERATIONAL_DECISIONS, MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES } from '../../core/cognition/CognitiveOperationalOrchestrator.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,7 +63,7 @@ test('production request reads js/app.js from financeiro-lumarkis and synthesis 
     return { outcome: 'synthesized', answer: `Linha ${line?.[1]}: o botão Salvar cliente usa class="${line?.[2]}".` };
   });
   assert.deepEqual(urls.map((url) => new URL(url).pathname), ['/repos/gahsantosss16-dev/financeiro-lumarkis/contents/js/app.js']);
-  assert.equal(decideCalls, 0);
+  assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
   assert.equal(seen.length, 1);
   assert.match(seen[0]!, /^Trechos de "js\/app\.js" que contêm "Salvar cliente"/u);
   assert.ok(seen[0]!.includes(BUTTON_LINE.trim()), 'the button line beyond the 64 KiB preview must reach synthesis');
@@ -79,7 +80,7 @@ test('without synthesis the evidence fallback is the located excerpt, never a lo
 test('a real 404 in the named project is reported honestly with project and path, without echoing the request', async () => {
   const { answer, urls, decideCalls } = await run(404);
   assert.equal(urls.length, 1);
-  assert.equal(decideCalls, 0);
+  assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
   assert.match(answer, /^Não consegui ler "js\/app\.js" no projeto LUMARKIS Gestão Financeira \(repositório autorizado gahsantosss16-dev\/financeiro-lumarkis, branch main\)/u);
   assert.doesNotMatch(answer, /Localize o botão|Não modifique/u);
 });

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { MAX_OPERATIONAL_DECISIONS, MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES } from '../../core/cognition/CognitiveOperationalOrchestrator.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -190,7 +191,7 @@ test('an explicit GitHub request for recent commits calls github.listCommits and
     );
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
-    assert.equal(decideCalls, 0);
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.match(String(result.output.message), /corrige timeout do provider cognitivo/);
     assert.doesNotMatch(String(result.output.message), /não consegui concluir|ainda não sei responder/i);
   } finally {
@@ -212,7 +213,7 @@ test('configured project-capability questions and the short "No GitHub?" continu
     const followUp = await app.executeCommand(input('No GitHub?', 11));
 
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_GET_PROJECT_TOOL_ID]);
-    assert.equal(decideCalls, 0);
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.match(String(capability.output.message), /SebastianIA|gahsantosss16-dev/i);
     assert.match(String(followUp.output.message), /SebastianIA|gahsantosss16-dev/i);
     assert.doesNotMatch(String(followUp.output.message), /não consegui concluir|não possuo acesso/i);
@@ -332,7 +333,7 @@ test('an objective naming only "commits" - never the literal word "github", on a
     const result = await app.executeCommand(input('quais os últimos 3 commits?', 50));
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
-    assert.equal(decideCalls, 0, 'a capability that unambiguously matches must never depend on the model to discover it exists');
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.match(String(result.output.message), /78702c46/);
     assert.match(String(result.output.message), /2c27fafb/);
     assert.match(String(result.output.message), /1d8cb396/);
@@ -385,7 +386,7 @@ test('explicit commit quantities resolve to exactly that many commits, with no d
       const result = await app.executeCommand(input(scenario.objective, 60 + index));
 
       assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
-      assert.equal(decideCalls, 0, 'the deterministic route must resolve this without ever consulting decide()');
+      assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
       assert.equal(synthesizeCalls, 0, 'an explicit, fully-resolved quantity must skip synthesize() entirely');
       const message = String(result.output.message);
       for (const shaIndex of scenario.expectedShaIndexes) {
@@ -541,7 +542,7 @@ test('failed synthesis after a successful Tool uses evidence fallback without re
     const result = await app.executeCommand(input('qual foi o último commit no github?', 25));
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
-    assert.equal(decideCalls, 0);
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.match(String(result.output.message), /78702c464f99/);
     assert.doesNotMatch(String(result.output.message), /não consegui concluir|falhou/i);
   } finally {
@@ -573,7 +574,7 @@ test('GitHub project access concludes from getProject and an immediate commit fo
 
     const project = await app.executeCommand(input('vc consegue ver meus projetos no github?', 10));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID]);
-    assert.equal(decideCalls, 0, 'a successful getProject observation is already a complete answer');
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.equal(synthesisCalls, 1);
     assert.match(String(project.output.message), /SebastianIA|gahsantosss16-dev\/SebastianIA/);
 
@@ -583,7 +584,7 @@ test('GitHub project access concludes from getProject and an immediate commit fo
     // at 1 (from the getProject call above), it does not increment further.
     const commit = await app.executeCommand(input('qual foi o último commit do projeto que vc tem acesso?', 11));
     assert.deepEqual(invoked, [GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID]);
-    assert.equal(decideCalls, 0, 'the immediate GitHub continuation must remain deterministic');
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.equal(synthesisCalls, 1, 'an explicit singular commit quantity is fully resolved by the Tool result alone');
     assert.match(String(commit.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
 
@@ -673,7 +674,7 @@ test('successful deterministic commits route completes from evidence even if eve
     );
 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID]);
-    assert.equal(decideCalls, 0, 'the completed deterministic capability must not require another operational decision');
+    assert.ok(decideCalls >= 1 && decideCalls <= MAX_OPERATIONAL_DECISIONS + MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES, 'SPEC-051: the model interprets first, bounded by the decision budget; the deterministic route only supplies evidence when the model cannot');
     assert.equal(respondCalls, 0, 'the conversational "no tools" fallback must never be consulted after a real Tool attempt');
     assert.match(String(result.output.message), /abcdef123456|corrige timeout do provider cognitivo/);
     assert.doesNotMatch(String(result.output.message), /não tenho acesso/i);
