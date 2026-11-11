@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { OPERATIONAL_HARD_DEADLINE_MS } from '../../core/cognition/CognitiveOperationalOrchestrator.js';
 import {
   CognitiveOperationalOrchestrator,
   type CognitiveDecision,
@@ -216,5 +217,5 @@ test('SPEC-053: a hung model call is cancelled at the request deadline', async (
   const result = await orchestrator.execute('qual o último commit?', { executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z' });
   const elapsed = Date.now() - started;
   assert.equal(result.outcome, 'unavailable');
-  assert.ok(elapsed < 17_500, `cancelled at the deadline, took ${elapsed} ms`);
+  assert.ok(elapsed < OPERATIONAL_HARD_DEADLINE_MS + 1_500, `cancelled at the deadline, took ${elapsed} ms`);
 });

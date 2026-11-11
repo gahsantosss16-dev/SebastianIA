@@ -29,9 +29,9 @@ const MAX_OBSERVATION_CHARS = 6_000;
  * request at ~30 s; once this elapses with evidence in hand the loop stops
  * deciding and answers from that evidence.
  */
-export const OPERATIONAL_SOFT_DEADLINE_MS = 11_000;
+export const OPERATIONAL_SOFT_DEADLINE_MS = 15_000;
 /** SPEC-053: hard wall-clock budget per request (Gemini calls are cancelled at it). */
-export const OPERATIONAL_HARD_DEADLINE_MS = 16_000;
+export const OPERATIONAL_HARD_DEADLINE_MS = 20_000;
 /** A timed-out decision is retried only if at least this much budget remains. */
 export const OPERATIONAL_RETRY_MIN_REMAINING_MS = 6_000;
 
@@ -742,12 +742,18 @@ export class CognitiveOperationalOrchestrator {
       }
       this.logger?.info('Cognitive operational decision answer not grounded.', { reason: failure });
     }
+    // Investigation stopped early (budget, deadline or model failure, i.e.
+    // no concluding decision): the synthesis is told the evidence may be
+    // incomplete, so it reports what was checked instead of claiming absence.
+    const synthesisObjective = decision === undefined
+      ? `${objective}\n\n(Atenção: a investigação foi interrompida antes de terminar. Responda somente o que as observações mostram, diga explicitamente o que não chegou a ser verificado e nunca afirme que algo não existe.)`
+      : objective;
     const rawEvidence = observations.filter((observation) => observation.outcome === 'ok').map((observation) => observation.summary).join('\n');
     // Last resort: real data, but labelled and bounded instead of a raw dump.
     const evidenceFallback = rawEvidence.length <= 900
       ? rawEvidence
       : `Consultei a fonte, mas não consegui produzir um resumo verificável agora. Trecho inicial do que foi observado:\n${rawEvidence.slice(0, 900).trimEnd()}…`;
-    return this.synthesizeOrFallback(objective, context, observations, evidenceFallback);
+    return this.synthesizeOrFallback(synthesisObjective, context, observations, evidenceFallback);
   }
 
   private async synthesizeOrFallback(

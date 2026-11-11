@@ -162,7 +162,8 @@ function oracle(scenarios: readonly Scenario[], calls: { decide: number; synthes
     },
     async synthesize(request) {
       calls.synthesize += 1;
-      const scenario = byText.get(request.objective);
+      // An interrupted investigation appends a note to the objective (SPEC-053).
+      const scenario = byText.get(request.objective.split('\n\n(Atenção:')[0]!);
       const collapse = (value: string): string => value.replace(/\s+/g, ' ');
       const corpus = collapse(request.observations.map((observation) => observation.summary).join('\n'));
       if (!scenario || scenario.ungroundedSynthesis === true || !scenario.evidence.every((excerpt) => corpus.includes(collapse(excerpt)))) {
