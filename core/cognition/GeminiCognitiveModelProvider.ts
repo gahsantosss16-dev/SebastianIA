@@ -162,9 +162,13 @@ export function decisionSchemaFor(availableTools: readonly CognitiveToolDescript
     for (const name of tool.optionalNumberArguments ?? []) properties[name] = { type: 'integer' };
   }
   if (Object.keys(properties).length === 0) return DECISION_SCHEMA;
+  // A menu narrowed to a single Tool (argument retry) also makes that Tool's
+  // required arguments mandatory in the structured output.
+  const toolIds = new Set((availableTools ?? []).map((tool) => tool.toolId));
+  const required = toolIds.size === 1 ? [...new Set((availableTools ?? []).flatMap((tool) => tool.requiredArguments ?? []))] : [];
   return Object.freeze({
     ...DECISION_SCHEMA,
-    properties: { ...DECISION_SCHEMA.properties, toolArguments: { type: 'object', properties } },
+    properties: { ...DECISION_SCHEMA.properties, toolArguments: { type: 'object', properties, ...(required.length === 0 ? {} : { required }) } },
   });
 }
 

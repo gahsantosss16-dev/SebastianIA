@@ -116,6 +116,8 @@ interface Scenario {
   readonly evidence: readonly string[];
   readonly mustInclude: readonly RegExp[];
   readonly mustNotInclude?: readonly RegExp[];
+  /** Reproduces the observed production payload: with a multi-Tool menu, send another Tool's argument names. */
+  readonly confuseArgumentsWithWideMenu?: boolean;
 }
 
 function oracle(scenarios: readonly Scenario[], calls: { decide: number; synthesize: number; respond: number }): CognitiveModelProvider {
@@ -137,7 +139,10 @@ function oracle(scenarios: readonly Scenario[], calls: { decide: number; synthes
       const step = scenario.plan[done];
       if (!step) return { outcome: 'decided', decision: concluded(scenario.answer) };
       const allowed = advertised(request.availableTools, step.toolId);
-      const toolArguments = Object.fromEntries(Object.entries(step.args).filter(([name]) => allowed.has(name)));
+      const wideMenu = new Set(request.availableTools.map((tool) => tool.toolId)).size > 1;
+      const toolArguments = scenario.confuseArgumentsWithWideMenu === true && wideMenu
+        ? { projectId: LUMARKIS, content: 'README', message: 'ler o arquivo' }
+        : Object.fromEntries(Object.entries(step.args).filter(([name]) => allowed.has(name)));
       return {
         outcome: 'decided',
         decision: {
@@ -311,4 +316,29 @@ test('SPEC-051: the Gemini decision schema advertises the real argument names of
     { toolId: 'github.listCommits', description: 'Lista commits.', requiresAuthorization: false, requiredArguments: ['projectId'], optionalNumberArguments: ['limit'] },
   ]) as { properties: { toolArguments: { type: string; properties?: Record<string, { type: string }> } } };
   assert.deepEqual(schema.properties.toolArguments.properties, { projectId: { type: 'string' }, path: { type: 'string' }, limit: { type: 'integer' } });
+});
+
+test('SPEC-051 production round 2: a model that mixes other Tools\' arguments into readFile recovers once the menu is narrowed to its own Tool', async () => {
+  // With the full menu the oracle sends the observed production payload
+  // {projectId, content, message}; with a menu narrowed to the chosen Tool it
+  // sends that Tool's real arguments.
+  const scenario: Scenario = { ...TEST_A[4]!, id: 'A5-round2', confuseArgumentsWithWideMenu: true };
+  const { send, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.equal(outcome.answer.includes('ASSOCIAPEC'), true, outcome.answer);
+    assert.deepEqual(outcome.toolIds, ['github.readFile']);
+  } finally { close(); }
+});
+
+test('SPEC-051: a decision schema narrowed to one Tool makes its required arguments mandatory', () => {
+  const schema = decisionSchemaFor([
+    { toolId: 'github.readFile', description: 'Lê arquivo.', requiresAuthorization: false, requiredArguments: ['projectId', 'path'] },
+  ]) as { properties: { toolArguments: { required?: readonly string[] } } };
+  assert.deepEqual(schema.properties.toolArguments.required, ['projectId', 'path']);
+  const wide = decisionSchemaFor([
+    { toolId: 'github.readFile', description: 'Lê arquivo.', requiresAuthorization: false, requiredArguments: ['projectId', 'path'] },
+    { toolId: 'github.upsertFile', description: 'Grava.', requiresAuthorization: true, requiredArguments: ['projectId', 'branch', 'path', 'content', 'message'] },
+  ]) as { properties: { toolArguments: { required?: readonly string[] } } };
+  assert.equal(wide.properties.toolArguments.required, undefined);
 });

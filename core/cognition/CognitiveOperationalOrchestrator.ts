@@ -323,6 +323,11 @@ export class CognitiveOperationalOrchestrator {
     // `decide` only - never mixed into `observations`, so synthesis grounding
     // and the "all observations ok" rule are unaffected.
     const corrections: CognitiveObservationRecord[] = [];
+    // After arguments were refused, the next decision is offered only the Tool
+    // the model itself chose, so its argument schema cannot be confused with
+    // other Tools' arguments (production: readFile received upsertFile's
+    // `content`/`message` instead of `path`).
+    let argumentRetryToolId: string | undefined;
 
     // At most one extra `decide` per execution, and only after a genuine
     // provider timeout (never after caller cancellation, never after
@@ -332,7 +337,8 @@ export class CognitiveOperationalOrchestrator {
     for (let attempt = 0; attempt < this.maxDecisions; attempt += 1) {
       let result;
       try {
-        const decisionRequest = this.request(objective, context.requestedAt, [...observations, ...corrections], context.relevantMemory ?? [], context.signal);
+        const decisionRequest = this.request(objective, context.requestedAt, [...observations, ...corrections], context.relevantMemory ?? [], context.signal, argumentRetryToolId);
+        argumentRetryToolId = undefined;
         result = await this.provider.decide(decisionRequest);
         if (result.outcome === 'timeout' && timeoutRetryAvailable && context.signal?.aborted !== true) {
           timeoutRetryAvailable = false;
@@ -419,6 +425,7 @@ export class CognitiveOperationalOrchestrator {
             summary: `Argumentos recusados para "${policy.toolId}". Obrigatórios (texto): ${policy.requiredStringArguments.join(', ') || 'nenhum'}. ` +
               `Opcionais: ${optional.join(', ') || 'nenhum'}. Nenhum outro argumento é aceito.`,
           });
+          argumentRetryToolId = policy.toolId;
           continue;
         }
         return this.finish({ outcome: 'blocked', reason: 'cognitiveInvalidToolArguments', toolCalls });
@@ -671,6 +678,7 @@ export class CognitiveOperationalOrchestrator {
     recentObservations: readonly CognitiveObservationRecord[],
     relevantMemory: readonly { readonly content: string }[],
     signal?: AbortSignal,
+    onlyToolId?: string,
   ): CognitiveDecisionRequest {
     return {
       objective,
@@ -678,7 +686,7 @@ export class CognitiveOperationalOrchestrator {
       relevantMemory,
       recentObservations,
       filesRead: [],
-      availableTools: this.catalog.map(({ toolId, description, requiresAuthorization, requiredStringArguments, optionalStringArguments, optionalNumberArguments }) => ({
+      availableTools: this.catalog.filter((entry) => onlyToolId === undefined || entry.toolId === onlyToolId).map(({ toolId, description, requiresAuthorization, requiredStringArguments, optionalStringArguments, optionalNumberArguments }) => ({
         toolId,
         description,
         requiresAuthorization,
