@@ -484,3 +484,15 @@ test('SPEC-053: after a failed Tool, an ungrounded model conclusion is never sho
     assert.match(outcome.answer, /^Não posso confirmar isso com evidência/);
   } finally { close(); }
 });
+
+test('SPEC-053: a registered project named anywhere in the request becomes active; quoted content and double mentions do not', async () => {
+  const commitsAnswer: Scenario = { id: 'S2-lumarkis', text: 'Grava direto na main do LUMARKIS o arquivo docs/teste-main.md com o texto oi.', plan: [{ toolId: 'github.listCommits', args: { projectId: LUMARKIS, limit: 1 } }], answer: LAST_COMMIT_ANSWER, evidence: ['5e63b45'], mustInclude: [/5e63b45/] };
+  const { send, requests, close } = await session([commitsAnswer]);
+  try {
+    await send('Use o Neuro');
+    await send(commitsAnswer);
+    // The GitHub call went to financeiro-lumarkis, not to the previously active Neuro Hub Pro.
+    assert.ok(requests.some((request) => request.url.includes('/repos/gahsantosss16-dev/financeiro-lumarkis/commits')), JSON.stringify(requests.map((request) => request.url)));
+    assert.equal(requests.some((request) => request.url.includes('/neuro-hub-pro/')), false);
+  } finally { close(); }
+});

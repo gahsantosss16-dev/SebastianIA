@@ -146,3 +146,26 @@ test('natural GitHub requests resolve registered project names and preserve the 
     assert.doesNotMatch(reply.message, /desconhecido|ambíguo/);
   }
 });
+
+test('SPEC-053: unique registry mention selects; quoted text and two mentions never do', async () => {
+  const { ProjectRegistry } = await import('../../core/project/ProjectRegistry.js');
+  const { ProjectConversationContext } = await import('../../core/project/ProjectConversationContext.js');
+  const { AsyncFileMemoryStore } = await import('../../core/memory/AsyncMemoryStore.js');
+  const { FileMemoryStore } = await import('../../core/memory/FileMemoryStore.js');
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'sebastian-mention-'));
+  const entry = (id: string, displayName: string, aliases: string[]) => ({ id, displayName, aliases, resourceKind: 'github-repository' as const, remoteRepository: { owner: 'o', repository: id, defaultBranch: 'main' }, permissions: { access: 'read-only' as const } });
+  const registry = new ProjectRegistry({ entries: [entry('sebastiania', 'SebastianIA', ['Sebastian']), entry('lumarkis-financeiro', 'LUMARKIS Gestão Financeira', ['LUMARKIS']), entry('neuro-hub-pro', 'Neuro Hub Pro', ['Neuro'])] });
+  const context = new ProjectConversationContext(registry, new AsyncFileMemoryStore(new FileMemoryStore(join(dir, 'm.json'))), 'test');
+  try {
+    await context.handle('c', 'Use o Neuro', 'e1', '2026-11-11T00:00:00.000Z');
+    await context.handle('c', 'Grava direto na main do LUMARKIS o arquivo docs/x.md com o texto oi.', 'e2', '2026-11-11T00:00:01.000Z');
+    assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro');
+    await context.handle('c', "Adiciona no LUMARKIS o texto 'Teste do Sebastian' num arquivo.", 'e3', '2026-11-11T00:00:02.000Z');
+    assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro', 'quoted "Sebastian" is content, not a project');
+    await context.handle('c', 'Compara o fluxo do Neuro com o que existe no SebastianIA hoje mesmo, por favor.', 'e4', '2026-11-11T00:00:03.000Z');
+    assert.equal((await context.active('c'))?.id, 'lumarkis-financeiro', 'two mentions select nothing');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

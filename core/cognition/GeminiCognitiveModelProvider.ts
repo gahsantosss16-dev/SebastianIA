@@ -26,7 +26,7 @@ export const DEFAULT_GEMINI_COGNITIVE_TIMEOUT_MS = 8_000;
  * it gets its own, more generous default so a merely-slow conversational
  * answer is not aborted the same way a stuck operational decision is.
  */
-export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 20_000;
+export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 12_000;
 /**
  * `synthesize` composes one final, evidence-grounded answer from Tool
  * observations that can be arbitrarily large (many commits, a long file, a

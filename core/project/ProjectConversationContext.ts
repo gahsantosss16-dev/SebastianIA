@@ -64,6 +64,25 @@ export class ProjectConversationContext {
     return before ?? segment;
   }
 
+  /**
+   * SPEC-053: the single registered project whose id, name or alias appears
+   * in the message as a whole word (quoted content excluded - it is data, e.g.
+   * a file text "Teste C do Sebastian"). Driven by the registry, not by phrase
+   * patterns: "Grava direto na main do LUMARKIS ..." names LUMARKIS even though
+   * no "projeto X"/"use o X" form is present. Two or more mentions select
+   * nothing.
+   */
+  private uniqueRegisteredMention(query: string): ReturnType<ProjectRegistry['resolve']> {
+    const unquoted = query.replace(/'[^']*'|"[^"]*"|\u201c[^\u201d]*\u201d/g, ' ');
+    const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const mentioned = this.registry.listDescriptors().filter((descriptor) =>
+      [descriptor.id, descriptor.displayName, ...descriptor.aliases]
+        .map((reference) => normalize(reference).trim())
+        .filter((reference) => reference.length >= 3)
+        .some((reference) => new RegExp(`(?:^|[^\\p{L}\\p{N}])${escape(reference)}(?:$|[^\\p{L}\\p{N}])`, 'u').test(unquoted)));
+    return mentioned.length === 1 ? this.registry.resolve(mentioned[0]!.id) : undefined;
+  }
+
   public async handle(conversationId: string, text: string, executionId: string, at: string): Promise<ProjectReply | undefined> {
     // SPEC-053: with no registered project there is nothing to select or
     // identify; local workspace answers (CLI) must not be intercepted.
@@ -105,7 +124,7 @@ export class ProjectConversationContext {
     // Only exact registered names/aliases are accepted; no fuzzy guessing.
     const namedProject = /\bprojeto\s+(.+?)(?=\s+(?:no|na)\s+github\b|\s+e\s+|$)/.exec(query);
     const namedTarget = namedProject ? this.registry.resolve(namedProject[1] ?? '') : undefined;
-    const direct = namedTarget ?? this.registry.resolve(query);
+    const direct = namedTarget ?? this.registry.resolve(query) ?? this.uniqueRegisteredMention(query);
     // Whether this turn's selection clause left something behind - either the
     // "e" bound cut off a trailing request, or the first clause itself wasn't
     // the whole message (more sentences/lines follow). Only meaningful when a
