@@ -29,7 +29,11 @@ const MAX_OBSERVATION_CHARS = 6_000;
  * request at ~30 s; once this elapses with evidence in hand the loop stops
  * deciding and answers from that evidence.
  */
-export const OPERATIONAL_SOFT_DEADLINE_MS = 18_000;
+export const OPERATIONAL_SOFT_DEADLINE_MS = 11_000;
+/** SPEC-053: hard wall-clock budget per request (Gemini calls are cancelled at it). */
+export const OPERATIONAL_HARD_DEADLINE_MS = 16_000;
+/** A timed-out decision is retried only if at least this much budget remains. */
+export const OPERATIONAL_RETRY_MIN_REMAINING_MS = 6_000;
 
 export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
   readonly requiredStringArguments: readonly string[];
@@ -285,6 +289,27 @@ export class CognitiveOperationalOrchestrator {
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
   ): Promise<CognitiveOperationalResult> {
+    // SPEC-053: one wall-clock budget for the whole request. Hostinger's proxy
+    // cuts at ~30 s; slow or timed-out Gemini calls are cancelled at the
+    // deadline and the answer comes from the evidence already gathered.
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), OPERATIONAL_HARD_DEADLINE_MS);
+    const forwardAbort = (): void => deadline.abort();
+    if (context.signal?.aborted === true) deadline.abort();
+    else context.signal?.addEventListener('abort', forwardAbort, { once: true });
+    try {
+      return await this.executeWithinDeadline(objective, { ...context, signal: deadline.signal }, Date.now() + OPERATIONAL_HARD_DEADLINE_MS);
+    } finally {
+      clearTimeout(timer);
+      context.signal?.removeEventListener('abort', forwardAbort);
+    }
+  }
+
+  private async executeWithinDeadline(
+    objective: string,
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
+    deadlineAt: number,
+): Promise<CognitiveOperationalResult> {
     const observations: CognitiveObservationRecord[] = [];
 
     // SPEC-051 - model-first interpretation. The model reads the request and
@@ -295,7 +320,7 @@ export class CognitiveOperationalOrchestrator {
     // unreachable or unparseable before any Tool ran. Every guard below
     // (closed catalog, argument policy, active-project binding, explicit
     // authorization for writes) still applies to the model's decision.
-    const loop = await this.decisionLoop(objective, context, observations);
+    const loop = await this.decisionLoop(objective, context, observations, deadlineAt);
     const modelResult = loop.result;
     // The model's interpretation is unusable when it produced no evidence at
     // all: unreachable/unparseable, blocked by a guard before any Tool ran,
@@ -330,8 +355,9 @@ export class CognitiveOperationalOrchestrator {
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
     observations: CognitiveObservationRecord[],
+    deadlineAt: number = Number.POSITIVE_INFINITY,
   ): Promise<{ readonly result: CognitiveOperationalResult; readonly chosenToolId: string | undefined }> {
-    const state: { chosenToolId: string | undefined; deterministicEvidenceTried: boolean } = { chosenToolId: undefined, deterministicEvidenceTried: false };
+    const state: { chosenToolId: string | undefined; deterministicEvidenceTried: boolean; deadlineAt: number } = { chosenToolId: undefined, deterministicEvidenceTried: false, deadlineAt };
     const result = await this.runDecisions(objective, context, observations, state);
     return { result, chosenToolId: state.chosenToolId };
   }
@@ -340,7 +366,7 @@ export class CognitiveOperationalOrchestrator {
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
     observations: CognitiveObservationRecord[],
-    state: { chosenToolId: string | undefined; deterministicEvidenceTried: boolean },
+    state: { chosenToolId: string | undefined; deterministicEvidenceTried: boolean; readonly deadlineAt: number },
   ): Promise<CognitiveOperationalResult> {
     let toolCalls = 0;
     // Corrective feedback for a structurally invalid Tool choice (unknown
@@ -371,7 +397,7 @@ export class CognitiveOperationalOrchestrator {
         const decisionRequest = this.request(objective, context.requestedAt, [...observations, ...corrections], context.relevantMemory ?? [], context.signal, argumentRetryToolId);
         argumentRetryToolId = undefined;
         result = await this.provider.decide(decisionRequest);
-        if (result.outcome === 'timeout' && timeoutRetryAvailable && context.signal?.aborted !== true) {
+        if (result.outcome === 'timeout' && timeoutRetryAvailable && context.signal?.aborted !== true && state.deadlineAt - Date.now() > OPERATIONAL_RETRY_MIN_REMAINING_MS) {
           timeoutRetryAvailable = false;
           this.logger?.warn('Cognitive operational decision timed out; retrying once.', { attempt, toolCalls });
           result = await this.provider.decide(decisionRequest);
@@ -379,10 +405,17 @@ export class CognitiveOperationalOrchestrator {
         }
       } catch {
         this.logStep(attempt, { nextAction: 'n/a', toolId: undefined, toolInvoked: false, toolOutcome: undefined }, toolCalls);
-        return this.finish({ outcome: 'unavailable', toolCalls });
+        result = { outcome: 'unavailable' as const, reason: 'decide threw' };
       }
       if (result.outcome !== 'decided') {
         this.logStep(attempt, { nextAction: 'n/a', toolId: undefined, toolInvoked: false, toolOutcome: undefined }, toolCalls);
+        // SPEC-053: the model failed after real evidence was gathered - answer
+        // from that evidence (grounded) instead of discarding it (A8/E3).
+        if ((result.outcome === 'unavailable' || result.outcome === 'timeout') && observations.some((observation) => observation.outcome === 'ok')) {
+          this.logger?.info('Cognitive operational loop stopped; answering from gathered evidence.', { toolCalls, reason: 'modelUnavailable' });
+          const answer = await this.answerFromEvidence(objective, context, observations, undefined);
+          return this.finish({ outcome: 'answered', answer, toolCalls });
+        }
         return this.finish(
           result.outcome === 'unavailable' || result.outcome === 'timeout'
             ? { outcome: 'unavailable', toolCalls }

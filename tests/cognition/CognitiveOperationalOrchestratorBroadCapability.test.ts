@@ -189,3 +189,32 @@ test('SPEC-053: with the model unavailable, a fallback route for another project
   assert.deepEqual(payloads.map((payload) => payload.projectId), ['lumarkis-financeiro']);
   assert.match(result.outcome === 'answered' ? result.answer : '', /^Não consegui ler: não encontrado/);
 });
+
+test('SPEC-053: when the model fails after a Tool already succeeded, the answer comes from that evidence instead of "não consegui"', async () => {
+  const catalog: readonly OperationalToolPolicyEntry[] = [{ toolId: 'github.listCommits', description: 'Lista commits.', requiresAuthorization: false, requiredStringArguments: ['projectId'] }];
+  const tool = fakeTool({ 'github.listCommits': () => ({ status: 'completed', output: { outcome: 'ok', message: '5e63b45 merge: recuperar aplicação (#45)' } }) as unknown as SpecializedToolInvocationResult });
+  let calls = 0;
+  const orchestrator = new CognitiveOperationalOrchestrator(tool, {
+    decide: async () => {
+      calls += 1;
+      return calls === 1
+        ? { outcome: 'decided', decision: decision({ intent: 'investigate', nextAction: 'invokeTool', completionState: 'inProgress', toolId: 'github.listCommits', toolArguments: { projectId: 'p' } }) }
+        : { outcome: 'timeout' };
+    },
+  }, catalog);
+  const result = await orchestrator.execute('qual o último commit?', { executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.equal(result.outcome, 'answered');
+  assert.match(result.outcome === 'answered' ? result.answer : '', /5e63b45/);
+});
+
+test('SPEC-053: a hung model call is cancelled at the request deadline', async () => {
+  const catalog: readonly OperationalToolPolicyEntry[] = [{ toolId: 'github.listCommits', description: 'Lista commits.', requiresAuthorization: false, requiredStringArguments: ['projectId'] }];
+  const orchestrator = new CognitiveOperationalOrchestrator(fakeTool({}), {
+    decide: (request) => new Promise((resolve) => request.signal?.addEventListener('abort', () => resolve({ outcome: 'timeout' }), { once: true })),
+  }, catalog);
+  const started = Date.now();
+  const result = await orchestrator.execute('qual o último commit?', { executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z' });
+  const elapsed = Date.now() - started;
+  assert.equal(result.outcome, 'unavailable');
+  assert.ok(elapsed < 17_500, `cancelled at the deadline, took ${elapsed} ms`);
+});

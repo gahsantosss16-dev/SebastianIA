@@ -86,7 +86,10 @@ test('decide timeout: the retry budget is per execution - a later second timeout
   const result = await new CognitiveOperationalOrchestrator(tool, provider, CATALOG).execute(OBJECTIVE, CONTEXT);
   assert.equal(provider.calls, 3);
   assert.deepEqual(tool.invoked, [TOOL_ID]);
-  assert.deepEqual(result, { outcome: 'unavailable', toolCalls: 1 });
+  // SPEC-053: the gathered evidence is answered from instead of discarded.
+  assert.equal(result.outcome, 'answered');
+  assert.equal(result.toolCalls, 1);
+  assert.equal(result.outcome === 'answered' ? result.answer : '', 'Resposta sintetizada com evidência.');
 });
 
 test('decide timeout: no retry when the caller already cancelled (HTTP deadline) - ends unavailable immediately', async () => {

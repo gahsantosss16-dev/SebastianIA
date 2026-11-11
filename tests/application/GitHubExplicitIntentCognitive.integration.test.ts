@@ -523,7 +523,8 @@ test('decide() failing right after a real successful Tool call never produces a 
     assert.deepEqual(invoked, [GITHUB_LIST_COMMITS_TOOL_ID], 'the real Tool call must have actually happened before decide() failed');
     assert.equal(decideCalls, 2);
     assert.equal(respondCalls, 0, 'a demonstrably-working operational attempt must never fall back to the tool-blind "no access" conversational path');
-    assert.match(String(result.output.message), /não consegui concluir|tente novamente/i);
+    // SPEC-053: the real observation is answered from (never a "no access" claim).
+    assert.match(String(result.output.message), /1 commit\(s\) recentes/i);
     assert.doesNotMatch(String(result.output.message), /não tenho acesso a nenhuma ferramenta/i);
   } finally {
     rmSync(root, { recursive: true, force: true });
