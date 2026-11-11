@@ -218,6 +218,10 @@ export class CognitiveOperationalOrchestrator {
     const candidates: OperationalToolPolicyEntry[] = [];
     for (const entry of this.catalog) {
       if (entry.requiresAuthorization) continue;
+      // SPEC-053: never auto-run a command (validation.*) from a keyword
+      // match - production ran the test suite because a requested file was
+      // named "teste-main.md". Commands run only when the model chooses them.
+      if (entry.toolId.startsWith('validation.')) continue;
       const shape = entry.requiredStringArguments;
       const invokableWithoutGuessing = shape.length === 0 || (shape.length === 1 && shape[0] === 'query');
       if (invokableWithoutGuessing && await this.isBroadlyApplicable(entry, objective, immediateContext)) candidates.push(entry);

@@ -144,3 +144,17 @@ test('recovery never auto-invokes a capability that requires write authorization
   assert.deepEqual(tool.invoked, [], 'a write-authorized capability must never be auto-invoked as recovery');
   assert.equal(result.outcome, 'answered');
 });
+
+test('SPEC-053: an evidence-less conclusion never auto-runs a command Tool picked by keyword overlap', async () => {
+  // Production: "Grava direto na main ... docs/teste-main.md" matched the
+  // validation.test terms ("teste") and the recovery path ran the test suite.
+  const catalog: readonly OperationalToolPolicyEntry[] = [{
+    toolId: 'validation.test', description: 'Executa somente os testes previamente cadastrados, com timeout rígido.',
+    requiresAuthorization: false, requiredStringArguments: [], applicabilityTerms: ['testes', 'teste', 'test', 'suíte'],
+  }];
+  const tool = fakeTool({ 'validation.test': () => ({ status: 'completed', output: { outcome: 'ok', message: 'testes executados' } }) as unknown as SpecializedToolInvocationResult });
+  const orchestrator = new CognitiveOperationalOrchestrator(tool, { decide: async () => ({ outcome: 'decided', decision: decision({ finalAnswer: 'Não gravo na main.' }) }) }, catalog);
+  const result = await orchestrator.execute('Grava direto na main o arquivo docs/teste-main.md com o texto oi.', { executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.deepEqual(tool.invoked, []);
+  assert.equal(result.outcome, 'answered');
+});
