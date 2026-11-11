@@ -84,6 +84,13 @@ export const CONVERSE_COMMAND_TYPE = 'converse';
  * or exists for this request - see `applyCognitiveOperationalDecision`.
  */
 const OPERATIONAL_ATTEMPT_INCOMPLETE_ANSWER = 'Não consegui concluir essa consulta agora; tente novamente em instantes.';
+/**
+ * SPEC-052: the tool-capable engine was unreachable (Gemini 429/timeout/
+ * unavailable) for a request that needs real evidence. The tool-less
+ * conversational fallback must not answer it: in production it invented the
+ * author of a commit ("feita por mim, Sebastian") after a 429.
+ */
+const OPERATIONAL_UNAVAILABLE_ANSWER = 'Não consegui consultar o projeto agora: o serviço cognitivo está indisponível ou no limite de uso. Para não responder sem evidência, não vou afirmar nada sobre o projeto; tente novamente em instantes.';
 
 interface DevelopmentTaskOrchestratorLike {
   execute(plan: DevelopmentTaskPlan, context: DevelopmentTaskExecutionContext): DevelopmentTaskResult;
@@ -323,6 +330,15 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const operationalEngineDemonstrablyReachable = result.outcome !== 'unavailable' || result.toolCalls > 0;
     if (decision.intent === 'respond' && operationalEngineDemonstrablyReachable) {
       return { intent: 'respond', answer: OPERATIONAL_ATTEMPT_INCOMPLETE_ANSWER, recordable: false };
+    }
+    // Eligible because a real Tool applies (not the forced last resort): an
+    // unreachable engine yields an honest limitation, never a tool-less guess.
+    // Scope: a project is active, so the question is about that project's
+    // real state. Facts the user explicitly asked to remember remain evidence
+    // the conversational path may still answer from.
+    if (decision.intent === 'respond' && !forceFallback && activeProjectId !== undefined && relevantFacts.length === 0) {
+      this.logger?.info('Cognitive operational engine unavailable; conversational fallback suppressed.', { reason: 'evidenceRequired' });
+      return { intent: 'respond', answer: OPERATIONAL_UNAVAILABLE_ANSWER, recordable: false };
     }
     return decision;
   }
@@ -796,7 +812,20 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     pendingOperations: readonly PendingOperationRecord[],
   ): Promise<SpecializedAgentHandoffResult | undefined> {
     const intent = this.classifyAuthorizationResponse(text);
-    if (intent === 'unrelated' || pendingOperations.length === 0) return undefined;
+    if (intent === 'unrelated') return undefined;
+    if (pendingOperations.length === 0) {
+      // SPEC-052: an explicit operation verb with nothing pending must never be
+      // answered as if something had been cancelled or executed. Bare "sim",
+      // "ok" or "não" keep flowing to the conversation (they answer questions).
+      const normalized = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      if (intent === 'deny' && /\bcancel/.test(normalized)) {
+        return this.operationResponse('Não há nenhuma proposta pendente para cancelar; nada foi alterado.', undefined, text);
+      }
+      if (intent === 'authorize' && /\b(executar|execute|executa|autorizo|autorizado|confirmo|confirmado|prossiga|prosseguir)\b/.test(normalized)) {
+        return this.operationResponse('Não há nenhuma proposta pendente para executar; nada foi executado.', undefined, text);
+      }
+      return undefined;
+    }
     if (pendingOperations.length !== 1) {
       return this.operationResponse(
         'Há mais de uma proposta pendente; preciso que você indique qual deseja autorizar ou cancelar.',
@@ -844,6 +873,13 @@ export class InMemorySpecializedAgent implements SpecializedAgent {
     const affirmative = new Set(['sim', 'ok', 'pode', 'faca', 'ok faca', 'sim faca', 'pode fazer', 'pode executar']);
     if (affirmative.has(normalized)) return 'authorize';
     if (/^(nao|deixa|deixa pra la|cancela|cancelar)(\b|$)/.test(normalized)) return 'deny';
+    // SPEC-052: a short reply made ONLY of affirmative words ("sim, pode
+    // executar", "ok, autorizo") is the same explicit authorization. Any other
+    // word - an instruction, a condition, a negation - keeps it unrelated.
+    const AUTHORIZATION_WORDS = new Set(['sim', 'ok', 'pode', 'faca', 'fazer', 'executar', 'execute', 'executa', 'autorizo', 'autorizado', 'confirmo', 'confirmado', 'prossiga', 'prosseguir']);
+    const words = normalized.split(' ').filter(Boolean);
+    if (words.length >= 2 && words.length <= 4 && words.every((word) => AUTHORIZATION_WORDS.has(word))) return 'authorize';
+    if (words.length === 1 && (words[0] === 'autorizo' || words[0] === 'confirmo')) return 'authorize';
     if (/^(talvez|quem sabe|nao sei|acho que)(\b|$)/.test(normalized)) return 'ambiguous';
     return 'unrelated';
   }

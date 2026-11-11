@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOnlineSebastianApplication } from '../../application/OnlineSebastianApplication.js';
 import { createConfiguredProjectContext } from '../../application/ProjectConfiguration.js';
-import { decisionSchemaFor } from '../../core/cognition/GeminiCognitiveModelProvider.js';
+import { decisionSchemaFor, normalizedIncludes, selectToolArguments } from '../../core/cognition/GeminiCognitiveModelProvider.js';
 import type {
   CognitiveDecision,
   CognitiveDecisionRequest,
@@ -215,7 +215,7 @@ function captureLogger(lines: Array<{ readonly message: string; readonly metadat
   return { debug: record, info: record, warn: record, error: record };
 }
 
-async function session(scenarios: readonly Scenario[]) {
+async function session(scenarios: readonly Scenario[], override: Partial<CognitiveModelProvider> = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'sebastian-homologation-'));
   const requests: RecordedRequest[] = [];
   const originalFetch = globalThis.fetch;
@@ -226,7 +226,7 @@ async function session(scenarios: readonly Scenario[]) {
     SEBASTIAN_GITHUB_TOKEN: 'test-read-token', SEBASTIAN_GITHUB_WRITE_TOKEN: 'test-write-token', SEBASTIAN_GITHUB_WRITE_ENABLED: 'true',
     SEBASTIAN_GITHUB_PROJECTS: JSON.stringify(PROJECTS), SEBASTIAN_STORE_DRIVER: 'file',
   };
-  const provider = oracle([...scenarios, UPSERT], calls);
+  const provider: CognitiveModelProvider = { ...oracle([...scenarios, UPSERT], calls), ...override };
   const projectContext = createConfiguredProjectContext(dataDir, env);
   const app = createOnlineSebastianApplication(captureLogger(logs), provider, dataDir, env, projectContext);
   let second = 0;
@@ -295,7 +295,7 @@ test('SPEC-051 Test C (flow): after explicit authorizations the file is committe
   const { send, requests, close } = await session(TEST_C);
   try {
     assert.equal(record(await send(TEST_C[0]!)).layer, 'ok');
-    const branch = await send('pode executar');
+    const branch = await send('sim, pode executar');
     assert.match(branch.answer, /sebastian\/teste-c-20261111/);
     const proposal = record(await send(UPSERT));
     assert.equal(proposal.layer, 'ok', proposal.answer);
@@ -310,12 +310,31 @@ test('SPEC-051 Test C (flow): after explicit authorizations the file is committe
   } finally { close(); }
 });
 
-test('SPEC-051: the Gemini decision schema advertises the real argument names of the offered Tools', () => {
+test('SPEC-052: the Gemini decision schema gives every Tool its own argument object with its required names', () => {
   const schema = decisionSchemaFor([
     { toolId: 'github.readFile', description: 'Lê arquivo.', requiresAuthorization: false, requiredArguments: ['projectId', 'path'] },
     { toolId: 'github.listCommits', description: 'Lista commits.', requiresAuthorization: false, requiredArguments: ['projectId'], optionalNumberArguments: ['limit'] },
-  ]) as { properties: { toolArguments: { type: string; properties?: Record<string, { type: string }> } } };
-  assert.deepEqual(schema.properties.toolArguments.properties, { projectId: { type: 'string' }, path: { type: 'string' }, limit: { type: 'integer' } });
+  ]) as { properties: { toolArgumentsByTool: { properties: Record<string, unknown> } } };
+  assert.deepEqual(schema.properties.toolArgumentsByTool.properties, {
+    github_readFile: { type: 'object', properties: { projectId: { type: 'string' }, path: { type: 'string' } }, required: ['projectId', 'path'] },
+    github_listCommits: { type: 'object', properties: { projectId: { type: 'string' }, limit: { type: 'integer' } }, required: ['projectId'] },
+  });
+});
+
+test('SPEC-052: only the chosen Tool\'s argument object is used; other Tools\' arguments are discarded', () => {
+  const picked = selectToolArguments({
+    toolId: 'github.readFile',
+    toolArgumentsByTool: { github_readFile: { projectId: 'lumarkis-financeiro', path: 'README.md' }, github_upsertFile: { content: 'x', message: 'y' } },
+  }) as Record<string, unknown>;
+  assert.deepEqual(picked.toolArguments, { projectId: 'lumarkis-financeiro', path: 'README.md' });
+  assert.equal('toolArgumentsByTool' in picked, false);
+});
+
+test('SPEC-052: evidence grounding ignores only formatting, never wording', () => {
+  const observed = '| main antes da recuperação | c875ead | **protótipo Recebe Fácil** |';
+  assert.equal(normalizedIncludes(observed, 'main antes da recuperação c875ead protótipo Recebe Fácil'), true);
+  assert.equal(normalizedIncludes(observed, 'a main tinha apenas um protótipo'), false);
+  assert.equal(normalizedIncludes(observed, 'c8'), false, 'trivial excerpts never ground an answer');
 });
 
 test('SPEC-051 production round 2: a model that mixes other Tools\' arguments into readFile recovers once the menu is narrowed to its own Tool', async () => {
@@ -341,4 +360,51 @@ test('SPEC-051: a decision schema narrowed to one Tool makes its required argume
     { toolId: 'github.upsertFile', description: 'Grava.', requiresAuthorization: true, requiredArguments: ['projectId', 'branch', 'path', 'content', 'message'] },
   ]) as { properties: { toolArguments: { required?: readonly string[] } } };
   assert.equal(wide.properties.toolArguments.required, undefined);
+});
+
+test('SPEC-052: with Gemini rate-limited (429) and a project active, Sebastian states the limitation and invents nothing', async () => {
+  let respondCalls = 0;
+  const { send, close } = await session(TEST_A, {
+    decide: async () => ({ outcome: 'unavailable', reason: 'HTTP 429' }),
+    respond: async () => { respondCalls += 1; return { outcome: 'responded', answer: 'A última alteração foi realizada por mim, Sebastian.' }; },
+  });
+  try {
+    await send('Use o LUMARKIS');
+    const outcome = await send(TEST_A[8]!.text); // A9
+    assert.doesNotMatch(outcome.answer, /por mim|Sebastian\./);
+    assert.match(outcome.answer, /não vou afirmar nada sobre o projeto/);
+    assert.equal(respondCalls, 0, 'the tool-less conversational path is never consulted for project facts');
+  } finally { close(); }
+});
+
+test('SPEC-052: a model conclusion without evidence is kept; the deterministic route only adds an observation and never swaps the operation', async () => {
+  const modelAnswer = 'A branch de teste já foi criada antes; não vou criar outra nem alterar nada sem um novo pedido explícito.';
+  const scenario: Scenario = { id: 'C2-round2', text: WRITE_TEXT_C2, plan: [], answer: modelAnswer, evidence: [], mustInclude: [/já foi criada/] };
+  const { send, requests, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.equal(outcome.answer, modelAnswer);
+    assert.doesNotMatch(outcome.answer, /Não consegui ler/);
+    assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
+  } finally { close(); }
+});
+
+test('SPEC-052: "cancela" or "pode executar" with nothing pending never claims a cancellation or an execution', async () => {
+  const { send, requests, close } = await session(TEST_C);
+  try {
+    assert.match((await send('cancela')).answer, /Não há nenhuma proposta pendente para cancelar; nada foi alterado/);
+    assert.match((await send('pode executar')).answer, /Não há nenhuma proposta pendente para executar; nada foi executado/);
+    assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
+  } finally { close(); }
+});
+
+test('SPEC-052: a combined affirmative authorizes, but any extra instruction or negation never does', async () => {
+  for (const reply of ['não pode executar', 'sim, mas cria na main', 'talvez pode executar']) {
+    const { send, requests, close } = await session(TEST_C);
+    try {
+      assert.match((await send(TEST_C[0]!)).answer, /Proponho/);
+      await send(reply);
+      assert.deepEqual(requests.filter((request) => request.method !== 'GET'), [], reply);
+    } finally { close(); }
+  }
 });

@@ -155,27 +155,73 @@ const DECISION_SCHEMA = Object.freeze({
  * union of the argument names the offered Tools actually accept (all
  * optional at schema level; the orchestrator's policy remains the guard).
  */
+/** Schema-safe property key for a Tool id ("github.readFile" -> "github_readFile"). */
+export function toolArgumentsKey(toolId: string): string {
+  return toolId.replace(/[^A-Za-z0-9_]/g, '_');
+}
+
 export function decisionSchemaFor(availableTools: readonly CognitiveToolDescriptor[] | undefined): Readonly<Record<string, unknown>> {
-  const properties: Record<string, { type: string }> = {};
+  // One argument object per Tool (SPEC-052). A single merged property list let
+  // the model fill github.readFile with github.upsertFile's content/message.
+  const byTool = new Map<string, { properties: Record<string, { type: string }>; required: Set<string> }>();
   for (const tool of availableTools ?? []) {
-    for (const name of [...(tool.requiredArguments ?? []), ...(tool.optionalArguments ?? [])]) properties[name] = { type: 'string' };
-    for (const name of tool.optionalNumberArguments ?? []) properties[name] = { type: 'integer' };
+    const entry = byTool.get(tool.toolId) ?? { properties: {}, required: new Set<string>() };
+    for (const name of [...(tool.requiredArguments ?? []), ...(tool.optionalArguments ?? [])]) entry.properties[name] = { type: 'string' };
+    for (const name of tool.optionalNumberArguments ?? []) entry.properties[name] = { type: 'integer' };
+    for (const name of tool.requiredArguments ?? []) entry.required.add(name);
+    byTool.set(tool.toolId, entry);
   }
-  if (Object.keys(properties).length === 0) return DECISION_SCHEMA;
-  // A menu narrowed to a single Tool (argument retry) also makes that Tool's
-  // required arguments mandatory in the structured output.
-  const toolIds = new Set((availableTools ?? []).map((tool) => tool.toolId));
-  const required = toolIds.size === 1 ? [...new Set((availableTools ?? []).flatMap((tool) => tool.requiredArguments ?? []))] : [];
+  const withArguments = [...byTool.entries()].filter(([, entry]) => Object.keys(entry.properties).length > 0);
+  if (withArguments.length === 0) return DECISION_SCHEMA;
+  const objectSchema = (entry: { properties: Record<string, { type: string }>; required: Set<string> }) =>
+    ({ type: 'object', properties: entry.properties, ...(entry.required.size === 0 ? {} : { required: [...entry.required] }) });
+  // A menu narrowed to a single Tool (argument retry) keeps the flat
+  // toolArguments shape with that Tool's required arguments mandatory.
+  if (byTool.size === 1) {
+    return Object.freeze({ ...DECISION_SCHEMA, properties: { ...DECISION_SCHEMA.properties, toolArguments: objectSchema(withArguments[0]![1]) } });
+  }
   return Object.freeze({
     ...DECISION_SCHEMA,
-    properties: { ...DECISION_SCHEMA.properties, toolArguments: { type: 'object', properties, ...(required.length === 0 ? {} : { required }) } },
+    properties: {
+      ...DECISION_SCHEMA.properties,
+      toolArgumentsByTool: {
+        type: 'object',
+        properties: Object.fromEntries(withArguments.map(([toolId, entry]) => [toolArgumentsKey(toolId), objectSchema(entry)])),
+      },
+    },
   });
 }
 
-/** Whitespace-insensitive containment, so a faithful excerpt is not rejected for reflowed spaces or line breaks. */
-function normalizedIncludes(haystack: string, needle: string): boolean {
-  const collapse = (value: string): string => value.replace(/\s+/g, ' ').trim();
-  return collapse(haystack).includes(collapse(needle));
+/** Moves the chosen Tool's entry of `toolArgumentsByTool` into `toolArguments`; every other Tool's entry is discarded. */
+export function selectToolArguments(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const record = raw as Record<string, unknown>;
+  if (!('toolArgumentsByTool' in record)) return raw;
+  const { toolArgumentsByTool, ...rest } = record;
+  const byTool = toolArgumentsByTool && typeof toolArgumentsByTool === 'object' && !Array.isArray(toolArgumentsByTool)
+    ? toolArgumentsByTool as Record<string, unknown> : {};
+  const picked = typeof rest.toolId === 'string' ? byTool[toolArgumentsKey(rest.toolId)] : undefined;
+  return picked && typeof picked === 'object' && !Array.isArray(picked) ? { ...rest, toolArguments: picked } : rest;
+}
+
+/**
+ * Formatting-insensitive containment (SPEC-052): an excerpt still has to be
+ * the observed words, in order; only case, whitespace, Markdown markers
+ * (* _ ` # | >) and typographic quotes are ignored. A long Markdown document
+ * quoted without its table pipes or bold markers is therefore still grounded,
+ * while a paraphrase is not.
+ */
+export function normalizedIncludes(haystack: string, needle: string): boolean {
+  const collapse = (value: string): string => value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\u201c\u201d\u201e\u00ab\u00bb]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[*_`#|>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const target = collapse(needle);
+  return target.length >= 3 && collapse(haystack).includes(target);
 }
 
 const CONVERSATION_SYSTEM_INSTRUCTION =
@@ -198,7 +244,7 @@ const DECISION_SYSTEM_INSTRUCTION =
   'A mensagem atual define a intenção. Use relevantMemory apenas quando semanticamente relacionada ou necessária para resolver uma referência ou continuação; nunca substitua o assunto atual por memória anterior. ' +
   'Proponha exatamente uma decisão estruturada por vez. ' +
   'Use somente toolIds presentes em availableTools. Nunca conceda autorização, invente Tool ou alegue ter executado uma ação. ' +
-  'Em toolArguments, preencha exatamente os nomes de requiredArguments da ferramenta escolhida (e, se útil, optionalArguments/optionalNumberArguments); nunca invente outros nomes. Para listar a raiz de um repositório, use path "". ' +
+  'Argumentos: quando o schema tiver toolArgumentsByTool, preencha SOMENTE a entrada da ferramenta escolhida (a chave é o toolId com "." trocado por "_", por exemplo github_readFile) com os nomes de requiredArguments dela; quando o schema tiver apenas toolArguments, preencha-o. Nunca use argumentos de outra ferramenta nem invente nomes. Para listar a raiz de um repositório, use path "". ' +
   'Se recentObservations trouxer uma recusa de argumentos ou de ferramenta, corrija a decisão em vez de desistir. ' +
   'Você não grava memória permanente; nunca afirme ter registrado, anotado, salvo, guardado ou memorizado uma informação. ' +
   'Se availableTools incluir ferramentas com prefixo "github.", você TEM acesso real ao repositório configurado através delas - nunca alegue não ter acesso ao GitHub ou à internet nesse caso; invoque a ferramenta adequada ao pedido (por exemplo, github.listCommits para commits recentes, github.readFile para ler um arquivo, github.getProject para identificar o projeto) e responda com base na observação retornada, nunca com uma recusa genérica. ' +
@@ -393,7 +439,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       this.logOutcome('decide', 'invalidResponse', result, 'invalidStructuredJson');
       return { outcome: 'invalidResponse', reason: 'Resposta cognitiva não é JSON válido.' };
     }
-    const decision = parseCognitiveDecision(raw);
+    const decision = parseCognitiveDecision(selectToolArguments(raw));
     if (!decision) {
       this.logOutcome('decide', 'invalidResponse', result, 'schemaMismatch');
       return { outcome: 'invalidResponse', reason: 'Resposta cognitiva não corresponde ao schema.' };
@@ -435,6 +481,23 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       ? (parsed as { readonly evidence?: unknown }).evidence
       : undefined;
     const summaries = request.observations.map((observation) => observation.summary);
+    const groundingFailure =
+      typeof answer !== 'string' || answer.trim() === '' ? 'emptyAnswer'
+        : answer.length > MAX_GEMINI_CONVERSATION_ANSWER_CHARS ? 'answerTooLong'
+          : !Array.isArray(evidence) || evidence.length === 0 ? 'missingEvidence'
+            : evidence.some((excerpt) => typeof excerpt !== 'string' || excerpt.trim() === '') ? 'invalidEvidence'
+              : evidence.some((excerpt) => !summaries.some((summary) => normalizedIncludes(summary, excerpt as string))) ? 'evidenceNotInObservations'
+                : !parsed || typeof parsed !== 'object' || Object.keys(parsed).some((key) => key !== 'answer' && key !== 'evidence') ? 'unexpectedFields'
+                  : undefined;
+    if (groundingFailure !== undefined) {
+      this.logger?.info('Gemini synthesis grounding rejected.', {
+        reason: groundingFailure,
+        evidenceCount: Array.isArray(evidence) ? evidence.length : 0,
+        unmatchedEvidenceCount: Array.isArray(evidence)
+          ? evidence.filter((excerpt) => typeof excerpt !== 'string' || !summaries.some((summary) => normalizedIncludes(summary, excerpt))).length
+          : 0,
+      });
+    }
     if (
       typeof answer !== 'string' || answer.trim() === '' || answer.length > MAX_GEMINI_CONVERSATION_ANSWER_CHARS ||
       !Array.isArray(evidence) || evidence.length === 0 ||

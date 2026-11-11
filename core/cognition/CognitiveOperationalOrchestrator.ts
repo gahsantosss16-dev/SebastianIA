@@ -282,10 +282,15 @@ export class CognitiveOperationalOrchestrator {
     // or a conclusion with zero observations (the production failure mode
     // where the model claimed "no GitHub/internet access" while a real Tool
     // applied). Only then may a deterministic route supply evidence.
+    // SPEC-052: a model answer is never replaced here. A conclusion without
+    // evidence is handled inside the loop (the deterministic route only adds
+    // one observation and the model decides again), and a blocked decision
+    // may only fall back to a route for the same Tool the model chose - never
+    // to a different operation (production: a write request turned into
+    // readFile).
     const modelUnusable = modelResult.toolCalls === 0 && (
       modelResult.outcome === 'unavailable' ||
-      modelResult.outcome === 'blocked' ||
-      (modelResult.outcome === 'answered' && loop.concludedWithoutEvidence));
+      (modelResult.outcome === 'blocked' && (loop.chosenToolId === undefined || this.deterministicRouteToolId(objective, context.immediateContext) === loop.chosenToolId)));
     if (!modelUnusable) return modelResult;
 
     const fallbackObservations: CognitiveObservationRecord[] = [];
@@ -305,17 +310,17 @@ export class CognitiveOperationalOrchestrator {
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
     observations: CognitiveObservationRecord[],
-  ): Promise<{ readonly result: CognitiveOperationalResult; readonly concludedWithoutEvidence: boolean }> {
-    const state = { concludedWithoutEvidence: false };
+  ): Promise<{ readonly result: CognitiveOperationalResult; readonly chosenToolId: string | undefined }> {
+    const state: { chosenToolId: string | undefined; deterministicEvidenceTried: boolean } = { chosenToolId: undefined, deterministicEvidenceTried: false };
     const result = await this.runDecisions(objective, context, observations, state);
-    return { result, concludedWithoutEvidence: state.concludedWithoutEvidence };
+    return { result, chosenToolId: state.chosenToolId };
   }
 
   private async runDecisions(
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string; readonly signal?: AbortSignal },
     observations: CognitiveObservationRecord[],
-    state: { concludedWithoutEvidence: boolean },
+    state: { chosenToolId: string | undefined; deterministicEvidenceTried: boolean },
   ): Promise<CognitiveOperationalResult> {
     let toolCalls = 0;
     // Corrective feedback for a structurally invalid Tool choice (unknown
@@ -379,13 +384,24 @@ export class CognitiveOperationalOrchestrator {
           toolCalls += 1;
           continue;
         }
-        state.concludedWithoutEvidence = observations.length === 0 && await this.hasDeterministicRoute(objective, context.immediateContext);
+        // A conclusion without any evidence while a deterministic route
+        // applies (production: the model claimed "no GitHub access") gets that
+        // route's observation once; the model then decides again with it, so
+        // its own interpretation is kept rather than overwritten.
+        if (observations.length === 0 && !state.deterministicEvidenceTried && attempt < this.maxDecisions - 1 &&
+          await this.hasDeterministicRoute(objective, context.immediateContext)) {
+          state.deterministicEvidenceTried = true;
+          const routed = await this.applyDeterministicIntentRoute(objective, context, observations, { observationOnly: true });
+          toolCalls += routed.toolCalls;
+          if (routed.toolCalls > 0) continue;
+        }
         return this.finish(
           decision.finalAnswer
             ? { outcome: 'answered', answer: decision.finalAnswer, toolCalls }
             : { outcome: 'blocked', reason: 'cognitiveMissingFinalAnswer', toolCalls },
         );
       }
+      if (decision.nextAction === 'invokeTool' && decision.toolId) state.chosenToolId = decision.toolId;
       if (decision.nextAction !== 'invokeTool' || !decision.toolId) {
         this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined }, toolCalls);
         return this.finish({ outcome: 'blocked', reason: 'cognitiveNoActionableDecision', toolCalls });
@@ -486,6 +502,19 @@ export class CognitiveOperationalOrchestrator {
    * anything. Returns how many Tool calls it made (0 or 1) so the caller can
    * fold that into its own running `toolCalls` count.
    */
+  /** The Tool a deterministic route would use for this objective, if any. */
+  private deterministicRouteToolId(objective: string, immediateContext?: string): string | undefined {
+    const route = this.catalog.find((entry) => {
+      const deterministic = entry.deterministicIntent;
+      if (!deterministic) return false;
+      if (deterministic.pattern.test(objective)) return true;
+      return immediateContext !== undefined &&
+        deterministic.immediateContext?.objectivePattern.test(objective) === true &&
+        deterministic.immediateContext.contextPattern.test(immediateContext) === true;
+    }) ?? this.findUniqueCapabilityMatchRoute(objective);
+    return route?.deterministicIntent === undefined ? undefined : route.toolId;
+  }
+
   /** Whether a deterministic route would apply - used only to judge a model conclusion that gathered no evidence. */
   private async hasDeterministicRoute(objective: string, immediateContext?: string): Promise<boolean> {
     const matched = this.catalog.some((entry) => {
@@ -503,6 +532,7 @@ export class CognitiveOperationalOrchestrator {
     objective: string,
     context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string },
     observations: CognitiveObservationRecord[],
+    options: { readonly observationOnly?: boolean } = {},
   ): Promise<{ readonly toolCalls: number; readonly answer?: string }> {
     const primaryContext = context.immediateContext;
     const route = this.catalog.find((entry) => {
@@ -550,7 +580,9 @@ export class CognitiveOperationalOrchestrator {
       toolId: route.toolId,
       toolInvoked: true,
       toolOutcome,
+      ...(options.observationOnly === true ? { observationOnly: true } : {}),
     });
+    if (options.observationOnly === true) return { toolCalls: 1 };
     const successfulObservation = observations[observations.length - 1]!;
     if (toolOutcome === 'rejected' && route.deterministicIntent.answerFromRejectedObservation !== undefined) {
       return { toolCalls: 1, answer: route.deterministicIntent.answerFromRejectedObservation(successfulObservation, objective) };
