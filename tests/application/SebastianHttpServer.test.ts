@@ -1155,10 +1155,12 @@ test('CONVERSATIONS: reopening a conversation returns its real saved history and
     };
     assert.equal(body.conversation.id, conversation.id);
     assert.notEqual(body.conversation.title, 'Nova conversa');
-    assert.deepEqual(body.messages, [
+    // Message timestamps (commit 09373a8) are part of the saved history.
+    assert.deepEqual(body.messages.map(({ role, content }: { role: string; content: string }) => ({ role, content })), [
       { role: 'user', content: 'Quais são minhas tarefas?' },
       { role: 'sebastian', content: 'Você não tem nenhuma tarefa pendente.' },
     ]);
+    assert.ok((body.messages as ReadonlyArray<{ readonly sentAt?: unknown }>).every((message) => typeof message.sentAt === 'string' && !Number.isNaN(Date.parse(message.sentAt))));
 
     const continued = await webConverse(running.baseUrl, cookie, 'E se eu adicionar uma agora?', conversation.id);
     assert.equal(continued.status, 200);

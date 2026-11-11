@@ -95,6 +95,7 @@ function githubFetch(requests: RecordedRequest[]) {
     if (method === 'GET' && path === '/contents/README.md') return json(200, file('README.md', README));
     if (method === 'GET' && path === '/contents/.github/workflows/pages.yml') return json(200, file('.github/workflows/pages.yml', PAGES_YML));
     if (method === 'GET' && path === '/contents/.github/workflows/ci.yml') return json(200, file('.github/workflows/ci.yml', CI_YML));
+    if (method === 'GET' && path === '/contents/docs/LONGO.md') return json(200, file('docs/LONGO.md', 'Linha de conteúdo real do documento. '.repeat(150)));
     if (method === 'GET' && path === '/contents/docs/RECUPERACAO-MAIN-20261111.md') return json(200, file('docs/RECUPERACAO-MAIN-20261111.md', RECOVERY_DOC));
     if (method === 'GET' && path === '/compare/main...claude/login-mobile-rodape') return json(200, COMPARE);
     if (method === 'GET' && path === '/git/ref/heads/main') return json(200, { object: { sha: COMMITS[0]!.sha } });
@@ -118,6 +119,10 @@ interface Scenario {
   readonly mustNotInclude?: readonly RegExp[];
   /** Reproduces the observed production payload: with a multi-Tool menu, send another Tool's argument names. */
   readonly confuseArgumentsWithWideMenu?: boolean;
+  /** Evidence the oracle attaches to its own concluding decision (SPEC-053). */
+  readonly decisionEvidence?: readonly string[];
+  /** Makes the oracle's synthesis cite something that is not in the observations. */
+  readonly ungroundedSynthesis?: boolean;
 }
 
 function oracle(scenarios: readonly Scenario[], calls: { decide: number; synthesize: number; respond: number }): CognitiveModelProvider {
@@ -137,7 +142,10 @@ function oracle(scenarios: readonly Scenario[], calls: { decide: number; synthes
       if (!scenario) return { outcome: 'decided', decision: concluded('Resposta direta.') };
       const done = request.recentObservations.filter((observation) => !observation.stepId.startsWith('operational:correction')).length;
       const step = scenario.plan[done];
-      if (!step) return { outcome: 'decided', decision: concluded(scenario.answer) };
+      if (!step) {
+        const decision = concluded(scenario.answer);
+        return { outcome: 'decided', decision: scenario.decisionEvidence === undefined ? decision : { ...decision, evidence: scenario.decisionEvidence } };
+      }
       const allowed = advertised(request.availableTools, step.toolId);
       const wideMenu = new Set(request.availableTools.map((tool) => tool.toolId)).size > 1;
       const toolArguments = scenario.confuseArgumentsWithWideMenu === true && wideMenu
@@ -157,7 +165,7 @@ function oracle(scenarios: readonly Scenario[], calls: { decide: number; synthes
       const scenario = byText.get(request.objective);
       const collapse = (value: string): string => value.replace(/\s+/g, ' ');
       const corpus = collapse(request.observations.map((observation) => observation.summary).join('\n'));
-      if (!scenario || !scenario.evidence.every((excerpt) => corpus.includes(collapse(excerpt)))) {
+      if (!scenario || scenario.ungroundedSynthesis === true || !scenario.evidence.every((excerpt) => corpus.includes(collapse(excerpt)))) {
         return { outcome: 'invalidResponse', reason: 'ungrounded' };
       }
       return { outcome: 'synthesized', answer: scenario.answer };
@@ -248,7 +256,7 @@ async function session(scenarios: readonly Scenario[], override: Partial<Cogniti
     return { id: scenario.id, layer, answer, decideCalls, modelCalls: calls.decide + calls.synthesize + calls.respond - before.model, toolIds };
   };
   const close = () => { globalThis.fetch = originalFetch; rmSync(dataDir, { recursive: true, force: true }); };
-  return { send, requests, close };
+  return { send, requests, close, calls };
 }
 
 const report: Outcome[] = [];
@@ -407,4 +415,72 @@ test('SPEC-052: a combined affirmative authorizes, but any extra instruction or 
       assert.deepEqual(requests.filter((request) => request.method !== 'GET'), [], reply);
     } finally { close(); }
   }
+});
+
+test('SPEC-053: a concluding decision with grounded evidence is answered directly - no separate synthesis call', async () => {
+  const scenario: Scenario = { ...TEST_A[4]!, id: 'A5-grounded', decisionEvidence: ['gestão financeira da ASSOCIAPEC'] };
+  const { send, close, calls } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.equal(outcome.answer, scenario.answer);
+    assert.equal(calls.synthesize, 0);
+  } finally { close(); }
+});
+
+test('SPEC-053: an invented decision excerpt is never shown; synthesis is the second grounded attempt', async () => {
+  const scenario: Scenario = { ...TEST_A[4]!, id: 'A5-invented', decisionEvidence: ['o sistema tem 40 módulos e IA própria'] };
+  const { send, close, calls } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.equal(calls.synthesize, 1);
+    assert.match(outcome.answer, /ASSOCIAPEC/);
+  } finally { close(); }
+});
+
+test('SPEC-053: when neither the decision nor the synthesis is grounded, the answer is labelled and bounded, never a raw dump', async () => {
+  const scenario: Scenario = { ...TEST_B[2]!, id: 'B3-ungrounded', decisionEvidence: ['texto que não existe no documento'], ungroundedSynthesis: true };
+  const { send, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    // The fixture document is short (< 900 chars), so the evidence itself is
+    // returned; anything longer is labelled and cut (the real file is ~4.5 KB).
+    assert.ok(outcome.answer.length < 1100, `bounded: ${outcome.answer.length}`);
+    assert.ok(outcome.answer.length <= 900 || /^Consultei a fonte, mas não consegui produzir um resumo verificável agora/.test(outcome.answer));
+    assert.doesNotMatch(outcome.answer, /texto que não existe no documento/);
+  } finally { close(); }
+});
+
+test('SPEC-053: evidence gathered before the decision budget runs out is used, not discarded (A7/A10)', async () => {
+  const step = (path: string): ToolStep => ({ toolId: 'github.readFile', args: { projectId: LUMARKIS, path } });
+  const scenario: Scenario = {
+    id: 'A10-budget', text: TEST_A[9]!.text,
+    plan: [{ toolId: 'github.listTree', args: { projectId: LUMARKIS, path: '.github/workflows' } }, step('.github/workflows/ci.yml'), step('.github/workflows/pages.yml'), step('README.md'), step('README.md')],
+    answer: TEST_A[9]!.answer, evidence: ['vitest', 'branches-ignore: [main]'], mustInclude: [/Sim/],
+  };
+  const { send, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.doesNotMatch(outcome.answer, /Não consegui concluir/);
+    assert.match(outcome.answer, /Sim/);
+  } finally { close(); }
+});
+
+test('SPEC-053: a long document that cannot be summarised verifiably is labelled and cut, not dumped', async () => {
+  const scenario: Scenario = { ...TEST_B[2]!, id: 'B3-long', text: 'Lê o arquivo docs/LONGO.md do LUMARKIS e me resume.', plan: [{ toolId: 'github.readFile', args: { projectId: LUMARKIS, path: 'docs/LONGO.md' } }], decisionEvidence: ['inventado'], ungroundedSynthesis: true };
+  const { send, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.match(outcome.answer, /^Consultei a fonte, mas não consegui produzir um resumo verificável agora/);
+    assert.ok(outcome.answer.length < 1100, `bounded: ${outcome.answer.length}`);
+  } finally { close(); }
+});
+
+test('SPEC-053: after a failed Tool, an ungrounded model conclusion is never shown as fact', async () => {
+  const scenario: Scenario = { ...TEST_B[2]!, id: 'B3-missing', text: 'Lê o arquivo docs/NAO-EXISTE.md do LUMARKIS e me resume.', plan: [{ toolId: 'github.readFile', args: { projectId: LUMARKIS, path: 'docs/NAO-EXISTE.md' } }] };
+  const { send, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.doesNotMatch(outcome.answer, /Recebe Fácil/, 'the invented summary of an unread file must not appear');
+    assert.match(outcome.answer, /^Não posso confirmar isso com evidência/);
+  } finally { close(); }
 });

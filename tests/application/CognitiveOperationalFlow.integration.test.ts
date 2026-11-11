@@ -310,7 +310,9 @@ test('read-only planner autonomously chains search, file read and diagnosis whil
     assert.deepEqual(invoked, []);
 
     const secret = await app.executeCommand(input('Tente consultar um segredo.', 42));
-    assert.match(String(secret.output.message), /bloqueada/);
+    // SPEC-053: after a refused read the answer reports the Tool's own message
+    // (an ungrounded model paraphrase is no longer shown as fact).
+    assert.match(String(secret.output.message), /bloqueada|protegido e não pode ser lido/);
     assert.equal(requests.at(-1)?.recentObservations[0]?.outcome, 'rejected');
     assert.equal(JSON.stringify(requests).includes('private-value'), false);
   } finally {

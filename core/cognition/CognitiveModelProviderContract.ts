@@ -103,6 +103,12 @@ export interface CognitiveDecision {
   readonly confidence: number;
   /** User-facing result, accepted only for a concludeCompleted decision. */
   readonly finalAnswer?: string;
+  /**
+   * SPEC-053: verbatim excerpts of `recentObservations` supporting
+   * `finalAnswer`. A grounded conclusion is used directly (no separate
+   * synthesis call); an ungrounded one is never shown as an evidence answer.
+   */
+  readonly evidence?: readonly string[];
 }
 
 /**

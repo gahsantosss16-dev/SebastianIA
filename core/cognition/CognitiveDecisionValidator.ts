@@ -4,6 +4,7 @@ import type {
   CognitiveIntent,
   CognitiveNextAction,
 } from './CognitiveModelProviderContract.js';
+import { MAX_EVIDENCE_EXCERPTS, MAX_EVIDENCE_EXCERPT_CHARS } from './EvidenceGrounding.js';
 
 const VALID_INTENTS: ReadonlySet<string> = new Set(['investigate', 'proposeFix', 'verify', 'conclude']);
 const VALID_NEXT_ACTIONS: ReadonlySet<string> = new Set([
@@ -108,6 +109,13 @@ export function parseCognitiveDecision(raw: unknown): CognitiveDecision | null {
     return null;
   }
   finalAnswer = isNonEmptyString(raw.finalAnswer) ? raw.finalAnswer : undefined;
+  // Evidence is optional and advisory here; grounding is checked later
+  // against the real observations. Malformed evidence is dropped, not trusted.
+  const evidence = Array.isArray(raw.evidence) &&
+    raw.evidence.length <= MAX_EVIDENCE_EXCERPTS &&
+    raw.evidence.every((excerpt) => typeof excerpt === 'string' && excerpt.trim() !== '' && excerpt.length <= MAX_EVIDENCE_EXCERPT_CHARS)
+    ? (raw.evidence as string[]).slice()
+    : undefined;
 
   const decision: CognitiveDecision = {
     intent: intent as CognitiveIntent,
@@ -121,6 +129,7 @@ export function parseCognitiveDecision(raw: unknown): CognitiveDecision | null {
     ...(toolId === undefined ? {} : { toolId }),
     ...(toolArguments === undefined ? {} : { toolArguments }),
     ...(finalAnswer === undefined ? {} : { finalAnswer }),
+    ...(evidence === undefined || evidence.length === 0 ? {} : { evidence }),
   };
 
   return Object.freeze(decision);

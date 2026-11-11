@@ -611,3 +611,21 @@ test('Gemini conversation payload carries remembered facts only when provided', 
   assert.equal(bodies[0]?.includes('\\"relevantFacts\\"'), true);
   assert.equal(bodies[1]?.includes('\\"relevantFacts\\"'), false);
 });
+
+test('SPEC-053: token usage reported by Gemini is logged as numbers only', async () => {
+  const lines: Array<{ readonly message: string; readonly metadata?: Record<string, unknown> }> = [];
+  const record = (message: string, metadata?: Record<string, unknown>) => { lines.push({ message, ...(metadata === undefined ? {} : { metadata }) }); };
+  const gemini = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY, model: 'gemini-test',
+    logger: { debug: record, info: record, warn: record, error: record },
+    fetchImpl: async () => response(200, JSON.stringify({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ answer: 'Olá.' }) }] } }],
+      usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 8, totalTokenCount: 128 },
+    })),
+  });
+  await gemini.respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  const completed = lines.find((line) => line.message === 'Remote cognitive request completed.');
+  assert.equal(completed?.metadata?.promptTokens, 120);
+  assert.equal(completed?.metadata?.outputTokens, 8);
+  assert.equal(completed?.metadata?.totalTokens, 128);
+});

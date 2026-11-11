@@ -15,14 +15,19 @@ test('controlled GitHub write flow only targets a task branch and never main', a
   const calls: Array<{ url: string; init: Readonly<Record<string, unknown>> }> = [];
   const tool = new GitHubControlledWriteTool('secret', registry, async (url, init) => {
     calls.push({ url, init });
-    const body = url.includes('/git/ref/heads/') ? { object: { sha: 'abc' } } : {};
+    // A real contents PUT returns the commit; the tool never reports a write
+    // without that confirmed commit SHA (commit 3147525).
+    const body = url.includes('/git/ref/heads/') ? { object: { sha: 'abc' } }
+      : url.includes('/contents/') && init.method === 'PUT' ? { commit: { sha: 'def4567890' } } : {};
     return { ok: true, status: 200, text: async () => JSON.stringify(body) };
   });
   assert.equal((await outcome(tool, GITHUB_CREATE_BRANCH_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/visual-small-change' }))?.outcome, 'ok');
   assert.equal((await outcome(tool, GITHUB_UPSERT_FILE_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/visual-small-change', path: 'public/style.css', content: 'x', message: 'style: small visual change' }))?.outcome, 'ok');
   assert.equal((await outcome(tool, GITHUB_OPEN_PULL_REQUEST_TOOL_ID, { projectId: 'lumarkis-financeiro', branch: 'sebastian/visual-small-change', title: 'Visual small change' }))?.outcome, 'ok');
   assert.equal(calls.some((call) => call.url.includes('/git/refs') && JSON.stringify(call.init).includes('refs/heads/main')), false);
-  assert.equal(calls.some((call) => call.url.includes('/pulls') && JSON.stringify(call.init).includes('"base":"main"')), true);
+  // The request body is already a JSON string; inspect it parsed, not re-stringified.
+  assert.equal(calls.some((call) => call.url.includes('/pulls') && (JSON.parse(String(call.init.body)) as { base?: unknown }).base === 'main'), true);
+  assert.equal(calls.some((call) => call.url.includes('/git/refs') && (JSON.parse(String(call.init.body)) as { ref?: unknown }).ref === 'refs/heads/sebastian/visual-small-change'), true);
 });
 
 test('controlled GitHub write flow rejects main and protected files before network access', async () => {

@@ -4,6 +4,7 @@ import {
   PENDING_OPERATION_TTL_MS,
   type PendingOperationRecord,
 } from '../memory/index.js';
+import { groundingFailure } from './EvidenceGrounding.js';
 import type { Logger } from '../logger.js';
 import type {
   CognitiveDecisionRequest,
@@ -22,7 +23,13 @@ export const MAX_OPERATIONAL_DECISIONS = 4;
 export const NO_LOCAL_VALIDATION_TOOL_ID = 'none.targetProjectNotValidated';
 /** Extra `decide` calls the loop may spend recovering from a provider timeout (see `execute`). */
 export const MAX_OPERATIONAL_DECIDE_TIMEOUT_RETRIES = 1;
-const MAX_OBSERVATION_CHARS = 2_000;
+const MAX_OBSERVATION_CHARS = 6_000;
+/**
+ * SPEC-053: soft deadline for the decision loop. Hostinger's proxy cuts a
+ * request at ~30 s; once this elapses with evidence in hand the loop stops
+ * deciding and answers from that evidence.
+ */
+export const OPERATIONAL_SOFT_DEADLINE_MS = 18_000;
 
 export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
   readonly requiredStringArguments: readonly string[];
@@ -339,7 +346,13 @@ export class CognitiveOperationalOrchestrator {
     // `unavailable`/`invalidResponse`). If the retry also fails, the run still
     // ends as `unavailable` exactly as before - the failure is not masked.
     let timeoutRetryAvailable = true;
+    const loopStartedAt = Date.now();
+    let deadlineReached = false;
     for (let attempt = 0; attempt < this.maxDecisions; attempt += 1) {
+      if (attempt > 0 && Date.now() - loopStartedAt > OPERATIONAL_SOFT_DEADLINE_MS && observations.some((observation) => observation.outcome === 'ok')) {
+        deadlineReached = true;
+        break;
+      }
       let result;
       try {
         const decisionRequest = this.request(objective, context.requestedAt, [...observations, ...corrections], context.relevantMemory ?? [], context.signal, argumentRetryToolId);
@@ -367,10 +380,22 @@ export class CognitiveOperationalOrchestrator {
       const decision = result.decision;
       if (decision.nextAction === 'concludeCompleted') {
         this.logStep(attempt, { nextAction: decision.nextAction, toolId: undefined, toolInvoked: false, toolOutcome: undefined }, toolCalls);
-        const successfulObservations = observations.filter((observation) => observation.outcome === 'ok');
-        if (successfulObservations.length > 0 && successfulObservations.length === observations.length) {
-          const evidenceFallback = successfulObservations.map((observation) => observation.summary).join('\n');
-          const answer = await this.synthesizeOrFallback(objective, context, successfulObservations, evidenceFallback);
+        if (observations.some((observation) => observation.outcome === 'ok')) {
+          const answer = await this.answerFromEvidence(objective, context, observations, decision);
+          return this.finish({ outcome: 'answered', answer, toolCalls });
+        }
+        // SPEC-053: every Tool attempt failed or was rejected. The model's
+        // conclusion is shown only when grounded in those real Tool messages;
+        // otherwise the Tool messages themselves are the honest answer (in a
+        // test the model "summarised" a file it never managed to read).
+        // Observations added only by the deterministic recovery (a Tool the
+        // model never asked for) do not invalidate the model's own answer.
+        if (observations.some((observation) => observation.stepId !== 'operational:deterministic')) {
+          const failure = decision.finalAnswer === undefined ? 'missingEvidence' : groundingFailure(decision.evidence, observations.map((observation) => observation.summary));
+          this.logger?.info('Cognitive operational conclusion after failed Tools resolved.', { grounded: failure === undefined });
+          const answer = failure === undefined
+            ? decision.finalAnswer!.trim()
+            : `Não posso confirmar isso com evidência. Resultado da consulta: ${observations.map((observation) => observation.summary).join(' ').slice(0, 600).trim()}`;
           return this.finish({ outcome: 'answered', answer, toolCalls });
         }
         // A conclusion with literally zero attempts, while a real capability
@@ -494,6 +519,13 @@ export class CognitiveOperationalOrchestrator {
       this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: true, toolOutcome }, toolCalls);
     }
 
+    // SPEC-053: the budget (or the soft deadline) ran out while evidence was
+    // already gathered - answer from it instead of discarding it.
+    if (observations.some((observation) => observation.outcome === 'ok')) {
+      this.logger?.info('Cognitive operational loop stopped; answering from gathered evidence.', { toolCalls, reason: deadlineReached ? 'softDeadline' : 'budget' });
+      const answer = await this.answerFromEvidence(objective, context, observations, undefined);
+      return this.finish({ outcome: 'answered', answer, toolCalls });
+    }
     return this.finish({ outcome: 'blocked', reason: 'cognitiveBudgetExceeded', toolCalls });
   }
 
@@ -621,6 +653,36 @@ export class CognitiveOperationalOrchestrator {
   private findUniqueCapabilityMatchRoute(objective: string): OperationalToolPolicyEntry | undefined {
     const candidates = this.catalog.filter((entry) => entry.deterministicIntent !== undefined && this.termOverlap(entry, objective));
     return candidates.length === 1 ? candidates[0] : undefined;
+  }
+
+  /**
+   * SPEC-053: one grounded answer from the gathered observations. The model's
+   * own concluding answer is used directly when its evidence excerpts are all
+   * found in the observations (saving the synthesis call); otherwise synthesis
+   * is the second, independent grounded attempt; the raw evidence is the last
+   * resort. An ungrounded concluding answer is never shown.
+   */
+  private async answerFromEvidence(
+    objective: string,
+    context: { readonly requestedAt: string; readonly signal?: AbortSignal },
+    observations: readonly CognitiveObservationRecord[],
+    decision: { readonly finalAnswer?: string; readonly evidence?: readonly string[] } | undefined,
+  ): Promise<string> {
+    const summaries = observations.map((observation) => observation.summary);
+    if (decision?.finalAnswer !== undefined) {
+      const failure = groundingFailure(decision.evidence, summaries);
+      if (failure === undefined) {
+        this.logger?.info('Cognitive operational synthesis completed.', { outcome: 'groundedDecision', fallbackUsed: false });
+        return decision.finalAnswer.trim();
+      }
+      this.logger?.info('Cognitive operational decision answer not grounded.', { reason: failure });
+    }
+    const rawEvidence = observations.filter((observation) => observation.outcome === 'ok').map((observation) => observation.summary).join('\n');
+    // Last resort: real data, but labelled and bounded instead of a raw dump.
+    const evidenceFallback = rawEvidence.length <= 900
+      ? rawEvidence
+      : `Consultei a fonte, mas não consegui produzir um resumo verificável agora. Trecho inicial do que foi observado:\n${rawEvidence.slice(0, 900).trimEnd()}…`;
+    return this.synthesizeOrFallback(objective, context, observations, evidenceFallback);
   }
 
   private async synthesizeOrFallback(

@@ -65,6 +65,9 @@ export class ProjectConversationContext {
   }
 
   public async handle(conversationId: string, text: string, executionId: string, at: string): Promise<ProjectReply | undefined> {
+    // SPEC-053: with no registered project there is nothing to select or
+    // identify; local workspace answers (CLI) must not be intercepted.
+    if (this.registry.listDescriptors().length === 0) return undefined;
     const query = normalize(text).replace(/^sebastian\s*[, :]\s*/, '');
     // Both `select` and the loose preposition match below are read only from
     // the message's first clause (up to its first sentence break or line
@@ -109,13 +112,18 @@ export class ProjectConversationContext {
     // selection actually happened this turn; a steady-state message (no new
     // selection at all) is handled by `taskConnectionPending` below on its
     // own, unconditionally.
-    const newSelectionThisTurn = reference !== undefined || direct !== undefined;
+    const newSelectionThisTurn = direct !== undefined || (reference !== undefined && this.registry.resolve(reference) !== undefined);
     const hasRemainderThisTurn =
       newSelectionThisTurn && (namedTarget !== undefined || boundedFirstClause !== firstClause || query.length > firstClause.length);
     let active = await this.active(conversationId);
-    if (reference !== undefined || direct) {
-      const target = direct ?? this.registry.resolve(reference!);
-      if (!target) return { project: active, message: 'Projeto desconhecido ou ambíguo. Indique um único nome cadastrado: ' + this.registry.listDescriptors().map(item => item.displayName).join(', ') + '. A seleção anterior não foi alterada.', ...(select ? {} : { deferrable: true }) };
+    // SPEC-053: an unresolved LOOSE mention ("...no pendencias.md", "...do
+    // GitHub você acessa?") is not a selection attempt at all - only an
+    // explicit command ("use o X") naming an unknown project is refused.
+    const target = reference !== undefined || direct ? direct ?? this.registry.resolve(reference!) : undefined;
+    if ((reference !== undefined || direct) && !target && select) {
+      return { project: active, message: 'Projeto desconhecido ou ambíguo. Indique um único nome cadastrado: ' + this.registry.listDescriptors().map(item => item.displayName).join(', ') + '. A seleção anterior não foi alterada.' };
+    }
+    if (target) {
       // Persist identity before policy loading: failure must never leave the previous project's rules active.
       await this.store.writeRecord(SELECTIONS, conversationId, { conversationId, projectId: target.id, policyStatus: 'unavailable', selectedAt: at });
       active = (await this.active(conversationId));

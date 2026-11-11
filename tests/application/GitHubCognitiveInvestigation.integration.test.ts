@@ -225,7 +225,8 @@ test('the online composition exposes GitHub read-only tools only when configured
   await appWithGitHub.executeCommand(input('Explique algo geral.', 60));
 
   assert.deepEqual(toolIdsWithGitHub.filter((id) => id.startsWith('github.')), [
-    GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_TREE_TOOL_ID, GITHUB_READ_FILE_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID, GITHUB_COMPARE_BRANCH_TOOL_ID,
+    // github.listProjects (commit 7e7eae5) is read-only and takes no argument.
+    'github.listProjects', GITHUB_GET_PROJECT_TOOL_ID, GITHUB_LIST_TREE_TOOL_ID, GITHUB_READ_FILE_TOOL_ID, GITHUB_LIST_COMMITS_TOOL_ID, GITHUB_COMPARE_BRANCH_TOOL_ID,
   ]);
   assert.equal(toolIdsWithGitHub.some((id) => /write|replace|shell|deploy/i.test(id)), false);
 

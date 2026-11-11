@@ -1,5 +1,6 @@
 import { InvalidCognitiveModelProviderInputError } from './CognitiveModelProviderErrors.js';
 import { parseCognitiveDecision } from './CognitiveDecisionValidator.js';
+import { MAX_EVIDENCE_EXCERPTS, groundingFailure as evidenceGroundingFailure, normalizedIncludes } from './EvidenceGrounding.js';
 import type {
   CognitiveClassificationCategory,
   CognitiveClassificationRequest,
@@ -37,7 +38,7 @@ export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 20_000;
  * actually asked for (a quantity, a subset, an order, a format). It gets its
  * own generous default for the same reason `respond` already has one.
  */
-export const DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS = 20_000;
+export const DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS = 10_000;
 /**
  * `classify` (Etapa 4) is a single, small routing decision - closer in shape
  * and latency to `decide` than to `respond`/`synthesize`, so it shares
@@ -75,6 +76,20 @@ interface GeminiTechnicalDiagnostic {
   readonly durationMs: number;
   readonly httpStatus?: number;
   readonly errorCategory?: string;
+  /** SPEC-053: token counts reported by Gemini (`usageMetadata`), for real cost measurement. Numbers only. */
+  readonly usage?: { readonly promptTokens?: number; readonly outputTokens?: number; readonly thoughtTokens?: number; readonly totalTokens?: number };
+}
+
+function extractGeminiUsage(body: unknown): GeminiTechnicalDiagnostic['usage'] {
+  const metadata = body && typeof body === 'object' && !Array.isArray(body) ? (body as { readonly usageMetadata?: Record<string, unknown> }).usageMetadata : undefined;
+  if (!metadata || typeof metadata !== 'object') return undefined;
+  const usage: { promptTokens?: number; outputTokens?: number; thoughtTokens?: number; totalTokens?: number } = {};
+  const fields = [['promptTokenCount', 'promptTokens'], ['candidatesTokenCount', 'outputTokens'], ['thoughtsTokenCount', 'thoughtTokens'], ['totalTokenCount', 'totalTokens']] as const;
+  for (const [source, target] of fields) {
+    const value = metadata[source];
+    if (typeof value === 'number' && Number.isFinite(value)) usage[target] = value;
+  }
+  return Object.keys(usage).length === 0 ? undefined : usage;
 }
 
 type GeminiStructuredResult =
@@ -135,6 +150,7 @@ const DECISION_SCHEMA = Object.freeze({
     },
     confidence: { type: 'number', minimum: 0, maximum: 1 },
     finalAnswer: { type: 'string' },
+    evidence: { type: 'array', items: { type: 'string' }, maxItems: MAX_EVIDENCE_EXCERPTS },
   },
   required: [
     'intent',
@@ -204,25 +220,7 @@ export function selectToolArguments(raw: unknown): unknown {
   return picked && typeof picked === 'object' && !Array.isArray(picked) ? { ...rest, toolArguments: picked } : rest;
 }
 
-/**
- * Formatting-insensitive containment (SPEC-052): an excerpt still has to be
- * the observed words, in order; only case, whitespace, Markdown markers
- * (* _ ` # | >) and typographic quotes are ignored. A long Markdown document
- * quoted without its table pipes or bold markers is therefore still grounded,
- * while a paraphrase is not.
- */
-export function normalizedIncludes(haystack: string, needle: string): boolean {
-  const collapse = (value: string): string => value
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[\u201c\u201d\u201e\u00ab\u00bb]/g, '"')
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[*_`#|>]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const target = collapse(needle);
-  return target.length >= 3 && collapse(haystack).includes(target);
-}
+export { normalizedIncludes } from './EvidenceGrounding.js';
 
 const CONVERSATION_SYSTEM_INSTRUCTION =
   'Você é Sebastian, um assistente pessoal generalista com personalidade estável: direto, atento, natural, bem-humorado quando cabe e preciso quando importa. Use conhecimento geral e raciocínio para responder, explicar, comparar, resumir, escrever, revisar e planejar de forma útil e segura. ' +
@@ -246,6 +244,8 @@ const DECISION_SYSTEM_INSTRUCTION =
   'Use somente toolIds presentes em availableTools. Nunca conceda autorização, invente Tool ou alegue ter executado uma ação. ' +
   'Argumentos: quando o schema tiver toolArgumentsByTool, preencha SOMENTE a entrada da ferramenta escolhida (a chave é o toolId com "." trocado por "_", por exemplo github_readFile) com os nomes de requiredArguments dela; quando o schema tiver apenas toolArguments, preencha-o. Nunca use argumentos de outra ferramenta nem invente nomes. Para listar a raiz de um repositório, use path "". ' +
   'Se recentObservations trouxer uma recusa de argumentos ou de ferramenta, corrija a decisão em vez de desistir. ' +
+  'Ao concluir depois de observar evidências, responda em finalAnswer de forma direta e completa ao que foi pedido (resuma e explique, não copie a observação inteira) e preencha evidence com 1 a 4 trechos curtos copiados LITERALMENTE de recentObservations que sustentem a resposta; nunca escreva em evidence algo que não esteja nas observações. Não afirme nada que as observações não sustentem. ' +
+  'Assim que as observações bastarem para responder, conclua (concludeCompleted) em vez de continuar explorando. ' +
   'Você não grava memória permanente; nunca afirme ter registrado, anotado, salvo, guardado ou memorizado uma informação. ' +
   'Se availableTools incluir ferramentas com prefixo "github.", você TEM acesso real ao repositório configurado através delas - nunca alegue não ter acesso ao GitHub ou à internet nesse caso; invoque a ferramenta adequada ao pedido (por exemplo, github.listCommits para commits recentes, github.readFile para ler um arquivo, github.getProject para identificar o projeto) e responda com base na observação retornada, nunca com uma recusa genérica. ' +
   'Para conversar ou responder diretamente sem ação, use concludeCompleted e forneça uma finalAnswer natural, útil e adequada ao contexto. Para finalizar após observar evidência, faça o mesmo apoiado na evidência. ' +
@@ -691,7 +691,8 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
           ...this.diagnostic(startedAt, response.status, 'missingStructuredContent'),
         };
       }
-      return { outcome: 'generated', content: content.trim(), ...this.diagnostic(startedAt, response.status) };
+      const usage = extractGeminiUsage(body);
+      return { outcome: 'generated', content: content.trim(), ...this.diagnostic(startedAt, response.status), ...(usage === undefined ? {} : { usage }) };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
         return { outcome: 'timeout', ...this.diagnostic(startedAt, undefined, 'timeout') };
@@ -736,6 +737,7 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       durationMs: diagnostic.durationMs,
       ...(diagnostic.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }),
       ...(errorCategory === undefined ? {} : { errorCategory }),
+      ...(diagnostic.usage === undefined ? {} : diagnostic.usage),
     };
     const message = 'Remote cognitive request completed.';
     if (outcome === 'responded') {
