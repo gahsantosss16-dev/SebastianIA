@@ -90,7 +90,7 @@ const OPERATIONAL_ATTEMPT_INCOMPLETE_ANSWER = 'Não consegui concluir essa consu
  * conversational fallback must not answer it: in production it invented the
  * author of a commit ("feita por mim, Sebastian") after a 429.
  */
-const OPERATIONAL_UNAVAILABLE_ANSWER = 'Não consegui consultar o projeto agora: o serviço cognitivo está indisponível ou no limite de uso. Para não responder sem evidência, não vou afirmar nada sobre o projeto; tente novamente em instantes.';
+const OPERATIONAL_UNAVAILABLE_ANSWER = 'Não consegui consultar as ferramentas agora: o serviço cognitivo está indisponível ou no limite de uso. Para não responder sem evidência, não vou afirmar nada a respeito; tente novamente em instantes.';
 
 interface DevelopmentTaskOrchestratorLike {
   execute(plan: DevelopmentTaskPlan, context: DevelopmentTaskExecutionContext): DevelopmentTaskResult;

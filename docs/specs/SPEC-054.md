@@ -12,5 +12,7 @@
 
 4. **Arquivos lidos declarados**: depois de uma listagem, a resposta termina com "Arquivos lidos nesta consulta: …", gerado das chamadas reais de ferramenta; e o modelo não pode atribuir um comportamento ao projeto inteiro sem ter lido todos os candidatos (A7 respondeu a partir de 2 de 8 workflows).
 
+5. **Correção posterior (reforço desligado)**: na bateria real o reforço resgatou 9 de 25 chamadas lentas, mas em 15 as duas cópias travaram juntas e a carga extra coincidiu com HTTP 429. O reforço fica desligado por padrão (`DEFAULT_GEMINI_HEDGE_DELAY_MS = 0`), com o código preservado. Logs passam a separar `timeout` (provedor), `cancelled` (prazo do próprio Sebastian), `rateLimit` (HTTP 429), `serverError` e `networkError`. A mensagem de indisponibilidade não menciona projeto.
+
 ## Preservado
 Gemini `gemini-3.1-flash-lite`, guardas de escrita, autorização explícita, memória no Supabase, prazos e ancoragem da SPEC-053.

@@ -39,8 +39,14 @@ export const DEFAULT_GEMINI_RESPOND_TIMEOUT_MS = 12_000;
  * own generous default for the same reason `respond` already has one.
  */
 export const DEFAULT_GEMINI_SYNTHESIZE_TIMEOUT_MS = 10_000;
-/** SPEC-054: hedge after ~p75-p90 of answered calls (2.2 s p50 / 5.4 s p90 in production). */
-export const DEFAULT_GEMINI_HEDGE_DELAY_MS = 4_000;
+/**
+ * SPEC-054: hedging is OFF by default (0). In production the duplicate call
+ * rescued 9 of 25 slow calls, but in 15 both copies stalled together and the
+ * extra load coincided with HTTP 429 - the stalls are provider-side and
+ * correlated, so doubling calls does not fix them. The code is kept; enable
+ * explicitly via `hedgeDelayMs` (e.g. 4000) only with evidence it helps.
+ */
+export const DEFAULT_GEMINI_HEDGE_DELAY_MS = 0;
 /** The duplicate call needs at least this much of the timeout left to be worth sending. */
 const MIN_GEMINI_HEDGE_WINDOW_MS = 2_500;
 /**
@@ -770,7 +776,9 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
       return { outcome: 'generated', content: content.trim(), ...this.diagnostic(startedAt, response.status), ...(usage === undefined ? {} : { usage }) };
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        return { outcome: 'timeout', ...this.diagnostic(startedAt, undefined, 'timeout') };
+        // SPEC-054: our own request budget/caller cancellation is not a
+        // provider timeout - logged as "cancelled" so the two never mix.
+        return { outcome: 'timeout', ...this.diagnostic(startedAt, undefined, externalSignal?.aborted === true ? 'cancelled' : 'timeout') };
       }
       return {
         outcome: 'unavailable',

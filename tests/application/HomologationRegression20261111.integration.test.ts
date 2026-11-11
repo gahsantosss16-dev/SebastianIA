@@ -381,7 +381,8 @@ test('SPEC-052: with Gemini rate-limited (429) and a project active, Sebastian s
     await send('Use o LUMARKIS');
     const outcome = await send(TEST_A[8]!.text); // A9
     assert.doesNotMatch(outcome.answer, /por mim|Sebastian\./);
-    assert.match(outcome.answer, /não vou afirmar nada sobre o projeto/);
+    assert.match(outcome.answer, /não vou afirmar nada a respeito/);
+    assert.doesNotMatch(outcome.answer, /projeto/, 'the limitation message must fit general questions too');
     assert.equal(respondCalls, 0, 'the tool-less conversational path is never consulted for project facts');
   } finally { close(); }
 });

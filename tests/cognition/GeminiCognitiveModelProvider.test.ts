@@ -670,3 +670,29 @@ test('SPEC-054: when both calls stall the timeout is reported honestly, never ma
   assert.equal(result.outcome, 'timeout');
   assert.equal(calls, 2);
 });
+
+test('SPEC-054: hedging is off by default - a slow call is never duplicated', async () => {
+  let calls = 0;
+  const gemini = new GeminiCognitiveModelProvider({
+    apiKey: API_KEY, model: MODEL, respondTimeoutMs: 300,
+    fetchImpl: async (_url, init) => { calls += 1; return hanging(init); },
+  });
+  const result = await gemini.respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  assert.equal(result.outcome, 'timeout');
+  assert.equal(calls, 1);
+});
+
+test('SPEC-054: logs tell a provider timeout, our own cancellation and HTTP 429 apart, without secrets', async () => {
+  const lines: Array<{ readonly message: string; readonly metadata?: Record<string, unknown> }> = [];
+  const record = (message: string, metadata?: Record<string, unknown>) => { lines.push({ message, ...(metadata === undefined ? {} : { metadata }) }); };
+  const logger = { debug: record, info: record, warn: record, error: record };
+  const make = (fetchImpl: FetchHandler, respondTimeoutMs = 300) => new GeminiCognitiveModelProvider({ apiKey: API_KEY, model: MODEL, respondTimeoutMs, logger, fetchImpl });
+  await make(async (_url, init) => hanging(init)).respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 50);
+  await make(async (_url, init) => hanging(init), 5_000).respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z', signal: controller.signal });
+  await make(async () => response(429, '{"error":{"message":"quota"}}')).respond({ text: 'oi', requestedAt: '2026-11-11T00:00:00.000Z' });
+  const categories = lines.filter((line) => line.message === 'Remote cognitive request completed.').map((line) => line.metadata?.errorCategory);
+  assert.deepEqual(categories, ['timeout', 'cancelled', 'rateLimit']);
+  assert.equal(JSON.stringify(lines).includes(API_KEY), false);
+});
