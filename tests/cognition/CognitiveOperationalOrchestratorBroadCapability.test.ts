@@ -169,3 +169,23 @@ test('SPEC-053: the recovery path never inspects the local checkout by keyword (
   await orchestrator.execute('No LUMARKIS, cria uma branch de teste isolada.', { executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z' });
   assert.deepEqual(tool.invoked, []);
 });
+
+test('SPEC-053: with the model unavailable, a fallback route for another project than the active one is never used', async () => {
+  const fileRoute = (projectId: string, alias: RegExp): OperationalToolPolicyEntry => ({
+    toolId: 'github.readFile', description: 'Lê um arquivo do projeto GitHub autorizado.', requiresAuthorization: false, requiredStringArguments: ['projectId', 'path'],
+    deterministicIntent: {
+      pattern: new RegExp(`(?=.*${alias.source})(?=.*docs/teste\\.md)`, 'iu'),
+      buildArguments: () => ({ projectId, path: 'docs/teste.md' }),
+      answerFromRejectedObservation: (observation: { readonly summary: string }) => `Não consegui ler: ${observation.summary}`,
+    },
+  });
+  const catalog = [fileRoute('sebastiania', /sebastian/), fileRoute('lumarkis-financeiro', /lumarkis/)];
+  const payloads: Array<Readonly<Record<string, unknown>>> = [];
+  const tool: SpecializedTool = { invoke(input) { payloads.push(input.payload); return { status: 'completed', output: { outcome: 'rejected', message: 'não encontrado' } } as unknown as SpecializedToolInvocationResult; } };
+  const orchestrator = new CognitiveOperationalOrchestrator(tool, { decide: async () => ({ outcome: 'timeout' }) }, catalog);
+  const result = await orchestrator.execute('Sebastian, no LUMARKIS, cria docs/teste.md com o texto oi.', {
+    executionId: 'e', responsibilityId: 'r', requestedAt: '2026-11-11T00:00:00.000Z', activeProjectId: 'lumarkis-financeiro',
+  });
+  assert.deepEqual(payloads.map((payload) => payload.projectId), ['lumarkis-financeiro']);
+  assert.match(result.outcome === 'answered' ? result.answer : '', /^Não consegui ler: não encontrado/);
+});

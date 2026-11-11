@@ -569,19 +569,28 @@ export class CognitiveOperationalOrchestrator {
 
   private async applyDeterministicIntentRoute(
     objective: string,
-    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string },
+    context: { readonly executionId: string; readonly responsibilityId: string; readonly requestedAt: string; readonly relevantMemory?: readonly { readonly content: string }[]; readonly immediateContext?: string; readonly activeProjectId?: string },
     observations: CognitiveObservationRecord[],
     options: { readonly observationOnly?: boolean } = {},
   ): Promise<{ readonly toolCalls: number; readonly answer?: string }> {
     const primaryContext = context.immediateContext;
+    // SPEC-053: a route bound to another project than the active one is never
+    // used (production: "Sebastian, no LUMARKIS ..." matched the SebastianIA
+    // file route through the alias "Sebastian").
+    const consistentWithActiveProject = (entry: OperationalToolPolicyEntry): boolean => {
+      if (context.activeProjectId === undefined || !entry.deterministicIntent) return true;
+      const projectId = entry.deterministicIntent.buildArguments(objective).projectId;
+      return typeof projectId !== 'string' || projectId === context.activeProjectId;
+    };
     const route = this.catalog.find((entry) => {
       const deterministic = entry.deterministicIntent;
       if (!deterministic) return false;
+      if (!consistentWithActiveProject(entry)) return false;
       if (deterministic.pattern.test(objective)) return true;
       return primaryContext !== undefined &&
         deterministic.immediateContext?.objectivePattern.test(objective) === true &&
         deterministic.immediateContext.contextPattern.test(primaryContext) === true;
-    }) ?? this.findUniqueCapabilityMatchRoute(objective);
+    }) ?? [this.findUniqueCapabilityMatchRoute(objective)].find((entry) => entry !== undefined && consistentWithActiveProject(entry));
     if (!route?.deterministicIntent) {
       return { toolCalls: 0 };
     }

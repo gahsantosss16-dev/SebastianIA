@@ -250,7 +250,7 @@ const DECISION_SYSTEM_INSTRUCTION =
   'Se availableTools incluir ferramentas com prefixo "github.", você TEM acesso real ao repositório configurado através delas - nunca alegue não ter acesso ao GitHub ou à internet nesse caso; invoque a ferramenta adequada ao pedido (por exemplo, github.listCommits para commits recentes, github.readFile para ler um arquivo, github.getProject para identificar o projeto) e responda com base na observação retornada, nunca com uma recusa genérica. ' +
   'Para conversar ou responder diretamente sem ação, use concludeCompleted e forneça uma finalAnswer natural, útil e adequada ao contexto. Para finalizar após observar evidência, faça o mesmo apoiado na evidência. ' +
   'Se uma alteração for necessária mas não estiver autorizada/disponível, explique isso em finalAnswer sem executá-la. ' +
-  'authorization "readOnly" significa apenas que você não executa escrita diretamente. Se o usuário pedir uma alteração e availableTools tiver uma ferramenta com requiresAuthorization=true adequada ao projeto e à branch pedidos, invoque-a: o sistema transforma isso numa proposta e só executa após a autorização explícita do usuário. Nunca recuse uma alteração permitida alegando ser somente leitura; recuse apenas o que nenhuma ferramenta permite (outro projeto, a branch principal, arquivos sensíveis). ' +
+  'authorization "proposalRequiredForWrites" significa que você não executa escrita diretamente. Se o usuário pedir uma alteração e availableTools tiver uma ferramenta com requiresAuthorization=true adequada ao projeto e à branch pedidos, invoque-a: o sistema transforma isso numa proposta e só executa após a autorização explícita do usuário. Nunca recuse uma alteração permitida alegando ser somente leitura; recuse apenas o que nenhuma ferramenta permite (outro projeto, a branch principal, arquivos sensíveis). ' +
   'Se availableTools incluir "knowledge.search", use-a para consultar documentação, normas ou referências técnicas quando o objetivo pedir conhecimento documentado; mas se o objetivo for sobre o estado atual DESTE projeto (código, configuração, arquitetura) e uma ferramenta real de inspeção (com prefixo "git.", "fs." ou "github.") também estiver disponível, invoque-a antes de concluir apenas com base em knowledge.search - nunca alegue como fato do projeto algo que só veio de uma referência. ' +
   'Retorne somente o objeto JSON solicitado e uma reasoningSummary curta, nunca raciocínio detalhado.';
 
@@ -411,7 +411,10 @@ export class GeminiCognitiveModelProvider implements CognitiveModelProvider {
     // bounded catalog and bounded summaries; neither grants authority.
     const safeRequest = {
       objective: request.objective,
-      authorization: request.authorization,
+      // SPEC-053: "readOnly" made the model refuse permitted changes ("minha
+      // autorização é readOnly"). What actually holds: nothing is written
+      // directly; write Tools become proposals the user must authorize.
+      authorization: request.authorization === 'readOnly' ? 'proposalRequiredForWrites' : request.authorization,
       relevantMemory: request.relevantMemory,
       recentObservations: request.recentObservations,
       availableTools: request.availableTools,
