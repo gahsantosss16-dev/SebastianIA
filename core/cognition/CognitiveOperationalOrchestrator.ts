@@ -403,6 +403,13 @@ export class CognitiveOperationalOrchestrator {
         : decision.toolArguments ?? {};
       if (!this.argumentsMatchPolicy(policy, args)) {
         this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined, rejectedReason: 'cognitiveInvalidToolArguments' }, toolCalls);
+        // Structural diagnostic only: argument names and JS types, never values.
+        this.logger?.info('Cognitive operational arguments rejected.', {
+          toolId: policy.toolId,
+          argumentTypes: Object.fromEntries(Object.keys(args).sort().map((name) => [name, Array.isArray(args[name]) ? 'array' : args[name] === null ? 'null' : typeof args[name]])),
+          emptyStringArguments: Object.keys(args).filter((name) => args[name] === '').sort(),
+          requiredArguments: policy.requiredStringArguments,
+        });
         if (attempt < this.maxDecisions - 1) {
           const optional = [...(policy.optionalStringArguments ?? []), ...(policy.optionalNumberArguments ?? [])];
           corrections.push({
