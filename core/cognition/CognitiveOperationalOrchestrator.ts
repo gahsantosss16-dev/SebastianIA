@@ -34,6 +34,12 @@ export const OPERATIONAL_SOFT_DEADLINE_MS = 18_000;
 export interface OperationalToolPolicyEntry extends CognitiveToolDescriptor {
   readonly requiredStringArguments: readonly string[];
   /**
+   * SPEC-053: closed set of accepted values for a string argument (e.g. the
+   * only projectId a write Tool may target). A decision outside it is refused
+   * honestly before any proposal or authorization prompt is created.
+   */
+  readonly allowedArgumentValues?: Readonly<Record<string, readonly string[]>>;
+  /**
    * Small, typed, backward-compatible extension: operation-only integer
    * knobs (e.g. a result-count `limit`) a deterministic route - or, if it
    * chooses to, the model itself via `decide` - may supply alongside the
@@ -477,6 +483,16 @@ export class CognitiveOperationalOrchestrator {
           continue;
         }
         return this.finish({ outcome: 'blocked', reason: 'cognitiveInvalidToolArguments', toolCalls });
+      }
+      const disallowed = Object.entries(policy.allowedArgumentValues ?? {})
+        .find(([name, values]) => typeof args[name] === 'string' && !values.some((value) => value.toLowerCase() === (args[name] as string).trim().toLowerCase()));
+      if (disallowed) {
+        this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: false, toolOutcome: undefined, rejectedReason: 'argumentValueNotAllowed' }, toolCalls);
+        return this.finish({
+          outcome: 'answered',
+          answer: `Não posso fazer isso: ${policy.toolId} não é permitido para ${disallowed[0]} "${String(args[disallowed[0]])}". Nada foi proposto nem alterado.`,
+          toolCalls,
+        });
       }
       if (policy.requiresAuthorization) {
         const validationToolId = policy.validationToolId;

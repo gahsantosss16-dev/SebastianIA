@@ -496,3 +496,15 @@ test('SPEC-053: a registered project named anywhere in the request becomes activ
     assert.equal(requests.some((request) => request.url.includes('/neuro-hub-pro/')), false);
   } finally { close(); }
 });
+
+test('SPEC-053: a write request for a project without controlled-write access is refused before any proposal', async () => {
+  const scenario: Scenario = { id: 'S1', text: 'Cria uma branch sebastian/teste-neuro no Neuro Hub Pro.', plan: [{ toolId: 'github.createBranch', args: { projectId: 'neuro-hub-pro', branch: 'sebastian/teste-neuro' } }], answer: '', evidence: [], mustInclude: [/Não posso fazer isso/] };
+  const { send, requests, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.match(outcome.answer, /Não posso fazer isso: github\.createBranch não é permitido para projectId "neuro-hub-pro"/);
+    assert.doesNotMatch(outcome.answer, /Proponho/);
+    assert.match((await send('pode executar')).answer, /Não há nenhuma proposta pendente para executar/);
+    assert.deepEqual(requests.filter((request) => request.method !== 'GET'), []);
+  } finally { close(); }
+});

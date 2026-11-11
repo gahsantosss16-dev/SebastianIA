@@ -314,6 +314,20 @@ export function githubOperationalTools(projects: readonly ProjectDescriptor[]): 
   ];
 }
 
+/**
+ * SPEC-053: write Tools accept only the projects registered with
+ * controlled-write access, and say so in the description the model reads.
+ */
+function withWritableProjects(projects: readonly ProjectDescriptor[], entries: readonly OperationalToolPolicyEntry[]): readonly OperationalToolPolicyEntry[] {
+  const writable = projects.filter((project) => project.permissions.access === 'controlled-write');
+  const names = writable.map((project) => `${project.displayName} (${project.id})`).join(', ') || 'nenhum';
+  return entries.map((entry) => ({
+    ...entry,
+    description: `${entry.description} Permitido somente no projeto ${names}.`,
+    allowedArgumentValues: { projectId: writable.flatMap((project) => [project.id, project.displayName, ...project.aliases]) },
+  }));
+}
+
 export function createOnlineSebastianApplication(
   logger?: Logger,
   cognitiveModelProvider?: CognitiveModelProvider,
@@ -380,11 +394,11 @@ export function createOnlineSebastianApplication(
       // GitHub writes change the remote LUMARKIS project: SebastianIA's own
       // local `validation.test` never covers it, so these report only what
       // GitHub itself confirmed and never claim the target was tested.
-      ...(githubWriteTool === undefined ? [] : [
+      ...(githubWriteTool === undefined ? [] : withWritableProjects(registeredGitHubProjects, [
         { toolId: GITHUB_CREATE_BRANCH_TOOL_ID, description: 'Cria uma branch sebastian/ isolada a partir da branch principal; exige autorização explícita.', requiresAuthorization: true, resultEvidence: 'toolOutcomeOnly' as const, risk: 'cria uma branch remota sem modificar a main', requiredStringArguments: ['projectId', 'branch'], applicabilityTerms: ['branch', 'criar branch', 'alteração'] },
         { toolId: GITHUB_UPSERT_FILE_TOOL_ID, description: 'Cria ou edita um arquivo não sensível em uma branch sebastian/ e registra um commit; exige autorização explícita.', requiresAuthorization: true, resultEvidence: 'toolOutcomeOnly' as const, risk: 'grava arquivo e commit somente em branch de tarefa', requiredStringArguments: ['projectId', 'branch', 'path', 'content', 'message'], applicabilityTerms: ['editar arquivo', 'criar arquivo', 'alteração'] },
         { toolId: GITHUB_OPEN_PULL_REQUEST_TOOL_ID, description: 'Abre pull request de uma branch sebastian/ para revisão; exige autorização explícita.', requiresAuthorization: true, resultEvidence: 'toolOutcomeOnly' as const, risk: 'abre PR sem merge ou deploy', requiredStringArguments: ['projectId', 'branch', 'title'], applicabilityTerms: ['pull request', 'abrir pr'] },
-      ]),
+      ])),
       ...(knowledgeTool === undefined ? [] : knowledgeOperationalTools(knowledgeTool)),
     ],
     ...(dataDir === undefined ? {} : { dataDir }),
