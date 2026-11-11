@@ -32,6 +32,8 @@ export interface CognitiveObservationRecord {
   readonly toolId: string;
   readonly outcome: 'ok' | 'rejected' | 'failed';
   readonly summary: string;
+  /** SPEC-054: the path a file/listing Tool was asked for, used to tell the user what was actually read. */
+  readonly source?: string;
 }
 
 /**

@@ -516,3 +516,12 @@ test('SPEC-053: grounding ignores punctuation but still requires the observed wo
   assert.equal(normalizedIncludes(observed, 'antes da recuperação a main era protótipo'), false);
   assert.equal(normalizedIncludes(observed, 'Recebe Fácil protótipo'), false, 'word order still matters');
 });
+
+test('SPEC-054: an answer built after a listing names exactly the files that were read', async () => {
+  const scenario: Scenario = { ...TEST_A[6]!, id: 'A7-sources', text: 'No LUMARKIS, quando o deploy roda nos workflows do GitHub Actions?', decisionEvidence: ['workflow_dispatch'] };
+  const { send, close } = await session([scenario]);
+  try {
+    const outcome = await send(scenario);
+    assert.match(outcome.answer, /Arquivos lidos nesta consulta: \.github\/workflows\/pages\.yml\.$/);
+  } finally { close(); }
+});

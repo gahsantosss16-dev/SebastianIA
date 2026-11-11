@@ -576,6 +576,7 @@ export class CognitiveOperationalOrchestrator {
         toolId: policy.toolId,
         outcome: toolOutcome,
         summary: message,
+        ...(typeof args.path === 'string' ? { source: args.path } : {}),
       });
       this.logStep(attempt, { nextAction: decision.nextAction, toolId: decision.toolId, toolInvoked: true, toolOutcome }, toolCalls);
     }
@@ -732,6 +733,20 @@ export class CognitiveOperationalOrchestrator {
    * is the second, independent grounded attempt; the raw evidence is the last
    * resort. An ungrounded concluding answer is never shown.
    */
+  /**
+   * SPEC-054: after a listing, the user is told exactly which files were read
+   * (deterministic, from the real Tool calls) - an answer built from 2 of 8
+   * listed workflows can no longer pass as a complete review.
+   */
+  private withReadFiles(answer: string, observations: readonly CognitiveObservationRecord[]): string {
+    const listed = observations.some((observation) => observation.toolId.endsWith('.listTree') && observation.outcome === 'ok');
+    const read = [...new Set(observations
+      .filter((observation) => observation.toolId.endsWith('.readFile') && observation.outcome === 'ok' && observation.source !== undefined)
+      .map((observation) => observation.source as string))];
+    if (!listed || read.length === 0) return answer;
+    return `${answer}\n\nArquivos lidos nesta consulta: ${read.join(', ')}.`;
+  }
+
   private async answerFromEvidence(
     objective: string,
     context: { readonly requestedAt: string; readonly signal?: AbortSignal },
@@ -743,7 +758,7 @@ export class CognitiveOperationalOrchestrator {
       const failure = groundingFailure(decision.evidence, summaries);
       if (failure === undefined) {
         this.logger?.info('Cognitive operational synthesis completed.', { outcome: 'groundedDecision', fallbackUsed: false });
-        return decision.finalAnswer.trim();
+        return this.withReadFiles(decision.finalAnswer.trim(), observations);
       }
       this.logger?.info('Cognitive operational decision answer not grounded.', { reason: failure });
     }
@@ -758,7 +773,7 @@ export class CognitiveOperationalOrchestrator {
     const evidenceFallback = rawEvidence.length <= 900
       ? rawEvidence
       : `Consultei a fonte, mas não consegui produzir um resumo verificável agora. Trecho inicial do que foi observado:\n${rawEvidence.slice(0, 900).trimEnd()}…`;
-    return this.synthesizeOrFallback(synthesisObjective, context, observations, evidenceFallback);
+    return this.withReadFiles(await this.synthesizeOrFallback(synthesisObjective, context, observations, evidenceFallback), observations);
   }
 
   private async synthesizeOrFallback(

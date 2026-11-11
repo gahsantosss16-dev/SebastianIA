@@ -10,5 +10,7 @@
 2. **Orçamento de 6 decisões** (era 4), ainda limitado pelo prazo de 20 s por pedido.
 3. **Instrução**: não concluir pelo nome do arquivo; quando uma listagem trouxer vários candidatos relevantes, ler cada um antes de concluir, ou dizer quais foram lidos.
 
+4. **Arquivos lidos declarados**: depois de uma listagem, a resposta termina com "Arquivos lidos nesta consulta: …", gerado das chamadas reais de ferramenta; e o modelo não pode atribuir um comportamento ao projeto inteiro sem ter lido todos os candidatos (A7 respondeu a partir de 2 de 8 workflows).
+
 ## Preservado
 Gemini `gemini-3.1-flash-lite`, guardas de escrita, autorização explícita, memória no Supabase, prazos e ancoragem da SPEC-053.
